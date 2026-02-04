@@ -1,5 +1,6 @@
 [workspace]
-members = [ "frozen_error",
-    "frozen_file"
+members = [
+    "frozen_error",
+    "frozen_file",
 ]
 resolver = "2"
