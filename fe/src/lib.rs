@@ -23,6 +23,17 @@ impl FrozenError {
             msg: std::borrow::Cow::Owned(msg),
         }
     }
+
+    #[inline]
+    pub fn with_err<E>(code: FrozenErrCode, err: E) -> Self
+    where
+        E: std::fmt::Display,
+    {
+        Self {
+            code,
+            msg: std::borrow::Cow::Owned(err.to_string()),
+        }
+    }
 }
 
 /// Construct an [`FrozenErrCode`] from raw values

@@ -1,0 +1,685 @@
+use crate::error::{new_error, FFErr};
+use fe::{FrozenError, FrozenResult};
+use libc::{
+    c_int, c_short, c_void, close, fcntl, fdatasync, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv,
+    pwrite, pwritev, size_t, stat, sysconf, unlink, EACCES, EBADF, EDQUOT, EFAULT, EINVAL, EIO, EISDIR, EMSGSIZE,
+    ENOSPC, EPERM, EROFS, ESPIPE, F_SETLKW, F_UNLCK, F_WRLCK, O_CLOEXEC, O_CREAT, O_NOATIME, O_RDWR, O_TRUNC, SEEK_SET,
+    S_IRUSR, S_IWUSR, _SC_IOV_MAX,
+};
+use std::{
+    ffi::CString,
+    io,
+    os::unix::ffi::OsStrExt,
+    path::PathBuf,
+    sync::atomic::{AtomicI32, Ordering},
+};
+
+const CLOSED_FD: i32 = -1;
+const MAX_IOVECS: usize = 512;
+
+/// Linux implementation of `File`
+pub(crate) struct File(AtomicI32);
+
+unsafe impl Send for File {}
+unsafe impl Sync for File {}
+
+impl File {
+    /// creates/opens a new instance of [`File`]
+    pub(crate) unsafe fn new(path: &PathBuf, is_new: bool, mid: u8) -> FrozenResult<Self> {
+        let fd = open_with_flags(path, prep_flags(is_new), mid)?;
+        Ok(Self(AtomicI32::new(fd)))
+    }
+
+    /// Get file descriptor for [`File`]
+    #[inline]
+    pub(crate) fn fd(&self) -> i32 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// fetch value of maximum iovecs allowed in preadv/pwritev syscalls
+    ///
+    /// **NOTE:** On some systems, `_SC_IOV_MAX` is not set, hence it can return `-1`
+    pub(crate) unsafe fn max_iovecs(&self) -> usize {
+        let res = sysconf(_SC_IOV_MAX);
+        if res <= 0 {
+            return MAX_IOVECS;
+        }
+
+        res as usize
+    }
+
+    /// Syncs in-mem data on the storage device
+    ///
+    /// ## `fsync` vs `fdatasync`
+    ///
+    /// We use `fdatasync()` instead of `fsync()` for persistence. As, `fdatasync()` guarantees,
+    /// all modified file data and any metadata required to retrieve that data, like file size
+    /// changes are flushed to stable storage.
+    ///
+    /// This way we avoid non-essential metadata updates, such as access time (`atime`),
+    /// mod time (`mtime`), and other inode bookkeeping info!
+    #[inline]
+    pub(super) unsafe fn sync(&self, mid: u8) -> FrozenResult<()> {
+        // sanity check
+        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+
+        // only for EIO errors
+        const MAX_RETRIES: usize = 4;
+        let mut retries = 0;
+
+        loop {
+            if fdatasync(self.fd() as c_int) != 0 {
+                let error = last_os_error();
+                let error_raw = error.raw_os_error();
+
+                // IO interrupt (must retry)
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                // invalid fd or lack of support for sync
+                if error_raw == Some(EINVAL) || error_raw == Some(EBADF) {
+                    return new_error(mid, FFErr::Hcf, error);
+                }
+
+                // read-only file (can also be caused by TOCTOU)
+                if error_raw == Some(EROFS) {
+                    return new_error(mid, FFErr::Wrt, error);
+                }
+
+                // fatel error, i.e. no sync for writes in recent window/batch
+                //
+                // NOTE: this must be handled seperately, cuase, if this error occurs,
+                // the storage system must act, mark recent writes as failed or notify users,
+                // etc. to keep the system robust and fault tolerent!
+                if error_raw == Some(EIO) {
+                    if retries < MAX_RETRIES {
+                        retries += 1;
+                        std::hint::spin_loop();
+                        continue;
+                    }
+
+                    // NOTE: sync error indicates that retries exhausted and durability is broken
+                    // in the current/last window/batch
+                    return new_error(mid, FFErr::Syn, error);
+                }
+
+                return new_error(mid, FFErr::Unk, error);
+            }
+
+            return Ok(());
+        }
+    }
+
+    /// Closes file handle for [`File`]
+    ///
+    /// This function is _idempotent_ and prevents close-on-close errors!
+    #[inline(always)]
+    pub(crate) unsafe fn close(&self, mid: u8) -> FrozenResult<()> {
+        // prevent multiple close syscalls
+        let fd = self.fd();
+        if fd == CLOSED_FD {
+            return Ok(());
+        }
+
+        if close(fd) != 0 {
+            let error = last_os_error();
+            let error_raw = error.raw_os_error();
+
+            // NOTE: In posix systems, kernal may report delayed writeback failures on `close`,
+            // this are fatel errors, and can not be retried! Hence, all the writes in the sync
+            // window were not persisted.
+            //
+            // So we treat this error as **sync** error, to notify above layer as the recent batch
+            // failed to persist!
+            if error_raw == Some(EIO) {
+                return new_error(mid, FFErr::Syn, error);
+            }
+
+            return new_error(mid, FFErr::Unk, error);
+        }
+
+        Ok(())
+    }
+
+    /// Unlinks (possibly deletes) the [`File`]
+    ///
+    /// **WARN**: File must be closed beforehand, to avoid I/O errors
+    #[inline]
+    pub(super) unsafe fn unlink(&self, path: &PathBuf, mid: u8) -> FrozenResult<()> {
+        // sanity check
+        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+
+        let cpath = path_to_cstring(path, mid)?;
+        if unlink(cpath.as_ptr()) != 0 {
+            let error = last_os_error();
+            return new_error(mid, FFErr::Unk, error);
+        }
+
+        Ok(())
+    }
+
+    /// Fetches matadata for [`File`] using `fstat` syscall
+    #[inline]
+    pub(crate) unsafe fn metadata(&self, mid: u8) -> FrozenResult<stat> {
+        // sanity check
+        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+
+        let mut st = std::mem::zeroed::<stat>();
+        let res = fstat(self.fd(), &mut st);
+
+        if res != 0 {
+            let error = last_os_error();
+            let error_raw = error.raw_os_error();
+
+            // bad or invalid fd
+            if error_raw == Some(EBADF) || error_raw == Some(EFAULT) {
+                return new_error(mid, FFErr::Hcf, error);
+            }
+
+            return new_error(mid, FFErr::Unk, error);
+        }
+
+        Ok(st)
+    }
+
+    pub(crate) unsafe fn resize(&self, new_len: u64, mid: u8) -> FrozenResult<()> {
+        // sanity check
+        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+
+        if ftruncate(self.fd(), new_len as off_t) != 0 {
+            let error = last_os_error();
+            let error_raw = error.raw_os_error();
+
+            // invalid fd or lack of support for sync
+            if error_raw == Some(EINVAL) || error_raw == Some(EBADF) {
+                return new_error(mid, FFErr::Hcf, error);
+            }
+
+            // read-only fs (can also be caused by TOCTOU)
+            if error_raw == Some(EROFS) {
+                return new_error(mid, FFErr::Wrt, error);
+            }
+
+            // no space available on disk
+            if error_raw == Some(ENOSPC) {
+                return new_error(mid, FFErr::Nsp, error);
+            }
+
+            return new_error(mid, FFErr::Unk, error);
+        }
+
+        Ok(())
+    }
+
+    /// Read at given `offset` w/ `pread` syscall from [`File`]
+    #[inline(always)]
+    pub(super) unsafe fn pread(
+        &self,
+        buf_ptr: *mut u8,
+        offset: usize,
+        len_to_read: usize,
+        mid: u8,
+    ) -> FrozenResult<()> {
+        // sanity checks
+        debug_assert_ne!(len_to_read, 0, "invalid length");
+        debug_assert!(!buf_ptr.is_null(), "invalid buffer pointer");
+        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+
+        let mut read = 0usize;
+        while read < len_to_read {
+            let res = pread(
+                self.fd(),
+                buf_ptr.add(read) as *mut c_void,
+                (len_to_read - read) as size_t,
+                (offset + read) as i64,
+            );
+
+            if res <= 0 {
+                let error = std::io::Error::last_os_error();
+                let error_raw = error.raw_os_error();
+
+                // io interrupt
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                // unexpected EOF
+                if res == 0 {
+                    return new_error(mid, FFErr::Eof, error);
+                }
+
+                // permission denied
+                if error_raw == Some(EACCES) || error_raw == Some(EPERM) {
+                    return new_error(mid, FFErr::Red, error);
+                }
+
+                // invalid fd, invalid fd type, bad pointer, etc.
+                if error_raw == Some(EINVAL)
+                    || error_raw == Some(EBADF)
+                    || error_raw == Some(EFAULT)
+                    || error_raw == Some(ESPIPE)
+                {
+                    return new_error(mid, FFErr::Hcf, error);
+                }
+
+                return new_error(mid, FFErr::Unk, error);
+            }
+
+            read += res as usize;
+        }
+
+        Ok(())
+    }
+
+    /// Read (multiple vectors) at given `offset` w/ `preadv` syscall from [`File`]
+    #[inline(always)]
+    pub(super) unsafe fn preadv(
+        &self,
+        buf_ptrs: &[*mut u8],
+        offset: usize,
+        buffer_size: usize,
+        mid: u8,
+    ) -> FrozenResult<()> {
+        // sanity checks
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_ne!(buffer_size, 0, "invalid buffer length");
+            debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+            debug_assert!(buf_ptrs.len() <= self.max_iovecs(), "Buffer overflow beyound IOV_MAX");
+        }
+
+        let nptrs = buf_ptrs.len();
+        let total_len = nptrs * buffer_size;
+        let mut iovecs: Vec<iovec> = buf_ptrs
+            .iter()
+            .map(|ptr| iovec {
+                iov_base: *ptr as *mut c_void,
+                iov_len: buffer_size,
+            })
+            .collect();
+
+        let mut read = 0usize;
+        while read < total_len {
+            let res = preadv(
+                self.fd(),
+                iovecs.as_ptr(),
+                iovecs.len() as c_int,
+                (offset + read) as off_t,
+            );
+
+            if res <= 0 {
+                let error = io::Error::last_os_error();
+                let error_raw = error.raw_os_error();
+
+                // interrupted syscall
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                // unexpected EOF
+                if res == 0 {
+                    return new_error(mid, FFErr::Eof, error);
+                }
+
+                // permission denied
+                if error_raw == Some(EACCES) || error_raw == Some(EPERM) {
+                    return new_error(mid, FFErr::Red, error);
+                }
+
+                // invalid fd, bad pointer, illegal seek, etc.
+                if error_raw == Some(EINVAL)
+                    || error_raw == Some(EBADF)
+                    || error_raw == Some(EFAULT)
+                    || error_raw == Some(ESPIPE)
+                    || error_raw == Some(EMSGSIZE)
+                {
+                    return new_error(mid, FFErr::Hcf, error);
+                }
+
+                return new_error(mid, FFErr::Unk, error);
+            }
+
+            // NOTE: In posix systems, preadv may -
+            //
+            // - read fewer bytes than requested
+            // - stop in-between iovec's
+            // - stop mid iovec
+            //
+            // Even though this behavior is situation or filesystem dependent (according to my short research),
+            // we opt to handle it for correctness across different systems
+
+            let mut idx = 0;
+            let mut remaining = res as usize;
+
+            while remaining > 0 {
+                let current_iov = &mut iovecs[idx];
+                if remaining >= current_iov.iov_len {
+                    read += current_iov.iov_len;
+                    remaining -= current_iov.iov_len;
+                    idx += 1;
+                } else {
+                    current_iov.iov_base = (current_iov.iov_base as *mut u8).add(remaining) as *mut c_void;
+                    current_iov.iov_len -= remaining;
+                    read += remaining;
+                    remaining = 0;
+                }
+            }
+
+            if idx > 0 {
+                iovecs.drain(0..idx);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write at given `offset` w/ `pwrite` syscall to [`File`]
+    #[inline(always)]
+    pub(super) unsafe fn pwrite(
+        &self,
+        buf_ptr: *const u8,
+        offset: usize,
+        len_to_write: usize,
+        mid: u8,
+    ) -> FrozenResult<()> {
+        // sanity checks
+        debug_assert_ne!(len_to_write, 0, "invalid length");
+        debug_assert!(!buf_ptr.is_null(), "invalid buffer pointer");
+        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+
+        let mut written = 0usize;
+        while written < len_to_write {
+            let res = pwrite(
+                self.fd(),
+                buf_ptr.add(written) as *const c_void,
+                (len_to_write - written) as size_t,
+                (offset + written) as i64,
+            );
+
+            if res <= 0 {
+                let error = std::io::Error::last_os_error();
+                let error_raw = error.raw_os_error();
+
+                // io interrupt
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                // unexpected EOF
+                if res == 0 {
+                    return new_error(mid, FFErr::Eof, error);
+                }
+
+                // read-only file (can also be caused by TOCTOU)
+                if error_raw == Some(EROFS) {
+                    return new_error(mid, FFErr::Wrt, error);
+                }
+
+                // invalid fd, invalid fd type, bad pointer, etc.
+                if error_raw == Some(EINVAL)
+                    || error_raw == Some(EBADF)
+                    || error_raw == Some(EFAULT)
+                    || error_raw == Some(ESPIPE)
+                {
+                    return new_error(mid, FFErr::Hcf, error);
+                }
+
+                return new_error(mid, FFErr::Unk, error);
+            }
+
+            written += res as usize;
+        }
+
+        Ok(())
+    }
+
+    /// Write (multiple vectors) at given `offset` w/ `pwritev` syscall to [`File`]
+    #[inline(always)]
+    pub(super) unsafe fn pwritev(
+        &self,
+        buf_ptrs: &[*const u8],
+        offset: usize,
+        buffer_size: usize,
+        mid: u8,
+    ) -> FrozenResult<()> {
+        // sanity checks
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_ne!(buffer_size, 0, "invalid buffer length");
+            debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+            debug_assert!(buf_ptrs.len() <= self.max_iovecs(), "Buffer overflow beyound IOV_MAX");
+        }
+
+        let nptrs = buf_ptrs.len();
+        let total_len = nptrs * buffer_size;
+        let mut iovecs: Vec<iovec> = buf_ptrs
+            .iter()
+            .map(|ptr| iovec {
+                iov_base: *ptr as *mut c_void,
+                iov_len: buffer_size,
+            })
+            .collect();
+
+        let mut written = 0usize;
+        while written < total_len {
+            let res = pwritev(
+                self.fd(),
+                iovecs.as_ptr(),
+                iovecs.len() as c_int,
+                (offset + written) as off_t,
+            );
+
+            if res <= 0 {
+                let error = std::io::Error::last_os_error();
+                let error_raw = error.raw_os_error();
+
+                // io interrupt
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                // unexpected EOF
+                if res == 0 {
+                    return new_error(mid, FFErr::Eof, error);
+                }
+
+                // read-only file (can also be caused by TOCTOU)
+                if error_raw == Some(EROFS) {
+                    return new_error(mid, FFErr::Wrt, error);
+                }
+
+                // no space available on disk
+                if error_raw == Some(ENOSPC) || error_raw == Some(EDQUOT) {
+                    return new_error(mid, FFErr::Nsp, error);
+                }
+
+                // invalid fd, invalid fd type, bad pointer, etc.
+                if error_raw == Some(EINVAL)
+                    || error_raw == Some(EBADF)
+                    || error_raw == Some(EFAULT)
+                    || error_raw == Some(ESPIPE)
+                    || error_raw == Some(EMSGSIZE)
+                {
+                    return new_error(mid, FFErr::Hcf, error);
+                }
+
+                return new_error(mid, FFErr::Unk, error);
+            }
+
+            // NOTE: In posix systems, pwritev may -
+            //
+            // - write fewer bytes than requested
+            // - stop in-between iovec's
+            // - stop mid iovec
+            //
+            // Even though this behavior is situation or filesystem dependent (according to my short research),
+            // we opt to handle it for correctness across different systems
+
+            let mut idx = 0;
+            let mut remaining = res as usize;
+
+            while remaining > 0 {
+                let current_iov = &mut iovecs[idx];
+                if remaining >= current_iov.iov_len {
+                    idx += 1;
+                    written += current_iov.iov_len;
+                    remaining -= current_iov.iov_len;
+                } else {
+                    current_iov.iov_base = (current_iov.iov_base as *mut u8).add(remaining) as *mut c_void;
+                    current_iov.iov_len -= remaining;
+                    written += remaining;
+                    remaining = 0;
+                }
+            }
+
+            if idx > 0 {
+                iovecs.drain(0..idx);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Acquire an exclusive write lock to [`File`]
+    #[inline]
+    pub(super) unsafe fn lock(&self, mid: u8) -> FrozenResult<()> {
+        // sanity check
+        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+        self.flock_impl(F_WRLCK, mid)
+    }
+
+    /// Release the acquired lock (shared/exclusive) for [`File`]
+    #[inline]
+    pub(super) unsafe fn unlock(&self, mid: u8) -> FrozenResult<()> {
+        // sanity check
+        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+        self.flock_impl(F_UNLCK, mid)
+    }
+
+    #[inline]
+    unsafe fn flock_impl(&self, lock_type: c_int, mid: u8) -> FrozenResult<()> {
+        let mut fl = flock {
+            l_type: lock_type as c_short,
+            l_whence: SEEK_SET as c_short,
+            l_start: 0,
+            l_len: 0, // whole file
+            l_pid: 0,
+        };
+
+        loop {
+            if fcntl(self.fd(), F_SETLKW, &mut fl) != 0 {
+                let error = io::Error::last_os_error();
+
+                // We must retry on interuption errors, e.g. EINTR
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                return new_error(mid, FFErr::Lck, error);
+            }
+
+            return Ok(());
+        }
+    }
+
+    #[inline]
+    fn close_fd(&self) {
+        self.0.store(CLOSED_FD, Ordering::Release);
+    }
+}
+
+/// create/open a new file w/ `open` syscall
+///
+/// ## Caveats of `O_NOATIME` (`EPERM` Error)
+///
+/// `open()` with `O_NOATIME` may fail with `EPERM` instead of silently ignoring the flag
+///
+/// `EPERM` indicates a kernel level permission violation, as the kernel rejects the
+/// request outright, even though the flag only affects metadata behavior
+///
+/// To remain sane across ownership models, containers, and shared filesystems,
+/// we explicitly retry the `open()` w/o `O_NOATIME` when `EPERM` is encountered
+unsafe fn open_with_flags(path: &PathBuf, mut flags: i32, mid: u8) -> FrozenResult<i32> {
+    let cpath = path_to_cstring(path, mid)?;
+    let mut tried_noatime = false;
+
+    loop {
+        let fd = if flags & O_CREAT != 0 {
+            open(
+                cpath.as_ptr(),
+                flags,
+                S_IRUSR | S_IWUSR, // write + read permissions
+            )
+        } else {
+            open(cpath.as_ptr(), flags)
+        };
+
+        if fd < 0 {
+            let error = last_os_error();
+            let err_raw = error.raw_os_error();
+
+            // NOTE: We must retry on interuption errors (EINTR retry)
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+
+            // NOTE: Fallback for `EPERM` error, when `O_NOATIME` is not supported by current FS
+            if err_raw == Some(EPERM) && (flags & O_NOATIME) != 0 && !tried_noatime {
+                flags &= !O_NOATIME;
+                tried_noatime = true;
+                continue;
+            }
+
+            // no space available on disk
+            if err_raw == Some(ENOSPC) {
+                return new_error(mid, FFErr::Nsp, error);
+            }
+
+            // path is a dir (hcf)
+            if err_raw == Some(EISDIR) {
+                return new_error(mid, FFErr::Hcf, error);
+            }
+
+            return new_error(mid, FFErr::Unk, error);
+        }
+
+        return Ok(fd);
+    }
+}
+
+/// prep flags for `open` syscall
+///
+/// ## Access Time Updates (O_NOATIME)
+///
+/// We use the `O_NOATIME` flag to disable access time updates on the [`File`]
+/// Normally every I/O operation triggers an `atime` update/write to disk
+///
+/// This is counter productive and increases latency for I/O ops in our case!
+///
+/// ## Limitations of `O_NOATIME`
+///
+/// Not all filesystems support this flag, on many it is silently ignored, but some rejects
+/// it with `EPERM` error
+///
+/// Also, this flag only works when UID's match for calling processe and file owner
+const fn prep_flags(is_new: bool) -> i32 {
+    const BASE: i32 = O_RDWR | O_NOATIME | O_CLOEXEC;
+    const NEW: i32 = O_CREAT | O_TRUNC;
+    BASE | ((is_new as i32) * NEW)
+}
+
+fn path_to_cstring(path: &std::path::PathBuf, mid: u8) -> FrozenResult<CString> {
+    match CString::new(path.as_os_str().as_bytes()) {
+        Ok(cs) => Ok(cs),
+        Err(e) => {
+            let error = io::Error::new(io::ErrorKind::Other, e.to_string());
+            new_error(mid, FFErr::Inv, e.into())
+        }
+    }
+}
+
+#[inline]
+fn last_os_error() -> std::io::Error {
+    io::Error::last_os_error()
+}

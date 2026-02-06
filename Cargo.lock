@@ -3,13 +3,14 @@
 version = 4
 
 [[package]]
-name = "frozen_error"
+name = "fe"
 version = "0.1.0"
 
 [[package]]
-name = "frozen_file"
+name = "ff"
 version = "0.1.0"
 dependencies = [
+ "fe",
  "libc",
 ]
 
