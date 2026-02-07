@@ -11,3 +11,4 @@ fe = {path = "../fe"}
 
 [dev-dependencies]
 tempfile = "3.20.0"
+ff = {path = "../ff"}

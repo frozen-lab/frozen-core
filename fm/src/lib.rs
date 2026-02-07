@@ -5,4 +5,7 @@
 
 mod error;
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 pub use error::FMErr;
