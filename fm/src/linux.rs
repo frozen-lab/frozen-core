@@ -7,7 +7,10 @@ use std::sync::atomic;
 
 use crate::{error::new_error, FMErr};
 
-pub(crate) struct MMap(*mut c_void);
+pub(crate) struct MMap {
+    ptr: *mut c_void,
+    unmapped: atomic::AtomicBool,
+}
 
 unsafe impl Send for MMap {}
 unsafe impl Sync for MMap {}
@@ -45,11 +48,21 @@ impl MMap {
             return new_error(mid, FMErr::Unk, error);
         }
 
-        return Ok(Self(ptr));
+        return Ok(Self {
+            ptr,
+            unmapped: atomic::AtomicBool::new(false),
+        });
     }
 
     pub(crate) unsafe fn unmap(&self, length: usize, mid: u8) -> FRes<()> {
-        if munmap(self.0, length) != 0 {
+        // NOTE: To avoid another thread/process from executing munmap, we mark unmapped before even
+        // trying to unmap, this kind of wroks like mutex, as we reassign to false on failure
+        let unmapped = self.unmapped.swap(true, atomic::Ordering::AcqRel);
+        if unmapped {
+            return Ok(());
+        }
+
+        if munmap(self.ptr, length) != 0 {
             let error = last_os_error();
             let err_raw = error.raw_os_error();
 
@@ -71,7 +84,7 @@ impl MMap {
         let mut retries = 0;
 
         loop {
-            if msync(self.0, length, MS_SYNC) != 0 {
+            if msync(self.ptr, length, MS_SYNC) != 0 {
                 let error = last_os_error();
                 let error_raw = error.raw_os_error();
 
@@ -108,17 +121,27 @@ impl MMap {
     }
 
     #[inline]
-    pub(crate) const unsafe fn get<T>(&self, offset: usize) -> *const T {
+    pub(crate) unsafe fn get<T>(&self, offset: usize) -> *const T {
         // sanity check
         debug_assert!(offset % 8 == 0, "Offset must be 8 bytes aligned");
-        self.0.add(offset) as *const T
+        debug_assert!(
+            !self.unmapped.load(atomic::Ordering::Acquire),
+            "Trying to access dropped mmap"
+        );
+
+        self.ptr.add(offset) as *const T
     }
 
     #[inline]
-    pub(crate) const unsafe fn get_mut<T>(&self, offset: usize) -> *mut T {
+    pub(crate) unsafe fn get_mut<T>(&self, offset: usize) -> *mut T {
         // sanity check
         debug_assert!(offset % 0x8 == 0, "Offset must be 8 bytes aligned");
-        self.0.add(offset) as *mut T
+        debug_assert!(
+            !self.unmapped.load(atomic::Ordering::Acquire),
+            "Trying to access dropped mmap"
+        );
+
+        self.ptr.add(offset) as *mut T
     }
 }
 
@@ -166,7 +189,7 @@ mod tests {
         fn map_unmap_cycle() {
             let (_dir, _tmp, _file, map) = new_tmp();
 
-            assert!(!map.0.is_null());
+            assert!(!map.ptr.is_null());
             assert!(unsafe { map.unmap(LEN, MID) }.check_ok());
         }
 

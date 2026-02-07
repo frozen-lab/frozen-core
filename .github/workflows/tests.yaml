@@ -30,6 +30,7 @@ jobs:
         crate:
           - fe
           - ff
+          - fm
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v4
