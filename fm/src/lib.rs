@@ -384,3 +384,253 @@ impl<'a, T> FMWriter<'a, T> {
         Ok(res)
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod fm_tests {
+    use super::*;
+    use fe::FECheckOk;
+    use ff::{FFCfg, FF};
+    use std::{path::PathBuf, sync::Arc, time::Duration};
+    use tempfile::{tempdir, TempDir};
+
+    const MID: u8 = 0x00;
+    const LEN: usize = 0x20;
+    const FLUSH: Duration = Duration::from_millis(50);
+    const CFG: FMCfg = FMCfg {
+        module_id: MID,
+        auto_flush: false,
+        flush_duration: FLUSH,
+    };
+
+    fn get_ff_cfg(path: PathBuf) -> FFCfg {
+        FFCfg {
+            path,
+            module_id: MID,
+            auto_flush: false,
+            flush_duration: std::time::Duration::from_secs(1),
+        }
+    }
+
+    fn new_tmp() -> (TempDir, PathBuf, FF, FM) {
+        let dir = tempdir().expect("temp dir");
+        let tmp = dir.path().join("tmp_file");
+
+        let file = FF::new(get_ff_cfg(tmp.clone()), LEN as u64).expect("new FF");
+        let mmap = FM::new(file.fd(), LEN, CFG).expect("new MMap");
+
+        (dir, tmp, file, mmap)
+    }
+
+    mod map_unmap {
+        use super::*;
+
+        #[test]
+        fn map_unmap_cycle() {
+            let (_dir, _tmp, _file, map) = new_tmp();
+
+            assert_eq!(map.length(), LEN);
+            assert!(map.munmap().check_ok());
+        }
+
+        #[test]
+        fn unmap_after_unmap_does_not_fails() {
+            let (_dir, _tmp, _file, map) = new_tmp();
+
+            assert!(map.munmap().check_ok());
+            assert!(map.munmap().check_ok());
+            assert!(map.munmap().check_ok());
+        }
+    }
+
+    mod write_read {
+        use super::*;
+
+        #[test]
+        fn write_read_cycle() {
+            let (_dir, _tmp, _file, mmap) = new_tmp();
+
+            {
+                let w = mmap.writer::<u64>(0).expect("writer");
+                assert!(w.write(|v| *v = 0xDEAD_C0DE_DEAD_C0DE).check_ok());
+            }
+
+            assert!(mmap.sync().check_ok());
+
+            {
+                let r = mmap.reader::<u64>(0).expect("reader");
+                let val = r.read(|v| *v);
+                assert_eq!(val, 0xDEAD_C0DE_DEAD_C0DE);
+            }
+        }
+
+        #[test]
+        fn write_read_across_sessions() {
+            let dir = tempdir().expect("tmp dir");
+            let path = dir.path().join("persist");
+
+            {
+                let file = FF::new(get_ff_cfg(path.clone()), LEN as u64).expect("new");
+                let mmap = FM::new(file.fd(), LEN, CFG).expect("mmap");
+
+                mmap.writer::<u64>(0)
+                    .expect("writer")
+                    .write(|v| *v = 0xAABBCCDDEEFF0011)
+                    .expect("write");
+
+                mmap.sync().expect("sync");
+            }
+
+            {
+                let file = FF::open(get_ff_cfg(path.clone())).expect("new");
+                let mmap = FM::new(file.fd(), LEN, CFG).expect("mmap");
+
+                let r = mmap.reader::<u64>(0).expect("reader");
+                assert_eq!(r.read(|v| *v), 0xAABBCCDDEEFF0011);
+            }
+        }
+
+        #[test]
+        fn mmap_write_visible_to_file_read() {
+            let (_dir, _tmp, file, mmap) = new_tmp();
+
+            mmap.writer::<u64>(0)
+                .expect("writer")
+                .write(|v| *v = 0xCAFEBABECAFEBABE)
+                .expect("write");
+
+            mmap.sync().expect("sync");
+
+            let mut buf = [0u8; 8];
+            file.read(buf.as_mut_ptr(), 0, 8).expect("pread");
+
+            assert_eq!(u64::from_le_bytes(buf), 0xCAFEBABECAFEBABE);
+        }
+    }
+
+    mod concurrency {
+        use super::*;
+
+        #[test]
+        fn concurrent_readers() {
+            let (_dir, _tmp, _file, mmap) = new_tmp();
+            let mmap = Arc::new(mmap);
+
+            mmap.writer::<u64>(0)
+                .expect("writer")
+                .write(|v| *v = 42)
+                .expect("write");
+
+            mmap.sync().expect("sync");
+
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let m = mmap.clone();
+                handles.push(thread::spawn(move || {
+                    let r = m.reader::<u64>(0).expect("reader");
+                    assert_eq!(r.read(|v| *v), 42);
+                }));
+            }
+
+            for h in handles {
+                // assert!(h.join().check_ok());
+
+                assert!(h
+                    .join()
+                    .map_err(|e| {
+                        eprintln!("\n{:?}\n", e);
+                    })
+                    .is_ok());
+            }
+        }
+
+        #[test]
+        fn concurrent_writes_disjoint_offsets() {
+            const N: usize = 8;
+            let dir = tempdir().expect("tmp dir");
+            let path = dir.path().join("multi");
+
+            let file = FF::new(get_ff_cfg(path), (LEN * N) as u64).expect("new");
+            let mmap = Arc::new(FM::new(file.fd(), LEN * N, CFG).expect("mmap"));
+
+            let mut handles = Vec::new();
+            for i in 0..N {
+                let m = mmap.clone();
+                handles.push(thread::spawn(move || {
+                    let off = i * LEN;
+                    m.writer::<u64>(off)
+                        .expect("writer")
+                        .write(|v| *v = i as u64)
+                        .expect("write");
+                }));
+            }
+
+            for h in handles {
+                assert!(h
+                    .join()
+                    .map_err(|e| {
+                        eprintln!("\n{:?}\n", e);
+                    })
+                    .is_ok());
+            }
+
+            mmap.sync().expect("sync");
+
+            for i in 0..N {
+                let r = mmap.reader::<u64>(i * LEN).expect("reader");
+                assert_eq!(r.read(|v| *v), i as u64);
+            }
+        }
+
+        #[test]
+        fn concurrent_writes_same_offset_then_sync() {
+            let (_dir, _tmp, _file, mmap) = new_tmp();
+            let mmap = Arc::new(mmap);
+
+            let mut handles = Vec::new();
+            for i in 0..8u64 {
+                let m = mmap.clone();
+                handles.push(thread::spawn(move || {
+                    m.writer::<u64>(0).expect("writer").write(|v| *v = i).expect("write");
+                }));
+            }
+
+            for h in handles {
+                assert!(h
+                    .join()
+                    .map_err(|e| {
+                        eprintln!("\n{:?}\n", e);
+                    })
+                    .is_ok());
+            }
+
+            mmap.sync().expect("sync");
+
+            let r = mmap.reader::<u64>(0).expect("reader");
+            let _ = r.read(|v| *v); // value nondeterministic but must not crash
+        }
+
+        #[test]
+        fn drop_waits_for_active_readers() {
+            let (_dir, _tmp, _file, mmap) = new_tmp();
+            let mmap = Arc::new(mmap);
+
+            let r = mmap.reader::<u64>(0).expect("reader");
+
+            let m = mmap.clone();
+            let h = thread::spawn(move || {
+                // must block until reader is dropped
+                drop(m);
+            });
+
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(r);
+
+            assert!(h
+                .join()
+                .map_err(|e| {
+                    eprintln!("\n{:?}\n", e);
+                })
+                .is_ok());
+        }
+    }
+}

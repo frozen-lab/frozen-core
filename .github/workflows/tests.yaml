@@ -31,6 +31,7 @@ jobs:
           - fe
           - ff
           - fm
+          - hints
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v4
