@@ -105,17 +105,24 @@ impl FF {
         Ok(())
     }
 
-    /// current length of [`FF`]
+    /// Current length of [`FF`]
     #[inline]
     pub fn length(&self) -> u64 {
         self.0.length.load(atomic::Ordering::Acquire)
     }
 
-    /// get file descriptor for [`FF`]
+    /// Get file descriptor for [`FF`]
     #[inline]
     #[cfg(target_os = "linux")]
     pub fn fd(&self) -> i32 {
         self.get_file().fd()
+    }
+
+    /// Returns the [`FErr`] representing the last error occurred in [`FF`]
+    #[inline]
+    #[cfg(target_os = "linux")]
+    pub fn last_error(&self) -> Option<&FErr> {
+        self.0.error.get()
     }
 
     /// Syncs in-mem data on the storage device

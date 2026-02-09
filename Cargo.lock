@@ -32,11 +32,11 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "fe"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "ff"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "fe",
  "hints",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "fm"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "fe",
  "ff",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "hints"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "libc"
