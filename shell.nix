@@ -12,6 +12,7 @@ pkgs.mkShell {
     clippy
     rust-analyzer
     cargo-show-asm
+    python3
   ]
   ++ (if isLinux then [ pkgs.gcc pkgs.linuxPackages.perf pkgs.gdb ] else []);
 
