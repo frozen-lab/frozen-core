@@ -54,6 +54,13 @@ impl FM {
         self.0.length
     }
 
+    /// Returns the [`FErr`] representing the last error occurred in [`FM`]
+    #[inline]
+    #[cfg(target_os = "linux")]
+    pub fn last_error(&self) -> Option<&FErr> {
+        self.0.error.get()
+    }
+
     /// Syncs in-mem data on the storage device
     #[inline]
     pub fn sync(&self) -> FRes<()> {
