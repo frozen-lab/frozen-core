@@ -14,7 +14,5 @@ libc = "0.2.178"
 tempfile = "3.20.0"
 
 [features]
-default = []
-
 ff = []
 fm = []
