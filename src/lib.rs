@@ -7,3 +7,9 @@
 
 pub mod fe;
 pub mod hints;
+
+#[cfg(any(test, feature = "ff"))]
+pub mod ff;
+
+#[cfg(any(test, feature = "fm"))]
+pub mod fm;
