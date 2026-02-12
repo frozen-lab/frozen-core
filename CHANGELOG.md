@@ -1,5 +1,11 @@
 # Changelog
 
+## `0.0.4`
+
+- `FF` module
+  - Yanked `read` & `write` ops
+  - Migrated io ops to use `iovecs` for linux impl
+
 ## `0.0.3`
 
 - Improved `docs`

@@ -572,22 +572,26 @@ mod fm_tests {
             }
         }
 
-        // #[test]
-        // fn mmap_write_visible_to_file_read() {
-        //     let (_dir, _tmp, file, mmap) = new_tmp();
+        #[test]
+        fn mmap_write_visible_to_file_read() {
+            let (_dir, _tmp, file, mmap) = new_tmp();
 
-        //     mmap.writer::<u64>(0)
-        //         .expect("writer")
-        //         .write(|v| *v = 0xCAFEBABECAFEBABE)
-        //         .expect("write");
+            mmap.writer::<u64>(0)
+                .expect("writer")
+                .write(|v| *v = 0xCAFEBABECAFEBABE)
+                .expect("write");
 
-        //     mmap.sync().expect("sync");
+            mmap.sync().expect("sync");
 
-        //     let mut buf = [0u8; 8];
-        //     file.readv(buf.as_mut_ptr(), 0, 8).expect("pread");
+            let mut buf = [0u8; 8];
+            let mut iov = libc::iovec {
+                iov_base: buf.as_mut_ptr() as *mut _,
+                iov_len: 8,
+            };
 
-        //     assert_eq!(u64::from_le_bytes(buf), 0xCAFEBABECAFEBABE);
-        // }
+            file.readv(std::slice::from_mut(&mut iov), 0).expect("readv");
+            assert_eq!(u64::from_le_bytes(buf), 0xCAFEBABECAFEBABE);
+        }
     }
 
     mod concurrency {
