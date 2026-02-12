@@ -3,7 +3,7 @@ use libc::{
     c_void, mmap, msync, munmap, off_t, size_t, EACCES, EBADF, EBUSY, EINVAL, EIO, ENOMEM, EOVERFLOW, MAP_FAILED,
     MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
 };
-use std::sync::atomic;
+use std::{io, ptr, sync::atomic, thread};
 
 /// Linux implementation of `MemMap`
 pub(crate) struct MMap {
@@ -18,7 +18,7 @@ impl MMap {
     /// Create a new [`MMap`] instance for given `fd` w/ read & write permissions
     pub(crate) unsafe fn new(fd: i32, length: size_t, mid: u8) -> FRes<Self> {
         let ptr = mmap(
-            std::ptr::null_mut(),
+            ptr::null_mut(),
             length,
             PROT_WRITE | PROT_READ,
             MAP_SHARED,
@@ -94,7 +94,7 @@ impl MMap {
                 let error_raw = error.raw_os_error();
 
                 // IO interrupt (must retry)
-                if error.kind() == std::io::ErrorKind::Interrupted {
+                if error.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
 
@@ -110,7 +110,7 @@ impl MMap {
                 if error_raw == Some(EIO) || error_raw == Some(EBUSY) {
                     if retries < MAX_RETRIES {
                         retries += 1;
-                        std::thread::yield_now();
+                        thread::yield_now();
                         continue;
                     }
 
@@ -153,28 +153,22 @@ impl MMap {
 }
 
 #[inline]
-fn last_os_error() -> std::io::Error {
-    std::io::Error::last_os_error()
+fn last_os_error() -> io::Error {
+    io::Error::last_os_error()
 }
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::fe::FECheckOk;
+    use crate::fe::{FECheckOk, MID};
     use crate::ff::{FFCfg, FF};
     use std::path::PathBuf;
     use tempfile::{tempdir, TempDir};
 
-    const MID: u8 = 0x00; // module id (test)
     const LEN: usize = 0x80;
 
     fn get_ff_cfg(path: PathBuf) -> FFCfg {
-        FFCfg {
-            path,
-            module_id: MID,
-            auto_flush: false,
-            flush_duration: std::time::Duration::from_secs(1),
-        }
+        FFCfg::new(path, MID)
     }
 
     fn new_tmp() -> (TempDir, PathBuf, FF, MMap) {
@@ -301,17 +295,18 @@ mod tests {
 
     mod concurrency {
         use super::*;
+        use std::sync;
 
         #[test]
         fn munmap_is_thread_safe() {
             let (_dir, _tmp, _file, map) = new_tmp();
 
             let mut handles = Vec::new();
-            let map = std::sync::Arc::new(map);
+            let map = sync::Arc::new(map);
 
             for _ in 0..8 {
                 let m = map.clone();
-                handles.push(std::thread::spawn(move || unsafe {
+                handles.push(thread::spawn(move || unsafe {
                     assert!(m.unmap(LEN, MID).check_ok());
                 }));
             }
@@ -331,7 +326,7 @@ mod tests {
             let (_dir, _tmp, _file, map) = new_tmp();
 
             let mut handles = Vec::new();
-            let map = std::sync::Arc::new(map);
+            let map = sync::Arc::new(map);
 
             unsafe {
                 *map.get_mut::<u64>(0) = 42;
@@ -339,7 +334,7 @@ mod tests {
 
             for _ in 0..8 {
                 let m = map.clone();
-                handles.push(std::thread::spawn(move || unsafe {
+                handles.push(thread::spawn(move || unsafe {
                     assert!(m.sync(LEN, MID).check_ok());
                 }));
             }
@@ -364,11 +359,11 @@ mod tests {
             let (_dir, _tmp, _file, map) = new_tmp();
 
             let mut handles = Vec::new();
-            let map = std::sync::Arc::new(map);
+            let map = sync::Arc::new(map);
 
             for i in 0..8u64 {
                 let m = map.clone();
-                handles.push(std::thread::spawn(move || unsafe {
+                handles.push(thread::spawn(move || unsafe {
                     let ptr = m.get_mut::<u64>(0);
                     *ptr = i;
                 }));

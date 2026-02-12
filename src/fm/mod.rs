@@ -3,27 +3,88 @@
 #[cfg(target_os = "linux")]
 mod linux;
 
-// Domain Id for [`ff`] is **17**
-const ERRDOMAIN: u8 = 0x11;
-
 use crate::{
     fe::{FErr, FRes},
     hints::unlikely,
 };
-use std::{cell, mem, sync, sync::atomic, thread};
+use std::{
+    cell, fmt, io, mem,
+    sync::{self, atomic},
+    thread, time,
+};
+
+/// Domain Id for [`FM`] is **18**
+const ERRDOMAIN: u8 = 0x12;
+
+/// default auto flush state for [`FMCfg`]
+const AUTO_FLUSH: bool = false;
+
+/// default flush duration for [`FMCfg`]
+const FLUSH_DURATION: time::Duration = time::Duration::from_millis(250);
+
+/// Error codes for [`FM`]
+#[repr(u16)]
+pub enum FMErr {
+    /// (512) internal fuck up
+    Hcf = 0x200,
+
+    /// (513) unknown error (fallback)
+    Unk = 0x201,
+
+    /// (514) no more memory available
+    Nmm = 0x202,
+
+    /// (515) syncing error
+    Syn = 0x203,
+
+    /// (516) thread error or panic inside thread
+    Txe = 0x204,
+
+    /// (517) lock error (failed or poisoned)
+    Lpn = 0x205,
+}
 
 /// Config for [`FM`]
 #[derive(Clone)]
 pub struct FMCfg {
-    /// module id (used for error codes)
+    /// module id for [`FM`]
+    ///
+    /// This id is used for error codes
+    ///
+    /// ## Why
+    ///
+    /// It enables for easier identification of error boundries when multiple [`FM`]
+    /// modules are present in the codebase
     pub module_id: u8,
 
-    /// when true, all dirty pages would be automatically be synced by a
-    /// background thread
+    /// when true, all dirty pages would be synced by background thread
     pub auto_flush: bool,
 
     /// time interval for sync to flush dirty pages
-    pub flush_duration: std::time::Duration,
+    pub flush_duration: time::Duration,
+}
+
+impl FMCfg {
+    /// Create a new instance of [`FMCfg`] w/ specified `module_id`
+    pub const fn new(module_id: u8) -> Self {
+        Self {
+            module_id,
+            auto_flush: AUTO_FLUSH,
+            flush_duration: FLUSH_DURATION,
+        }
+    }
+
+    /// Enable `auto_flush` for intervaled background sync for [`FM`]
+    pub const fn enable_auto_flush(mut self) -> Self {
+        self.auto_flush = true;
+        self
+    }
+
+    /// Set the interval for sync in [`FM`]
+    pub const fn flush_duration(mut self, interval: time::Duration) -> Self {
+        self.flush_duration = interval;
+        self
+    }
 }
 
 /// Custom implementation of MemMap
@@ -116,7 +177,7 @@ impl FM {
 
         let closed = self.0.dropped.load(atomic::Ordering::Acquire);
         if unlikely(closed) {
-            let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Trying to access closed FM");
+            let error = io::Error::new(io::ErrorKind::BrokenPipe, "Trying to access closed FM");
             return new_error(self.0.cfg.module_id, FMErr::Hcf, error);
         }
 
@@ -161,8 +222,8 @@ impl Drop for FM {
     }
 }
 
-impl std::fmt::Display for FM {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for FM {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         #[cfg(not(target_os = "linux"))]
         unimplemented!();
 
@@ -232,7 +293,7 @@ impl Core {
         let mut cur = self.active.load(atomic::Ordering::Acquire);
         loop {
             if self.dropped.load(atomic::Ordering::Acquire) {
-                let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Trying to access unmapped FM");
+                let error = io::Error::new(io::ErrorKind::BrokenPipe, "Trying to access unmapped FM");
                 return new_error(self.cfg.module_id, FMErr::Hcf, error);
             }
 
@@ -390,29 +451,50 @@ impl<'a, T> FMWriter<'a, T> {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[inline]
+pub(in crate::fm) fn new_error<E, R>(mid: u8, reason: FMErr, error: E) -> FRes<R>
+where
+    E: fmt::Display,
+{
+    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
+    let err = FErr::with_err(code, error);
+    Err(err)
+}
+
+#[inline]
+pub(in crate::fm) fn raw_error<E>(mid: u8, reason: FMErr, error: E) -> FErr
+where
+    E: fmt::Display,
+{
+    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
+    FErr::with_err(code, error)
+}
+
+#[inline]
+pub(in crate::fm) fn raw_err_with_msg<E>(mid: u8, error: E, reason: FMErr, msg: &'static str) -> FErr
+where
+    E: fmt::Display,
+{
+    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
+    FErr::with_msg(code, format!("{msg} due to error =>\n{error}"))
+}
+
 mod fm_tests {
     use super::*;
-    use crate::fe::FECheckOk;
+    use crate::fe::{FECheckOk, MID};
     use crate::ff::{FFCfg, FF};
-    use std::{path::PathBuf, sync::Arc, time::Duration};
+    use std::path::PathBuf;
     use tempfile::{tempdir, TempDir};
 
-    const MID: u8 = 0x00;
     const LEN: usize = 0x20;
-    const FLUSH: Duration = Duration::from_millis(50);
-    const CFG: FMCfg = FMCfg {
-        module_id: MID,
-        auto_flush: false,
-        flush_duration: FLUSH,
-    };
+    const CFG: FMCfg = FMCfg::new(MID);
 
     fn get_ff_cfg(path: PathBuf) -> FFCfg {
         FFCfg {
             path,
             module_id: MID,
             auto_flush: false,
-            flush_duration: std::time::Duration::from_secs(1),
+            flush_duration: time::Duration::from_secs(1),
         }
     }
 
@@ -518,7 +600,7 @@ mod fm_tests {
         #[test]
         fn concurrent_readers() {
             let (_dir, _tmp, _file, mmap) = new_tmp();
-            let mmap = Arc::new(mmap);
+            let mmap = sync::Arc::new(mmap);
 
             mmap.writer::<u64>(0)
                 .expect("writer")
@@ -555,7 +637,7 @@ mod fm_tests {
             let path = dir.path().join("multi");
 
             let file = FF::new(get_ff_cfg(path), (LEN * N) as u64).expect("new");
-            let mmap = Arc::new(FM::new(file.fd(), LEN * N, CFG).expect("mmap"));
+            let mmap = sync::Arc::new(FM::new(file.fd(), LEN * N, CFG).expect("mmap"));
 
             let mut handles = Vec::new();
             for i in 0..N {
@@ -589,7 +671,7 @@ mod fm_tests {
         #[test]
         fn concurrent_writes_same_offset_then_sync() {
             let (_dir, _tmp, _file, mmap) = new_tmp();
-            let mmap = Arc::new(mmap);
+            let mmap = sync::Arc::new(mmap);
 
             let mut handles = Vec::new();
             for i in 0..8u64 {
@@ -617,7 +699,7 @@ mod fm_tests {
         #[test]
         fn drop_waits_for_active_readers() {
             let (_dir, _tmp, _file, mmap) = new_tmp();
-            let mmap = Arc::new(mmap);
+            let mmap = sync::Arc::new(mmap);
 
             let r = mmap.reader::<u64>(0).expect("reader");
 
@@ -627,7 +709,7 @@ mod fm_tests {
                 drop(m);
             });
 
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            thread::sleep(time::Duration::from_millis(50));
             drop(r);
 
             assert!(h
@@ -638,54 +720,4 @@ mod fm_tests {
                 .is_ok());
         }
     }
-}
-
-#[inline]
-pub(in crate::fm) fn new_error<E, R>(mid: u8, reason: FMErr, error: E) -> FRes<R>
-where
-    E: std::fmt::Display,
-{
-    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
-    let err = FErr::with_err(code, error);
-    Err(err)
-}
-
-#[inline]
-pub(in crate::fm) fn raw_error<E>(mid: u8, reason: FMErr, error: E) -> FErr
-where
-    E: std::fmt::Display,
-{
-    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
-    FErr::with_err(code, error)
-}
-
-#[inline]
-pub(in crate::fm) fn raw_err_with_msg<E>(mid: u8, error: E, reason: FMErr, msg: &'static str) -> FErr
-where
-    E: std::fmt::Display,
-{
-    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
-    FErr::with_msg(code, format!("{msg} due to error =>\n{error}"))
-}
-
-/// Error codes for [`FM`]
-#[repr(u16)]
-pub enum FMErr {
-    /// (512) internal fuck up
-    Hcf = 0x200,
-
-    /// (513) unknown error (fallback)
-    Unk = 0x201,
-
-    /// (514) no more memory available
-    Nmm = 0x202,
-
-    /// (515) syncing error
-    Syn = 0x203,
-
-    /// (516) thread error or panic inside thread
-    Txe = 0x204,
-
-    /// (517) lock error (failed or poisoned)
-    Lpn = 0x205,
 }
