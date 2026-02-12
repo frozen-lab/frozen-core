@@ -593,12 +593,9 @@ fn last_os_error() -> std::io::Error {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::fe::FECheckOk;
+    use crate::fe::{FECheckOk, MID};
     use std::path::PathBuf;
     use tempfile::{tempdir, TempDir};
-
-    // module id (test)
-    const MID: u8 = 0x00;
 
     fn new_tmp() -> (TempDir, PathBuf, File) {
         let dir = tempdir().expect("temp dir");

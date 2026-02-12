@@ -5,10 +5,20 @@ mod linux;
 
 use crate::fe::{FErr, FRes};
 use crate::hints::unlikely;
-use std::{cell, mem, sync, sync::atomic, thread};
+use std::{
+    cell, fmt, io, mem, path,
+    sync::{self, atomic},
+    thread, time,
+};
 
-// Domain Id for [`ff`] is **17**
+/// Domain Id for [`FF`] is **17**
 const ERRDOMAIN: u8 = 0x11;
+
+/// default auto flush state for [`FFCfg`]
+const AUTO_FLUSH: bool = false;
+
+/// default flush duration for [`FFCfg`]
+const FLUSH_DURATION: time::Duration = time::Duration::from_millis(250);
 
 #[cfg(target_os = "linux")]
 type FFile = linux::File;
@@ -16,21 +26,85 @@ type FFile = linux::File;
 #[cfg(not(target_os = "linux"))]
 type FFile = ();
 
+/// Error codes for [`FF`]
+#[repr(u16)]
+pub enum FFErr {
+    /// (256) internal fuck up
+    Hcf = 0x100,
+
+    /// (257) unknown error (fallback)
+    Unk = 0x101,
+
+    /// (258) no more space available
+    Nsp = 0x102,
+
+    /// (259) unexpected eof
+    Eof = 0x103,
+
+    /// (260) syncing error
+    Syn = 0x104,
+
+    /// (261) no write perm
+    Wrt = 0x105,
+
+    /// (262) no read perm
+    Red = 0x106,
+
+    /// (263) invalid path
+    Inv = 0x107,
+
+    /// (264) thread error or panic inside thread
+    Txe = 0x108,
+
+    /// (265) lock error (failed or poisoned)
+    Lpn = 0x109,
+}
+
 /// Config for [`FF`]
 #[derive(Clone)]
 pub struct FFCfg {
-    /// module id (used for error codes)
+    /// module id for [`FF`]
+    ///
+    /// This id is used for error codes
+    ///
+    /// ## Why
+    ///
+    /// It enables for easier identification of error boundries when multiple [`FM`]
+    /// modules are present in the codebase
     pub module_id: u8,
 
-    /// when true, all dirty pages would be automatically be synced by a
-    /// background thread
+    /// when true, all dirty pages would be synced by background thread
     pub auto_flush: bool,
 
     /// Path of the file
-    pub path: std::path::PathBuf,
+    pub path: path::PathBuf,
 
     /// time interval for sync to flush dirty pages
-    pub flush_duration: std::time::Duration,
+    pub flush_duration: time::Duration,
+}
+
+impl FFCfg {
+    /// Create a new instance of [`FFCfg`] w/ specified `module_id`
+    pub const fn new(path: path::PathBuf, module_id: u8) -> Self {
+        Self {
+            path,
+            module_id,
+            auto_flush: AUTO_FLUSH,
+            flush_duration: FLUSH_DURATION,
+        }
+    }
+
+    /// Enable `auto_flush` for intervaled background sync for [`FF`]
+    pub const fn enable_auto_flush(mut self) -> Self {
+        self.auto_flush = true;
+        self
+    }
+
+    /// Set the interval for sync in [`FF`]
+    pub const fn flush_duration(mut self, interval: time::Duration) -> Self {
+        self.flush_duration = interval;
+        self
+    }
 }
 
 /// Custom implementation of File
@@ -248,7 +322,7 @@ impl FF {
 
         let closed = self.0.closed.load(atomic::Ordering::Acquire);
         if unlikely(closed) {
-            let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Trying to access closed FF");
+            let error = io::Error::new(io::ErrorKind::BrokenPipe, "Trying to access closed FF");
             return new_error(self.0.cfg.module_id, FFErr::Hcf, error);
         }
 
@@ -278,8 +352,8 @@ impl Drop for FF {
     }
 }
 
-impl std::fmt::Display for FF {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for FF {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         #[cfg(not(target_os = "linux"))]
         unimplemented!();
 
@@ -445,36 +519,54 @@ fn get_max_iovecs() -> usize {
     MAX_IOVECS
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[inline]
+pub(in crate::ff) fn new_error<E, R>(mid: u8, reason: FFErr, error: E) -> FRes<R>
+where
+    E: fmt::Display,
+{
+    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
+    let err = FErr::with_err(code, error);
+    Err(err)
+}
+
+#[inline]
+pub(in crate::ff) fn raw_error<E>(mid: u8, reason: FFErr, error: E) -> FErr
+where
+    E: fmt::Display,
+{
+    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
+    FErr::with_err(code, error)
+}
+
+#[inline]
+pub(in crate::ff) fn raw_err_with_msg<E>(mid: u8, error: E, reason: FFErr, msg: &'static str) -> FErr
+where
+    E: fmt::Display,
+{
+    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
+    FErr::with_msg(code, format!("{msg} due to error =>\n{error}"))
+}
+
 mod ff_tests {
     use super::*;
-    use crate::fe::FECheckOk;
-    use std::{path::PathBuf, sync::Arc, time::Duration};
+    use crate::fe::{FECheckOk, MID};
     use tempfile::{tempdir, TempDir};
 
-    const MID: u8 = 0x00;
     const LEN: usize = 0x20;
-    const FLUSH: Duration = Duration::from_millis(50);
 
-    fn new_cfg(path: PathBuf) -> FFCfg {
-        FFCfg {
-            module_id: MID,
-            auto_flush: false,
-            path,
-            flush_duration: FLUSH,
-        }
+    fn new_cfg(path: path::PathBuf) -> FFCfg {
+        FFCfg::new(path, MID)
     }
 
-    fn new_tmp(auto_flush: bool) -> (TempDir, PathBuf, FF) {
+    fn new_tmp(auto_flush: bool) -> (TempDir, path::PathBuf, FF) {
         let dir = tempdir().expect("temp dir");
         let path = dir.path().join("tmp_file");
 
-        let cfg = FFCfg {
-            module_id: MID,
-            auto_flush,
-            path: path.clone(),
-            flush_duration: FLUSH,
-        };
+        let mut cfg = new_cfg(path.clone());
+
+        if auto_flush {
+            cfg = cfg.enable_auto_flush();
+        }
 
         let ff = FF::new(cfg, LEN as u64).expect("new FF");
         (dir, path, ff)
@@ -515,6 +607,7 @@ mod ff_tests {
 
     mod resize {
         use super::*;
+        use std::fs;
 
         #[test]
         fn resize_zero_extends() {
@@ -524,7 +617,7 @@ mod ff_tests {
             assert!(ff.resize(NEW_LEN).check_ok());
             assert_eq!(ff.length(), NEW_LEN);
 
-            let data = std::fs::read(&path).expect("read file");
+            let data = fs::read(&path).expect("read file");
             assert_eq!(data.len(), NEW_LEN as usize);
             assert!(data.iter().all(|b| *b == 0));
         }
@@ -535,7 +628,7 @@ mod ff_tests {
             const NEW_LEN: u64 = 0x80;
 
             assert!(ff.resize(NEW_LEN).check_ok());
-            std::thread::sleep(FLUSH * 2);
+            thread::sleep(FLUSH_DURATION * 2);
             drop(ff);
 
             let cfg = new_cfg(path);
@@ -583,7 +676,7 @@ mod ff_tests {
             let data = [0xABu8; LEN];
 
             assert!(ff.write(data.as_ptr(), 0, LEN).check_ok());
-            std::thread::sleep(FLUSH * 2);
+            thread::sleep(FLUSH_DURATION * 2);
             drop(ff);
 
             let cfg = new_cfg(path);
@@ -604,14 +697,14 @@ mod ff_tests {
             const CHUNK: usize = 0x100;
 
             let (_dir, _path, ff) = new_tmp(false);
-            let ff = Arc::new(ff);
+            let ff = sync::Arc::new(ff);
 
             assert!(ff.resize((THREADS * CHUNK) as u64).check_ok());
 
             let mut handles = Vec::new();
             for i in 0..THREADS {
                 let f = ff.clone();
-                handles.push(std::thread::spawn(move || {
+                handles.push(thread::spawn(move || {
                     let data = vec![i as u8; CHUNK];
                     f.write(data.as_ptr(), i * CHUNK, CHUNK).expect("write");
                 }));
@@ -648,66 +741,4 @@ mod ff_tests {
             assert!(ff.delete().is_err());
         }
     }
-}
-
-#[inline]
-pub(crate) fn new_error<E, R>(mid: u8, reason: FFErr, error: E) -> FRes<R>
-where
-    E: std::fmt::Display,
-{
-    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
-    let err = FErr::with_err(code, error);
-    Err(err)
-}
-
-#[inline]
-pub(crate) fn raw_error<E>(mid: u8, reason: FFErr, error: E) -> FErr
-where
-    E: std::fmt::Display,
-{
-    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
-    FErr::with_err(code, error)
-}
-
-#[inline]
-pub(crate) fn raw_err_with_msg<E>(mid: u8, error: E, reason: FFErr, msg: &'static str) -> FErr
-where
-    E: std::fmt::Display,
-{
-    let code = crate::fe::new_err_code(mid, ERRDOMAIN, reason as u16);
-    FErr::with_msg(code, format!("{msg} due to error =>\n{error}"))
-}
-
-/// Error codes for [`FF`]
-#[repr(u16)]
-pub enum FFErr {
-    /// (256) internal fuck up
-    Hcf = 0x100,
-
-    /// (257) unknown error (fallback)
-    Unk = 0x101,
-
-    /// (258) no more space available
-    Nsp = 0x102,
-
-    /// (259) unexpected eof
-    Eof = 0x103,
-
-    /// (260) syncing error
-    Syn = 0x104,
-
-    /// (261) no write perm
-    Wrt = 0x105,
-
-    /// (262) no read perm
-    Red = 0x106,
-
-    /// (263) invalid path
-    Inv = 0x107,
-
-    /// (264) thread error or panic inside thread
-    Txe = 0x108,
-
-    /// (265) lock error (failed or poisoned)
-    Lpn = 0x109,
 }

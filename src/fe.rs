@@ -2,6 +2,10 @@
 //! Custom errors implementation for Frozen Codebases
 //!
 
+/// Default `module_id` for testing
+#[cfg(test)]
+pub const MID: u8 = 0x00;
+
 /// 32-bit error code used in [`FErr`]
 pub type FECode = u32;
 
