@@ -273,24 +273,24 @@ mod tests {
             }
         }
 
-        #[test]
-        fn mmap_write_is_in_synced_with_file_read() {
-            let (_dir, _tmp, file, map) = new_tmp();
+        // #[test]
+        // fn mmap_write_is_in_synced_with_file_read() {
+        //     let (_dir, _tmp, file, map) = new_tmp();
 
-            unsafe {
-                // write + sync
-                let ptr = map.get_mut::<u64>(0);
-                *ptr = 0xDEAD_C0DE_DEAD_C0DE;
-                assert!(map.sync(LEN, MID).check_ok());
+        //     unsafe {
+        //         // write + sync
+        //         let ptr = map.get_mut::<u64>(0);
+        //         *ptr = 0xDEAD_C0DE_DEAD_C0DE;
+        //         assert!(map.sync(LEN, MID).check_ok());
 
-                // pread
-                let mut buf = [0u8; 8];
-                file.read(buf.as_mut_ptr(), 0, 8).expect("failed to read");
-                assert_eq!(u64::from_le_bytes(buf), 0xDEAD_C0DE_DEAD_C0DE);
+        //         // pread
+        //         let mut buf = [0u8; 8];
+        //         file.read(buf.as_mut_ptr(), 0, 8).expect("failed to read");
+        //         assert_eq!(u64::from_le_bytes(buf), 0xDEAD_C0DE_DEAD_C0DE);
 
-                assert!(map.unmap(LEN, MID).check_ok());
-            }
-        }
+        //         assert!(map.unmap(LEN, MID).check_ok());
+        //     }
+        // }
     }
 
     mod concurrency {

@@ -238,76 +238,35 @@ impl FF {
         }
     }
 
-    /// Read at given `offset` from [`FF`]
-    #[inline]
-    pub fn read(&self, buf_ptr: *mut u8, offset: usize, len_to_read: usize) -> FRes<()> {
-        // sanity check
-        self.ensure_sanity()?;
-
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
-        unsafe {
-            self.get_file()
-                .pread(buf_ptr, offset, len_to_read, self.0.cfg.module_id)
-        }
-    }
-
     /// Read (multiple vectors) at given `offset` from [`FF`]
-    #[inline]
-    pub fn readv(&self, buf_ptrs: &[*mut u8], offset: usize, len_to_read: usize) -> FRes<()> {
+    #[cfg(target_os = "linux")]
+    #[inline(always)]
+    pub fn readv(&self, iovecs: &mut [libc::iovec], offset: usize) -> FRes<()> {
         // sanity checks
         self.ensure_sanity()?;
-        debug_assert!(buf_ptrs.len() <= self.0.max_iovecs);
+        debug_assert!(iovecs.len() <= self.0.max_iovecs);
 
         #[cfg(not(target_os = "linux"))]
         unimplemented!();
 
         #[cfg(target_os = "linux")]
         unsafe {
-            self.get_file()
-                .preadv(buf_ptrs, offset, len_to_read, self.0.cfg.module_id)
+            self.get_file().preadv(iovecs, offset, self.0.cfg.module_id)
         }
-    }
-
-    /// Write at given `offset` to [`FF`]
-    #[inline]
-    pub fn write(&self, buf_ptr: *const u8, offset: usize, len_to_write: usize) -> FRes<()> {
-        // sanity check
-        self.ensure_sanity()?;
-        debug_assert!(offset + len_to_write <= self.length() as usize);
-
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
-        unsafe {
-            self.get_file()
-                .pwrite(buf_ptr, offset, len_to_write, self.0.cfg.module_id)
-        }?;
-
-        self.0.dirty.store(true, atomic::Ordering::Release);
-        self.0.cv.notify_one();
-        Ok(())
     }
 
     /// Write (multiple vectors) at given `offset` to [`FF`]
     #[inline]
-    pub fn writev(&self, buf_ptrs: &[*const u8], offset: usize, buffer_size: usize) -> FRes<()> {
+    pub fn writev(&self, iovecs: &mut [libc::iovec], offset: usize) -> FRes<()> {
         // sanity check
         self.ensure_sanity()?;
-        debug_assert!(buf_ptrs.len() <= self.0.max_iovecs);
-        debug_assert!(offset + (buf_ptrs.len() * buffer_size) <= self.length() as usize);
+        debug_assert!(iovecs.len() <= self.0.max_iovecs);
 
         #[cfg(not(target_os = "linux"))]
         unimplemented!();
 
         #[cfg(target_os = "linux")]
-        unsafe {
-            self.get_file()
-                .pwritev(buf_ptrs, offset, buffer_size, self.0.cfg.module_id)
-        }?;
+        unsafe { self.get_file().pwritev(iovecs, offset, self.0.cfg.module_id) }?;
 
         self.0.dirty.store(true, atomic::Ordering::Release);
         self.0.cv.notify_one();
@@ -640,52 +599,86 @@ mod ff_tests {
 
     mod write_read {
         use super::*;
+        use libc::iovec;
 
         #[test]
-        fn write_read_cycle() {
+        fn writev_readv_cycle() {
             let (_dir, _path, ff) = new_tmp(false);
             let data = [0x1Au8; LEN];
 
-            assert!(ff.write(data.as_ptr(), 0, LEN).check_ok());
+            const VECS: usize = 8;
+            let total = VECS * LEN;
 
-            let mut buf = vec![0u8; LEN];
-            assert!(ff.read(buf.as_mut_ptr(), 0, LEN).check_ok());
-            assert_eq!(buf, data);
-        }
-
-        #[test]
-        fn writev_read_cycle() {
-            let (_dir, _path, ff) = new_tmp(false);
-            let data = [0x1Au8; LEN];
-            let ptrs = vec![data.as_ptr(); 8];
-
-            let total = ptrs.len() * LEN;
             assert!(ff.resize(total as u64).check_ok());
-            assert!(ff.writev(&ptrs, 0, LEN).check_ok());
 
-            let mut buf = vec![0u8; total];
-            assert!(ff.read(buf.as_mut_ptr(), 0, total).check_ok());
+            // ---------- writev ----------
+            let mut write_iovecs: Vec<iovec> = (0..VECS)
+                .map(|_| iovec {
+                    iov_base: data.as_ptr() as *mut _,
+                    iov_len: LEN,
+                })
+                .collect();
 
-            for chunk in buf.chunks_exact(LEN) {
-                assert_eq!(chunk, data);
+            assert!(ff.writev(&mut write_iovecs, 0).check_ok());
+
+            // ---------- readv ----------
+            let mut read_bufs: Vec<Vec<u8>> = (0..VECS).map(|_| vec![0u8; LEN]).collect();
+
+            let mut read_iovecs: Vec<iovec> = read_bufs
+                .iter_mut()
+                .map(|buf| iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: LEN,
+                })
+                .collect();
+
+            assert!(ff.readv(&mut read_iovecs, 0).check_ok());
+
+            for buf in read_bufs.iter() {
+                assert_eq!(buf.as_slice(), &data);
             }
         }
 
         #[test]
-        fn write_persist_across_sessions() {
+        fn writev_persist_across_sessions() {
             let (_dir, path, ff) = new_tmp(true);
             let data = [0xABu8; LEN];
 
-            assert!(ff.write(data.as_ptr(), 0, LEN).check_ok());
+            const VECS: usize = 4;
+            let total = VECS * LEN;
+
+            assert!(ff.resize(total as u64).check_ok());
+
+            let mut write_iovecs: Vec<iovec> = (0..VECS)
+                .map(|_| iovec {
+                    iov_base: data.as_ptr() as *mut _,
+                    iov_len: LEN,
+                })
+                .collect();
+
+            assert!(ff.writev(&mut write_iovecs, 0).check_ok());
+
             thread::sleep(FLUSH_DURATION * 2);
             drop(ff);
 
             let cfg = new_cfg(path);
             let ff = FF::open(cfg).expect("open FF");
-            let mut buf = vec![0u8; LEN];
 
-            assert!(ff.read(buf.as_mut_ptr(), 0, LEN).check_ok());
-            assert_eq!(buf, data);
+            let mut read_bufs: Vec<Vec<u8>> = (0..VECS).map(|_| vec![0u8; LEN]).collect();
+
+            let mut read_iovecs: Vec<iovec> = read_bufs
+                .iter_mut()
+                .map(|buf| iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: LEN,
+                })
+                .collect();
+
+            assert!(ff.readv(&mut read_iovecs, 0).check_ok());
+
+            for buf in read_bufs.iter() {
+                assert_eq!(buf.as_slice(), &data);
+            }
         }
     }
 
@@ -694,6 +687,8 @@ mod ff_tests {
 
         #[test]
         fn concurrent_writes_then_read() {
+            use libc::iovec;
+
             const THREADS: usize = 8;
             const CHUNK: usize = 0x100;
 
@@ -702,12 +697,19 @@ mod ff_tests {
 
             assert!(ff.resize((THREADS * CHUNK) as u64).check_ok());
 
+            // -------- concurrent writev --------
             let mut handles = Vec::new();
             for i in 0..THREADS {
                 let f = ff.clone();
                 handles.push(thread::spawn(move || {
                     let data = vec![i as u8; CHUNK];
-                    f.write(data.as_ptr(), i * CHUNK, CHUNK).expect("write");
+
+                    let mut iov = iovec {
+                        iov_base: data.as_ptr() as *mut _,
+                        iov_len: CHUNK,
+                    };
+
+                    f.writev(std::slice::from_mut(&mut iov), i * CHUNK).expect("writev");
                 }));
             }
 
@@ -715,11 +717,21 @@ mod ff_tests {
                 assert!(h.join().is_ok());
             }
 
-            let mut buf = vec![0u8; THREADS * CHUNK];
-            assert!(ff.read(buf.as_mut_ptr(), 0, buf.len()).check_ok());
+            // -------- readv --------
+            let mut read_bufs: Vec<Vec<u8>> = (0..THREADS).map(|_| vec![0u8; CHUNK]).collect();
+
+            let mut read_iovecs: Vec<iovec> = read_bufs
+                .iter_mut()
+                .map(|buf| iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: CHUNK,
+                })
+                .collect();
+
+            assert!(ff.readv(&mut read_iovecs, 0).check_ok());
 
             for i in 0..THREADS {
-                let chunk = &buf[i * CHUNK..(i + 1) * CHUNK];
+                let chunk = &read_bufs[i];
                 assert!(chunk.iter().all(|b| *b == i as u8));
             }
         }

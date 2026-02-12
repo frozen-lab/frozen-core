@@ -196,9 +196,97 @@ impl File {
         Ok(())
     }
 
+    /// Read (multiple vectors) at given `offset` w/ `preadv` syscall from [`File`]
+    #[inline(always)]
+    pub(super) unsafe fn preadv(&self, iovecs: &mut [iovec], offset: usize, mid: u8) -> FRes<()> {
+        // sanity checks
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+            debug_assert_ne!(iovecs.len(), 0, "iovecs must not be empty");
+
+            let iov_len = iovecs[0].iov_len;
+            debug_assert_ne!(iov_len, 0, "invalid iov length");
+
+            for iov in iovecs.iter() {
+                debug_assert_eq!(iov_len, iov.iov_len, "all iov's must be of same length");
+            }
+        }
+
+        let mut head = 0usize;
+        let mut consumed = 0usize;
+
+        let iovecs_len = iovecs.len();
+        while head < iovecs_len {
+            let ptr = iovecs.as_ptr().add(head);
+            let cnt = (iovecs_len - head) as c_int;
+
+            let res = preadv(self.fd(), ptr, cnt, offset as off_t + consumed as off_t);
+            if res <= 0 {
+                let error = io::Error::last_os_error();
+                let error_raw = error.raw_os_error();
+
+                // interrupted syscall
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                // unexpected EOF
+                if res == 0 {
+                    return new_error(mid, FFErr::Eof, error);
+                }
+
+                // permission denied
+                if error_raw == Some(EACCES) || error_raw == Some(EPERM) {
+                    return new_error(mid, FFErr::Red, error);
+                }
+
+                // invalid fd, bad pointer, illegal seek, etc.
+                if error_raw == Some(EINVAL)
+                    || error_raw == Some(EBADF)
+                    || error_raw == Some(EFAULT)
+                    || error_raw == Some(ESPIPE)
+                    || error_raw == Some(EMSGSIZE)
+                {
+                    return new_error(mid, FFErr::Hcf, error);
+                }
+
+                return new_error(mid, FFErr::Unk, error);
+            }
+
+            // NOTE: In posix systems, preadv may -
+            //
+            // - read fewer bytes than requested
+            // - stop in-between iovec's
+            // - stop mid iovec
+            //
+            // Even though this behavior is situation or filesystem dependent (according to my short research),
+            // we opt to handle it for correctness across different systems
+
+            let mut remaining = res as usize;
+            while remaining > 0 {
+                let iov = &mut iovecs[head];
+
+                if remaining >= iov.iov_len {
+                    remaining -= iov.iov_len;
+                    consumed += iov.iov_len;
+                    head += 1;
+                } else {
+                    iov.iov_base = (iov.iov_base as *mut u8).add(remaining) as *mut c_void;
+                    iov.iov_len -= remaining;
+                    consumed += remaining;
+                    remaining = 0;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Read at given `offset` w/ `pread` syscall from [`File`]
     #[inline(always)]
-    pub(super) unsafe fn pread(&self, buf_ptr: *mut u8, offset: usize, len_to_read: usize, mid: u8) -> FRes<()> {
+    #[allow(unused)]
+    unsafe fn pread(&self, buf_ptr: *mut u8, offset: usize, len_to_read: usize, mid: u8) -> FRes<()> {
         // sanity checks
         debug_assert_ne!(len_to_read, 0, "invalid length");
         debug_assert!(!buf_ptr.is_null(), "invalid buffer pointer");
@@ -250,183 +338,32 @@ impl File {
         Ok(())
     }
 
-    /// Read (multiple vectors) at given `offset` w/ `preadv` syscall from [`File`]
-    #[inline(always)]
-    pub(super) unsafe fn preadv(&self, buf_ptrs: &[*mut u8], offset: usize, buffer_size: usize, mid: u8) -> FRes<()> {
-        // sanity checks
-        #[cfg(debug_assertions)]
-        {
-            debug_assert_ne!(buffer_size, 0, "invalid buffer length");
-            debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
-        }
-
-        let mut consumed = 0usize;
-        let mut iovecs: Vec<iovec> = buf_ptrs
-            .iter()
-            .map(|ptr| iovec {
-                iov_base: *ptr as *mut c_void,
-                iov_len: buffer_size,
-            })
-            .collect();
-
-        while !iovecs.is_empty() {
-            let res = preadv(
-                self.fd(),
-                iovecs.as_ptr(),
-                iovecs.len() as c_int,
-                offset as off_t + consumed as off_t,
-            );
-
-            if res <= 0 {
-                let error = io::Error::last_os_error();
-                let error_raw = error.raw_os_error();
-
-                // interrupted syscall
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-
-                // unexpected EOF
-                if res == 0 {
-                    return new_error(mid, FFErr::Eof, error);
-                }
-
-                // permission denied
-                if error_raw == Some(EACCES) || error_raw == Some(EPERM) {
-                    return new_error(mid, FFErr::Red, error);
-                }
-
-                // invalid fd, bad pointer, illegal seek, etc.
-                if error_raw == Some(EINVAL)
-                    || error_raw == Some(EBADF)
-                    || error_raw == Some(EFAULT)
-                    || error_raw == Some(ESPIPE)
-                    || error_raw == Some(EMSGSIZE)
-                {
-                    return new_error(mid, FFErr::Hcf, error);
-                }
-
-                return new_error(mid, FFErr::Unk, error);
-            }
-
-            // NOTE: In posix systems, preadv may -
-            //
-            // - read fewer bytes than requested
-            // - stop in-between iovec's
-            // - stop mid iovec
-            //
-            // Even though this behavior is situation or filesystem dependent (according to my short research),
-            // we opt to handle it for correctness across different systems
-
-            let mut remaining = res as usize;
-
-            while remaining > 0 {
-                let iov = &mut iovecs[0];
-
-                if remaining >= iov.iov_len {
-                    remaining -= iov.iov_len;
-                    consumed += iov.iov_len;
-                    iovecs.remove(0);
-                } else {
-                    iov.iov_base = (iov.iov_base as *mut u8).add(remaining) as *mut c_void;
-                    iov.iov_len -= remaining;
-                    consumed += remaining;
-                    remaining = 0;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Write at given `offset` w/ `pwrite` syscall to [`File`]
-    #[inline(always)]
-    pub(super) unsafe fn pwrite(&self, buf_ptr: *const u8, offset: usize, len_to_write: usize, mid: u8) -> FRes<()> {
-        // sanity checks
-        debug_assert_ne!(len_to_write, 0, "invalid length");
-        debug_assert!(!buf_ptr.is_null(), "invalid buffer pointer");
-        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
-
-        let mut written = 0usize;
-        while written < len_to_write {
-            let res = pwrite(
-                self.fd(),
-                buf_ptr.add(written) as *const c_void,
-                (len_to_write - written) as size_t,
-                (offset + written) as i64,
-            );
-
-            if res <= 0 {
-                let error = std::io::Error::last_os_error();
-                let error_raw = error.raw_os_error();
-
-                // io interrupt
-                if error.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-
-                // unexpected EOF
-                if res == 0 {
-                    return new_error(mid, FFErr::Eof, error);
-                }
-
-                // read-only file (can also be caused by TOCTOU)
-                if error_raw == Some(EROFS) {
-                    return new_error(mid, FFErr::Wrt, error);
-                }
-
-                // invalid fd, invalid fd type, bad pointer, etc.
-                if error_raw == Some(EINVAL)
-                    || error_raw == Some(EBADF)
-                    || error_raw == Some(EFAULT)
-                    || error_raw == Some(ESPIPE)
-                {
-                    return new_error(mid, FFErr::Hcf, error);
-                }
-
-                return new_error(mid, FFErr::Unk, error);
-            }
-
-            written += res as usize;
-        }
-
-        Ok(())
-    }
-
     /// Write (multiple vectors) at given `offset` w/ `pwritev` syscall to [`File`]
     #[inline(always)]
-    pub(super) unsafe fn pwritev(
-        &self,
-        buf_ptrs: &[*const u8],
-        offset: usize,
-        buffer_size: usize,
-        mid: u8,
-    ) -> FRes<()> {
+    pub(super) unsafe fn pwritev(&self, iovecs: &mut [iovec], offset: usize, mid: u8) -> FRes<()> {
         // sanity checks
         #[cfg(debug_assertions)]
         {
-            debug_assert_ne!(buffer_size, 0, "invalid buffer length");
             debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+            debug_assert_ne!(iovecs.len(), 0, "iovecs must not be empty");
+
+            let iov_len = iovecs[0].iov_len;
+            debug_assert_ne!(iov_len, 0, "invalid iov length");
+
+            for iov in iovecs.iter() {
+                debug_assert_eq!(iov_len, iov.iov_len, "all iov's must be of same length");
+            }
         }
 
+        let mut head = 0usize;
         let mut consumed = 0usize;
 
-        let mut iovecs: Vec<iovec> = buf_ptrs
-            .iter()
-            .map(|ptr| iovec {
-                iov_base: *ptr as *mut c_void,
-                iov_len: buffer_size,
-            })
-            .collect();
+        let iovecs_len = iovecs.len();
+        while head < iovecs_len {
+            let ptr = iovecs.as_ptr().add(head);
+            let cnt = (iovecs_len - head) as c_int;
 
-        while !iovecs.is_empty() {
-            let res = pwritev(
-                self.fd(),
-                iovecs.as_ptr(),
-                iovecs.len() as c_int,
-                offset as off_t + consumed as off_t,
-            );
-
+            let res = pwritev(self.fd(), ptr, cnt, offset as off_t + consumed as off_t);
             if res <= 0 {
                 let error = std::io::Error::last_os_error();
                 let error_raw = error.raw_os_error();
@@ -474,14 +411,13 @@ impl File {
             // we opt to handle it for correctness across different systems
 
             let mut remaining = res as usize;
-
             while remaining > 0 {
-                let iov = &mut iovecs[0];
+                let iov = &mut iovecs[head];
 
                 if remaining >= iov.iov_len {
                     remaining -= iov.iov_len;
                     consumed += iov.iov_len;
-                    iovecs.remove(0);
+                    head += 1;
                 } else {
                     iov.iov_base = (iov.iov_base as *mut u8).add(remaining) as *mut c_void;
                     iov.iov_len -= remaining;
@@ -489,6 +425,61 @@ impl File {
                     remaining = 0;
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    /// Write at given `offset` w/ `pwrite` syscall to [`File`]
+    #[inline(always)]
+    #[allow(unused)]
+    unsafe fn pwrite(&self, buf_ptr: *const u8, offset: usize, len_to_write: usize, mid: u8) -> FRes<()> {
+        // sanity checks
+        debug_assert_ne!(len_to_write, 0, "invalid length");
+        debug_assert!(!buf_ptr.is_null(), "invalid buffer pointer");
+        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxFile");
+
+        let mut written = 0usize;
+        while written < len_to_write {
+            let res = pwrite(
+                self.fd(),
+                buf_ptr.add(written) as *const c_void,
+                (len_to_write - written) as size_t,
+                (offset + written) as i64,
+            );
+
+            if res <= 0 {
+                let error = std::io::Error::last_os_error();
+                let error_raw = error.raw_os_error();
+
+                // io interrupt
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                // unexpected EOF
+                if res == 0 {
+                    return new_error(mid, FFErr::Eof, error);
+                }
+
+                // read-only file (can also be caused by TOCTOU)
+                if error_raw == Some(EROFS) {
+                    return new_error(mid, FFErr::Wrt, error);
+                }
+
+                // invalid fd, invalid fd type, bad pointer, etc.
+                if error_raw == Some(EINVAL)
+                    || error_raw == Some(EBADF)
+                    || error_raw == Some(EFAULT)
+                    || error_raw == Some(ESPIPE)
+                {
+                    return new_error(mid, FFErr::Hcf, error);
+                }
+
+                return new_error(mid, FFErr::Unk, error);
+            }
+
+            written += res as usize;
         }
 
         Ok(())
@@ -590,7 +581,7 @@ fn last_os_error() -> std::io::Error {
     io::Error::last_os_error()
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux")))]
 mod tests {
     use super::*;
     use crate::fe::{FECheckOk, MID};
@@ -805,12 +796,20 @@ mod tests {
             const LEN: usize = 0x20;
             const DATA: [u8; LEN] = [0x1A; LEN];
 
-            let ptrs = vec![DATA.as_ptr(); 0x10];
+            let ptrs = vec![DATA.as_ptr(); LEN];
+            let mut iovecs: Vec<iovec> = ptrs
+                .iter()
+                .map(|ptr| iovec {
+                    iov_base: *ptr as *mut c_void,
+                    iov_len: LEN,
+                })
+                .collect();
+
             let total_len = ptrs.len() * LEN;
 
             unsafe {
                 file.resize(total_len as u64, MID).expect("resize file");
-                assert!(file.pwritev(&ptrs, 0, LEN, MID).check_ok());
+                assert!(file.pwritev(&mut iovecs, 0, MID).check_ok());
 
                 let mut buf = vec![0u8; total_len];
                 assert!(
@@ -834,22 +833,34 @@ mod tests {
             const LEN: usize = 0x20;
             const DATA: [u8; LEN] = [0x1A; LEN];
 
-            let ptrs = vec![DATA.as_ptr(); 0x10];
+            let ptrs = vec![DATA.as_ptr(); LEN];
+            let mut iovecs: Vec<iovec> = ptrs
+                .iter()
+                .map(|ptr| iovec {
+                    iov_base: *ptr as *mut c_void,
+                    iov_len: LEN,
+                })
+                .collect();
             let total_len = ptrs.len() * LEN;
 
             unsafe {
                 file.resize(total_len as u64, MID).expect("resize file");
-                assert!(file.pwritev(&ptrs, 0, LEN, MID).check_ok());
+                assert!(file.pwritev(&mut iovecs, 0, MID).check_ok());
 
-                // prepare read buffers
-                let mut bufs: Vec<Vec<u8>> = (0..ptrs.len()).map(|_| vec![0u8; LEN]).collect();
-                let buf_ptrs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+                let mut read_bufs: Vec<Vec<u8>> = (0..LEN).map(|_| vec![0u8; LEN]).collect();
+                let mut read_iovecs: Vec<iovec> = read_bufs
+                    .iter_mut()
+                    .map(|buf| iovec {
+                        iov_base: buf.as_mut_ptr() as *mut c_void,
+                        iov_len: LEN,
+                    })
+                    .collect();
 
-                assert!(file.preadv(&buf_ptrs, 0, LEN, MID).check_ok(), "preadv failed");
+                assert!(file.preadv(&mut read_iovecs, 0, MID).check_ok(), "preadv failed");
 
                 // verify each buffer
-                for buf in bufs {
-                    assert_eq!(buf, DATA, "data mismatch in pwritev/preadv cycle");
+                for buf in read_bufs.iter() {
+                    assert_eq!(buf.as_slice(), &DATA, "data mismatch in pwritev/preadv cycle");
                 }
 
                 assert!(file.close(MID).check_ok());
