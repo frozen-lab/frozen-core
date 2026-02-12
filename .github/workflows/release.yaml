@@ -35,10 +35,10 @@ jobs:
           cache-on-failure: true
 
       - name: Run ff example
-        run: cargo run --release --example ff_example --features ff
+        run: cargo run --release --example ff_example --features="ff"
 
       - name: Run fm example
-        run: cargo run --release --example fm_example --features fm
+        run: cargo run --release --example fm_example --features="ff, fm"
 
   release:
     needs: examples
