@@ -2,8 +2,8 @@ use super::{new_error, FFErr};
 use crate::fe::FRes;
 use libc::{
     c_int, c_void, close, fdatasync, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite, pwritev, size_t,
-    stat, unlink, EACCES, EBADF, EDQUOT, EFAULT, EINVAL, EIO, EISDIR, EMSGSIZE, ENOSPC, EPERM, EROFS, ESPIPE,
-    O_CLOEXEC, O_CREAT, O_NOATIME, O_RDWR, O_TRUNC, S_IRUSR, S_IWUSR,
+    stat, unlink, EACCES, EBADF, EDQUOT, EFAULT, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT, ENOSPC, ENOTDIR, EPERM, EROFS,
+    ESPIPE, O_CLOEXEC, O_CREAT, O_NOATIME, O_RDWR, O_TRUNC, S_IRUSR, S_IWUSR,
 };
 use std::{
     ffi::CString,
@@ -16,21 +16,25 @@ use std::{
 const CLOSED_FD: i32 = -1;
 
 /// Linux implementation of `PosixFile`
-pub(crate) struct PosixFile(AtomicI32);
+pub(super) struct PosixFile(AtomicI32);
 
 unsafe impl Send for PosixFile {}
 unsafe impl Sync for PosixFile {}
 
 impl PosixFile {
     /// creates/opens a new instance of [`PosixFile`]
-    pub(crate) unsafe fn new(path: &PathBuf, is_new: bool, mid: u8) -> FRes<Self> {
-        let fd = open_with_flags(path, prep_flags(is_new), mid)?;
+    ///
+    /// ## Errors
+    ///
+    /// - `FFErr::Inv` is thrown when the given `path` is either invalid or missing sub-dir's
+    pub(super) unsafe fn new(path: &PathBuf, is_new: bool, mid: u8) -> FRes<Self> {
+        let fd = open_raw(path, prep_flags(is_new), mid)?;
         Ok(Self(AtomicI32::new(fd)))
     }
 
     /// Get file descriptor for [`PosixFile`]
     #[inline]
-    pub(crate) fn fd(&self) -> i32 {
+    pub(super) fn fd(&self) -> i32 {
         self.0.load(Ordering::Acquire)
     }
 
@@ -101,7 +105,7 @@ impl PosixFile {
     ///
     /// This function is _idempotent_ and prevents close-on-close errors!
     #[inline(always)]
-    pub(crate) unsafe fn close(&self, mid: u8) -> FRes<()> {
+    pub(super) unsafe fn close(&self, mid: u8) -> FRes<()> {
         // prevent multiple close syscalls
         let fd = self.0.swap(CLOSED_FD, Ordering::AcqRel);
         if fd == CLOSED_FD {
@@ -144,7 +148,7 @@ impl PosixFile {
 
     /// Fetches current length of [`PosixFile`] using `fstat` syscall
     #[inline]
-    pub(crate) unsafe fn length(&self, mid: u8) -> FRes<u64> {
+    pub(super) unsafe fn length(&self, mid: u8) -> FRes<u64> {
         // sanity check
         debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxPosixFile");
 
@@ -167,7 +171,7 @@ impl PosixFile {
     }
 
     /// Resize [`PosixFile`] w/ `new_len`
-    pub(crate) unsafe fn resize(&self, new_len: u64, mid: u8) -> FRes<()> {
+    pub(super) unsafe fn resize(&self, new_len: u64, mid: u8) -> FRes<()> {
         // sanity check
         debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxPosixFile");
 
@@ -497,7 +501,7 @@ impl PosixFile {
 ///
 /// To remain sane across ownership models, containers, and shared filesystems,
 /// we explicitly retry the `open()` w/o `O_NOATIME` when `EPERM` is encountered
-unsafe fn open_with_flags(path: &PathBuf, mut flags: i32, mid: u8) -> FRes<i32> {
+unsafe fn open_raw(path: &PathBuf, mut flags: i32, mid: u8) -> FRes<i32> {
     let cpath = path_to_cstring(path, mid)?;
     let mut tried_noatime = false;
 
@@ -536,6 +540,11 @@ unsafe fn open_with_flags(path: &PathBuf, mut flags: i32, mid: u8) -> FRes<i32> 
             // path is a dir (hcf)
             if err_raw == Some(EISDIR) {
                 return new_error(mid, FFErr::Hcf, error);
+            }
+
+            // invalid path (missing sub dir's)
+            if err_raw == Some(ENOENT) || err_raw == Some(ENOTDIR) {
+                return new_error(mid, FFErr::Inv, error);
             }
 
             return new_error(mid, FFErr::Unk, error);

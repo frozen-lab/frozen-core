@@ -6,7 +6,7 @@ use libc::{
 use std::{io, ptr, sync::atomic, thread};
 
 /// Linux implementation of `MemMap`
-pub(crate) struct MMap {
+pub(super) struct MMap {
     ptr: *mut c_void,
     unmapped: atomic::AtomicBool,
 }
@@ -16,7 +16,7 @@ unsafe impl Sync for MMap {}
 
 impl MMap {
     /// Create a new [`MMap`] instance for given `fd` w/ read & write permissions
-    pub(crate) unsafe fn new(fd: i32, length: size_t, mid: u8) -> FRes<Self> {
+    pub(super) unsafe fn new(fd: i32, length: size_t, mid: u8) -> FRes<Self> {
         let ptr = mmap(
             ptr::null_mut(),
             length,
@@ -55,7 +55,7 @@ impl MMap {
     }
 
     /// Unmap (free/drop) the mmaped instance of [`MMap`]
-    pub(crate) unsafe fn unmap(&self, length: usize, mid: u8) -> FRes<()> {
+    pub(super) unsafe fn unmap(&self, length: usize, mid: u8) -> FRes<()> {
         // NOTE: To avoid another thread/process from executing munmap, we mark unmapped before even
         // trying to unmap, this kind of wroks like mutex, as we reassign to false on failure
         if self
@@ -83,7 +83,7 @@ impl MMap {
     }
 
     /// Syncs in-mem data on the storage device
-    pub(crate) unsafe fn sync(&self, length: usize, mid: u8) -> FRes<()> {
+    pub(super) unsafe fn sync(&self, length: usize, mid: u8) -> FRes<()> {
         // only for EIO and EBUSY errors
         const MAX_RETRIES: usize = 4;
         let mut retries = 0;
@@ -127,7 +127,7 @@ impl MMap {
 
     /// Get an immutable typed pointer at given `offset`
     #[inline]
-    pub(crate) unsafe fn get<T>(&self, offset: usize) -> *const T {
+    pub(super) unsafe fn get<T>(&self, offset: usize) -> *const T {
         // sanity check
         debug_assert!(offset % 8 == 0, "Offset must be 8 bytes aligned");
         debug_assert!(
@@ -140,7 +140,7 @@ impl MMap {
 
     /// Get a mutable (read/write) typed pointer at given `offset`
     #[inline]
-    pub(crate) unsafe fn get_mut<T>(&self, offset: usize) -> *mut T {
+    pub(super) unsafe fn get_mut<T>(&self, offset: usize) -> *mut T {
         // sanity check
         debug_assert!(offset % 0x8 == 0, "Offset must be 8 bytes aligned");
         debug_assert!(
