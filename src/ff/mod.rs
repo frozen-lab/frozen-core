@@ -1,4 +1,4 @@
-//! Custom implementation of File
+//! Custom implementation of `std::fs::File`
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;

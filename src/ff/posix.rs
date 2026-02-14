@@ -1,5 +1,8 @@
 use super::{new_error, FFErr};
-use crate::fe::FRes;
+use crate::{
+    fe::FRes,
+    hints::{likely, unlikely},
+};
 use libc::{
     c_int, c_uint, c_void, close, fstat, ftruncate, iovec, off_t, open, preadv, pwritev, stat, sysconf, unlink, EACCES,
     EBADF, EDQUOT, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT, ENOSPC, ENOTDIR, EPERM, EROFS, ESPIPE,
@@ -203,7 +206,7 @@ impl POSIXFile {
         {
             let mut retries = 0;
             loop {
-                if libc::fallocate(fd, 0, curr_len as off_t, (new_len - curr_len) as off_t) == 0 {
+                if likely(libc::fallocate(fd, 0, curr_len as off_t, (new_len - curr_len) as off_t) == 0) {
                     return Ok(());
                 }
 
@@ -249,7 +252,7 @@ impl POSIXFile {
             }
         }
 
-        if ftruncate(fd, new_len as off_t) != 0 {
+        if unlikely(ftruncate(fd, new_len as off_t) != 0) {
             let error = last_os_error();
             let error_raw = error.raw_os_error();
 
@@ -305,7 +308,7 @@ impl POSIXFile {
             let ptr = iovecs.as_ptr().add(head);
 
             let res = preadv(fd, ptr, cnt, off);
-            if res <= 0 {
+            if unlikely(res <= 0) {
                 let error = io::Error::last_os_error();
                 let error_raw = error.raw_os_error();
 
@@ -397,7 +400,7 @@ impl POSIXFile {
             let ptr = iovecs.as_ptr().add(head);
 
             let res = pwritev(fd, ptr, cnt, off);
-            if res <= 0 {
+            if unlikely(res <= 0) {
                 let error = std::io::Error::last_os_error();
                 let error_raw = error.raw_os_error();
 
@@ -462,116 +465,6 @@ impl POSIXFile {
 
         Ok(())
     }
-
-    /// Read at given `offset` w/ `pread` syscall from [`POSIXFile`]
-    #[cfg(test)]
-    #[inline(always)]
-    unsafe fn pread(&self, buf_ptr: *mut u8, offset: usize, len_to_read: usize, mid: u8) -> FRes<()> {
-        // sanity checks
-        debug_assert_ne!(len_to_read, 0, "invalid length");
-        debug_assert!(!buf_ptr.is_null(), "invalid buffer pointer");
-        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
-
-        let mut read = 0usize;
-        while read < len_to_read {
-            let res = libc::pread(
-                self.fd(),
-                buf_ptr.add(read) as *mut c_void,
-                (len_to_read - read) as libc::size_t,
-                (offset + read) as i64,
-            );
-
-            if res <= 0 {
-                let error = std::io::Error::last_os_error();
-                let error_raw = error.raw_os_error();
-
-                // io interrupt
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-
-                // unexpected EOF
-                if res == 0 {
-                    return new_error(mid, FFErr::Eof, error);
-                }
-
-                // permission denied
-                if error_raw == Some(EACCES) || error_raw == Some(EPERM) {
-                    return new_error(mid, FFErr::Red, error);
-                }
-
-                // invalid fd, invalid fd type, bad pointer, etc.
-                if error_raw == Some(EINVAL)
-                    || error_raw == Some(EBADF)
-                    || error_raw == Some(EFAULT)
-                    || error_raw == Some(ESPIPE)
-                {
-                    return new_error(mid, FFErr::Hcf, error);
-                }
-
-                return new_error(mid, FFErr::Unk, error);
-            }
-
-            read += res as usize;
-        }
-
-        Ok(())
-    }
-
-    /// Write at given `offset` w/ `pwrite` syscall to [`POSIXFile`]
-    #[cfg(test)]
-    #[inline(always)]
-    unsafe fn pwrite(&self, buf_ptr: *const u8, offset: usize, len_to_write: usize, mid: u8) -> FRes<()> {
-        // sanity checks
-        debug_assert_ne!(len_to_write, 0, "invalid length");
-        debug_assert!(!buf_ptr.is_null(), "invalid buffer pointer");
-        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
-
-        let mut written = 0usize;
-        while written < len_to_write {
-            let res = libc::pwrite(
-                self.fd(),
-                buf_ptr.add(written) as *const c_void,
-                (len_to_write - written) as libc::size_t,
-                (offset + written) as i64,
-            );
-
-            if res <= 0 {
-                let error = std::io::Error::last_os_error();
-                let error_raw = error.raw_os_error();
-
-                // io interrupt
-                if error.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-
-                // unexpected EOF
-                if res == 0 {
-                    return new_error(mid, FFErr::Eof, error);
-                }
-
-                // read-only file (can also be caused by TOCTOU)
-                if error_raw == Some(EROFS) {
-                    return new_error(mid, FFErr::Wrt, error);
-                }
-
-                // invalid fd, invalid fd type, bad pointer, etc.
-                if error_raw == Some(EINVAL)
-                    || error_raw == Some(EBADF)
-                    || error_raw == Some(EFAULT)
-                    || error_raw == Some(ESPIPE)
-                {
-                    return new_error(mid, FFErr::Hcf, error);
-                }
-
-                return new_error(mid, FFErr::Unk, error);
-            }
-
-            written += res as usize;
-        }
-
-        Ok(())
-    }
 }
 
 /// create/open a new file w/ `open` syscall
@@ -605,7 +498,7 @@ unsafe fn open_raw(path: &path::PathBuf, flags: FD, mid: u8) -> FRes<FD> {
             open(cpath.as_ptr(), flags)
         };
 
-        if fd < 0 {
+        if unlikely(fd < 0) {
             let error = last_os_error();
             let err_raw = error.raw_os_error();
 
@@ -689,7 +582,7 @@ unsafe fn fsync_raw(fd: FD, mid: u8) -> FRes<()> {
     // only for EINTR errors
     let mut retries = 0;
     loop {
-        if libc::fsync(fd) != 0 {
+        if unlikely(libc::fsync(fd) != 0) {
             let error = last_os_error();
             let error_raw = error.raw_os_error();
 
@@ -755,7 +648,7 @@ unsafe fn fullsync_raw(fd: c_int, mid: u8) -> FRes<()> {
     let mut retries = 0;
 
     loop {
-        if libc::fcntl(fd, libc::F_FULLFSYNC) != 0 {
+        if unlikely(libc::fcntl(fd, libc::F_FULLFSYNC) != 0) {
             let error = last_os_error();
             let error_raw = error.raw_os_error();
 
@@ -838,7 +731,7 @@ unsafe fn fdatasync_raw(fd: FD, mid: u8) -> FRes<()> {
     // only for EIO & EINTR errors
     let mut retries = 0;
     loop {
-        if libc::fdatasync(fd) != 0 {
+        if unlikely(libc::fdatasync(fd) != 0) {
             let error = last_os_error();
             let error_raw = error.raw_os_error();
 
@@ -1211,61 +1104,6 @@ mod tests {
         use super::*;
 
         #[test]
-        fn pwrite_pread_cycle() {
-            let (_dir, _tmp, file) = new_tmp();
-
-            const LEN: usize = 0x20;
-            const DATA: [u8; LEN] = [0x1A; LEN];
-
-            unsafe {
-                file.resize(LEN as u64, MID).expect("resize file");
-                assert!(file.pwrite(DATA.as_ptr(), 0, LEN, MID).check_ok());
-
-                let mut buf = vec![0u8; LEN];
-                assert!(file.pread(buf.as_mut_ptr(), 0, LEN, MID).check_ok());
-                assert_eq!(DATA.to_vec(), buf, "mismatch between read and write");
-                assert!(file.close(MID).check_ok());
-            }
-        }
-
-        #[test]
-        fn pwritev_pread_cycle() {
-            let (_dir, _tmp, file) = new_tmp();
-
-            const LEN: usize = 0x20;
-            const DATA: [u8; LEN] = [0x1A; LEN];
-
-            let ptrs = vec![DATA.as_ptr(); LEN];
-            let mut iovecs: Vec<iovec> = ptrs
-                .iter()
-                .map(|ptr| iovec {
-                    iov_base: *ptr as *mut c_void,
-                    iov_len: LEN,
-                })
-                .collect();
-
-            let total_len = ptrs.len() * LEN;
-
-            unsafe {
-                file.resize(total_len as u64, MID).expect("resize file");
-                assert!(file.pwritev(&mut iovecs, 0, MID).check_ok());
-
-                let mut buf = vec![0u8; total_len];
-                assert!(
-                    file.pread(buf.as_mut_ptr(), 0, total_len, MID).check_ok(),
-                    "pread failed"
-                );
-                assert_eq!(buf.len(), total_len, "mismatch between read and write");
-
-                for chunk in buf.chunks_exact(LEN) {
-                    assert_eq!(chunk, DATA, "data mismatch in pwritev readback");
-                }
-
-                assert!(file.close(MID).check_ok());
-            }
-        }
-
-        #[test]
         fn pwritev_preadv_cycle() {
             let (_dir, _tmp, file) = new_tmp();
 
@@ -1307,7 +1145,7 @@ mod tests {
         }
 
         #[test]
-        fn pwrite_pread_cycle_across_sessions() {
+        fn pwritev_preadv_cycle_across_sessions() {
             let (_dir, tmp, file) = new_tmp();
 
             const LEN: usize = 0x20;
@@ -1315,8 +1153,13 @@ mod tests {
 
             // create + write + sync + close
             unsafe {
+                let mut write_iovecs = vec![iovec {
+                    iov_base: DATA.as_ptr() as *mut c_void,
+                    iov_len: LEN,
+                }];
+
                 assert!(file.resize(LEN as u64, MID).check_ok());
-                assert!(file.pwrite(DATA.as_ptr(), 0, LEN, MID).check_ok());
+                assert!(file.pwritev(&mut write_iovecs, 0, MID).check_ok());
 
                 assert!(file.sync(MID).check_ok());
                 assert!(file.close(MID).check_ok());
@@ -1324,11 +1167,16 @@ mod tests {
 
             // open + read + verify
             unsafe {
-                let mut buf = vec![0u8; LEN];
+                let mut read_buf = vec![0u8; LEN];
+                let mut read_iovecs = vec![iovec {
+                    iov_base: read_buf.as_mut_ptr() as *mut c_void,
+                    iov_len: LEN,
+                }];
+
                 let file = POSIXFile::new(&tmp, false, MID).expect("open file");
 
-                assert!(file.pread(buf.as_mut_ptr(), 0, LEN, MID).check_ok());
-                assert_eq!(DATA.to_vec(), buf, "mismatch between read and write");
+                assert!(file.preadv(&mut read_iovecs, 0, MID).check_ok());
+                assert_eq!(&DATA, read_buf.as_slice(), "mismatch between read and write");
                 assert!(file.close(MID).check_ok());
             }
         }
@@ -1353,7 +1201,15 @@ mod tests {
                 let f = file.clone();
                 handles.push(std::thread::spawn(move || {
                     let data = vec![i as u8; CHUNK];
-                    unsafe { f.pwrite(data.as_ptr(), i * CHUNK, CHUNK, MID).expect("write") };
+
+                    let mut iov = vec![iovec {
+                        iov_base: data.as_ptr() as *mut c_void,
+                        iov_len: CHUNK,
+                    }];
+
+                    unsafe {
+                        f.pwritev(&mut iov, i * CHUNK, MID).expect("pwritev failed");
+                    }
                 }));
             }
 
@@ -1371,7 +1227,12 @@ mod tests {
             //
 
             let mut read_buf = vec![0u8; THREADS * CHUNK];
-            unsafe { assert!(file.pread(read_buf.as_mut_ptr(), 0, read_buf.len(), MID).check_ok()) };
+            let mut read_iov = vec![iovec {
+                iov_base: read_buf.as_mut_ptr() as *mut c_void,
+                iov_len: read_buf.len(),
+            }];
+
+            unsafe { assert!(file.preadv(&mut read_iov, 0, MID).check_ok()) };
 
             for i in 0..THREADS {
                 let chunk = &read_buf[i * CHUNK..(i + 1) * CHUNK];
