@@ -115,11 +115,8 @@ unsafe impl Sync for FF {}
 
 impl FF {
     /// Create new [`FF`] w/ specified length
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn new(cfg: FFCfg, length: u64) -> FRes<Self> {
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
         let file = unsafe { posix::POSIXFile::new(&cfg.path, true, cfg.module_id) }?;
         let init_res = unsafe { file.resize(length, cfg.module_id) };
 
@@ -141,11 +138,8 @@ impl FF {
     }
 
     /// Open an existing `[FF]`
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn open(cfg: FFCfg) -> FRes<Self> {
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
         let file = unsafe { posix::POSIXFile::new(&cfg.path, false, cfg.module_id) }?;
         let length = unsafe { file.length(cfg.module_id) }?;
 
@@ -160,17 +154,14 @@ impl FF {
     }
 
     /// Resize [`FF`] w/ `new_len`
+    #[inline(always)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn resize(&self, new_len: u64) -> FRes<()> {
         // sanity checks
         self.ensure_sanity()?;
         debug_assert!(new_len > self.length());
 
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
         unsafe { self.get_file().resize(new_len, self.0.cfg.module_id) }?;
-
         self.0.length.store(new_len, atomic::Ordering::Release);
         Ok(())
     }
@@ -183,20 +174,20 @@ impl FF {
 
     /// Get file descriptor for [`FF`]
     #[inline]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn fd(&self) -> i32 {
         self.get_file().fd()
     }
 
     /// Returns the [`FErr`] representing the last error occurred in [`FF`]
     #[inline]
-    #[cfg(target_os = "linux")]
     pub fn last_error(&self) -> Option<&FErr> {
         self.0.error.get()
     }
 
     /// Syncs in-mem data on the storage device
     #[inline]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn sync(&self) -> FRes<()> {
         // sanity check
         self.ensure_sanity()?;
@@ -206,6 +197,7 @@ impl FF {
     /// Delete [`FF`] from filesystem
     ///
     /// _NOTE:_ Closing [`FF`] beforehand is not required
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn delete(&self) -> FRes<()> {
         let file = self.get_file();
 
@@ -226,10 +218,6 @@ impl FF {
             return new_error(self.0.cfg.module_id, FFErr::Lpn, error);
         }
 
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
         unsafe {
             match file.close(self.0.cfg.module_id) {
                 Ok(_) => file.unlink(&self.0.cfg.path, self.0.cfg.module_id),
@@ -240,33 +228,21 @@ impl FF {
 
     /// Read (multiple vectors) at given `offset` from [`FF`]
     #[inline(always)]
-    #[cfg(target_os = "linux")]
-    pub fn readv(&self, iovecs: &mut [libc::iovec], offset: usize) -> FRes<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn preadv(&self, iovecs: &mut [libc::iovec], offset: usize) -> FRes<()> {
         // sanity checks
         self.ensure_sanity()?;
-        debug_assert!(iovecs.len() <= self.0.max_iovecs);
 
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
-        unsafe {
-            self.get_file().preadv(iovecs, offset, self.0.cfg.module_id)
-        }
+        unsafe { self.get_file().preadv(iovecs, offset, self.0.cfg.module_id) }
     }
 
     /// Write (multiple vectors) at given `offset` to [`FF`]
     #[inline(always)]
-    #[cfg(target_os = "linux")]
-    pub fn writev(&self, iovecs: &mut [libc::iovec], offset: usize) -> FRes<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn pwritev(&self, iovecs: &mut [libc::iovec], offset: usize) -> FRes<()> {
         // sanity check
         self.ensure_sanity()?;
-        debug_assert!(iovecs.len() <= self.0.max_iovecs);
 
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
         unsafe { self.get_file().pwritev(iovecs, offset, self.0.cfg.module_id) }?;
 
         self.0.dirty.store(true, atomic::Ordering::Release);
@@ -276,7 +252,7 @@ impl FF {
 
     #[inline(always)]
     fn ensure_sanity(&self) -> FRes<()> {
-        if let Some(err) = self.0.error.get() {
+        if let Some(err) = self.last_error() {
             return Err(err.clone());
         }
 
@@ -314,10 +290,10 @@ impl Drop for FF {
 
 impl fmt::Display for FF {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         unimplemented!();
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         write!(
             f,
             "FF {{fd: {}, len: {}, id: {}, mode: {}, has_error: {}}}",
@@ -334,11 +310,10 @@ struct Core {
     cfg: FFCfg,
     cv: sync::Condvar,
     lock: sync::Mutex<()>,
-    max_iovecs: usize,
-    error: sync::OnceLock<FErr>,
+    length: atomic::AtomicU64,
     dirty: atomic::AtomicBool,
     closed: atomic::AtomicBool,
-    length: atomic::AtomicU64,
+    error: sync::OnceLock<FErr>,
     file: cell::UnsafeCell<mem::ManuallyDrop<FFile>>,
 }
 
@@ -352,7 +327,6 @@ impl Core {
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
             error: sync::OnceLock::new(),
-            max_iovecs: get_max_iovecs(),
             dirty: atomic::AtomicBool::new(false),
             closed: atomic::AtomicBool::new(false),
             length: atomic::AtomicU64::new(length),
@@ -361,14 +335,9 @@ impl Core {
     }
 
     #[inline]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn sync(&self) -> FRes<()> {
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
-        unsafe {
-            (&*self.file.get()).sync(self.cfg.module_id)
-        }
+        unsafe { (&*self.file.get()).sync(self.cfg.module_id) }
     }
 
     fn spawn_tx(core: sync::Arc<Self>) -> FRes<()> {
@@ -461,24 +430,6 @@ impl Core {
     }
 }
 
-/// max iovecs allowed for single readv/writev calls
-const MAX_IOVECS: usize = 512;
-
-fn get_max_iovecs() -> usize {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let res = libc::sysconf(libc::_SC_IOV_MAX);
-        if res <= 0 {
-            return MAX_IOVECS;
-        }
-
-        return res as usize;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    MAX_IOVECS
-}
-
 #[inline]
 pub(in crate::ff) fn new_error<E, R>(mid: u8, reason: FFErr, error: E) -> FRes<R>
 where
@@ -508,9 +459,10 @@ where
 }
 
 #[cfg(test)]
-mod ff_tests {
+mod tests {
     use super::*;
     use crate::fe::{FECheckOk, MID};
+    use libc::iovec;
     use tempfile::{tempdir, TempDir};
 
     const LEN: usize = 0x20;
@@ -533,7 +485,7 @@ mod ff_tests {
         (dir, path, ff)
     }
 
-    mod new_open {
+    mod new_open_tests {
         use super::*;
 
         #[test]
@@ -566,7 +518,7 @@ mod ff_tests {
         }
     }
 
-    mod resize {
+    mod resize_tests {
         use super::*;
         use std::fs;
 
@@ -598,12 +550,11 @@ mod ff_tests {
         }
     }
 
-    mod write_read {
+    mod pwritev_preadv_tests {
         use super::*;
-        use libc::iovec;
 
         #[test]
-        fn writev_readv_cycle() {
+        fn pwritev_preadv_cycle() {
             let (_dir, _path, ff) = new_tmp(false);
             let data = [0x1Au8; LEN];
 
@@ -612,7 +563,6 @@ mod ff_tests {
 
             assert!(ff.resize(total as u64).check_ok());
 
-            // ---------- writev ----------
             let mut write_iovecs: Vec<iovec> = (0..VECS)
                 .map(|_| iovec {
                     iov_base: data.as_ptr() as *mut _,
@@ -620,11 +570,9 @@ mod ff_tests {
                 })
                 .collect();
 
-            assert!(ff.writev(&mut write_iovecs, 0).check_ok());
+            assert!(ff.pwritev(&mut write_iovecs, 0).check_ok());
 
-            // ---------- readv ----------
             let mut read_bufs: Vec<Vec<u8>> = (0..VECS).map(|_| vec![0u8; LEN]).collect();
-
             let mut read_iovecs: Vec<iovec> = read_bufs
                 .iter_mut()
                 .map(|buf| iovec {
@@ -633,7 +581,7 @@ mod ff_tests {
                 })
                 .collect();
 
-            assert!(ff.readv(&mut read_iovecs, 0).check_ok());
+            assert!(ff.preadv(&mut read_iovecs, 0).check_ok());
 
             for buf in read_bufs.iter() {
                 assert_eq!(buf.as_slice(), &data);
@@ -641,7 +589,7 @@ mod ff_tests {
         }
 
         #[test]
-        fn writev_persist_across_sessions() {
+        fn pwritev_persist_across_sessions() {
             let (_dir, path, ff) = new_tmp(true);
             let data = [0xABu8; LEN];
 
@@ -657,7 +605,7 @@ mod ff_tests {
                 })
                 .collect();
 
-            assert!(ff.writev(&mut write_iovecs, 0).check_ok());
+            assert!(ff.pwritev(&mut write_iovecs, 0).check_ok());
 
             thread::sleep(FLUSH_DURATION * 2);
             drop(ff);
@@ -666,7 +614,6 @@ mod ff_tests {
             let ff = FF::open(cfg).expect("open FF");
 
             let mut read_bufs: Vec<Vec<u8>> = (0..VECS).map(|_| vec![0u8; LEN]).collect();
-
             let mut read_iovecs: Vec<iovec> = read_bufs
                 .iter_mut()
                 .map(|buf| iovec {
@@ -675,7 +622,7 @@ mod ff_tests {
                 })
                 .collect();
 
-            assert!(ff.readv(&mut read_iovecs, 0).check_ok());
+            assert!(ff.preadv(&mut read_iovecs, 0).check_ok());
 
             for buf in read_bufs.iter() {
                 assert_eq!(buf.as_slice(), &data);
@@ -683,7 +630,7 @@ mod ff_tests {
         }
     }
 
-    mod concurrency {
+    mod concurrency_tests {
         use super::*;
 
         #[test]
@@ -698,7 +645,6 @@ mod ff_tests {
 
             assert!(ff.resize((THREADS * CHUNK) as u64).check_ok());
 
-            // -------- concurrent writev --------
             let mut handles = Vec::new();
             for i in 0..THREADS {
                 let f = ff.clone();
@@ -710,7 +656,7 @@ mod ff_tests {
                         iov_len: CHUNK,
                     };
 
-                    f.writev(std::slice::from_mut(&mut iov), i * CHUNK).expect("writev");
+                    f.pwritev(std::slice::from_mut(&mut iov), i * CHUNK).expect("pwritev");
                 }));
             }
 
@@ -718,9 +664,7 @@ mod ff_tests {
                 assert!(h.join().is_ok());
             }
 
-            // -------- readv --------
             let mut read_bufs: Vec<Vec<u8>> = (0..THREADS).map(|_| vec![0u8; CHUNK]).collect();
-
             let mut read_iovecs: Vec<iovec> = read_bufs
                 .iter_mut()
                 .map(|buf| iovec {
@@ -729,7 +673,7 @@ mod ff_tests {
                 })
                 .collect();
 
-            assert!(ff.readv(&mut read_iovecs, 0).check_ok());
+            assert!(ff.preadv(&mut read_iovecs, 0).check_ok());
 
             for i in 0..THREADS {
                 let chunk = &read_bufs[i];
@@ -738,7 +682,7 @@ mod ff_tests {
         }
     }
 
-    mod delete {
+    mod delete_tests {
         use super::*;
 
         #[test]

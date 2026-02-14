@@ -589,7 +589,7 @@ mod fm_tests {
                 iov_len: 8,
             };
 
-            file.readv(std::slice::from_mut(&mut iov), 0).expect("readv");
+            file.preadv(std::slice::from_mut(&mut iov), 0).expect("readv");
             assert_eq!(u64::from_le_bytes(buf), 0xCAFEBABECAFEBABE);
         }
     }
