@@ -21,7 +21,7 @@ const AUTO_FLUSH: bool = false;
 const FLUSH_DURATION: time::Duration = time::Duration::from_millis(250);
 
 #[cfg(target_os = "linux")]
-type FFile = posix::PosixFile;
+type FFile = posix::POSIXFile;
 
 #[cfg(not(target_os = "linux"))]
 type FFile = ();
@@ -120,7 +120,7 @@ impl FF {
         unimplemented!();
 
         #[cfg(target_os = "linux")]
-        let file = unsafe { posix::PosixFile::new(&cfg.path, true, cfg.module_id) }?;
+        let file = unsafe { posix::POSIXFile::new(&cfg.path, true, cfg.module_id) }?;
         let init_res = unsafe { file.resize(length, cfg.module_id) };
 
         let core = sync::Arc::new(Core::new(file, cfg.clone(), length));
@@ -146,7 +146,7 @@ impl FF {
         unimplemented!();
 
         #[cfg(target_os = "linux")]
-        let file = unsafe { posix::PosixFile::new(&cfg.path, false, cfg.module_id) }?;
+        let file = unsafe { posix::POSIXFile::new(&cfg.path, false, cfg.module_id) }?;
         let length = unsafe { file.length(cfg.module_id) }?;
 
         let core = sync::Arc::new(Core::new(file, cfg.clone(), length));
