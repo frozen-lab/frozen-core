@@ -125,9 +125,33 @@ impl POSIXFile {
         let cpath = path_to_cstring(path, mid)?;
         if unlink(cpath.as_ptr()) != 0 {
             let error = last_os_error();
+            let err_raw = error.raw_os_error();
+
+            // missing file or invalid path
+            if err_raw == Some(ENOENT) || err_raw == Some(ENOTDIR) {
+                return new_error(mid, FFErr::Inv, error);
+            }
+
+            // lack of permission
+            if err_raw == Some(EACCES) || err_raw == Some(EPERM) {
+                return new_error(mid, FFErr::Red, error);
+            }
+
+            // read only fs
+            if err_raw == Some(EROFS) {
+                return new_error(mid, FFErr::Wrt, error);
+            }
+
+            // IO error (durability failure)
+            if err_raw == Some(EIO) {
+                return new_error(mid, FFErr::Syn, error);
+            }
+
             return new_error(mid, FFErr::Unk, error);
         }
 
+        // NOTE: For crash durability, we must `fsync(dir)` for the given `path`
+        sync_parent_dir(path, mid)?;
         Ok(())
     }
 
@@ -156,12 +180,74 @@ impl POSIXFile {
     }
 
     /// Resize [`POSIXFile`] w/ `new_len`
+    ///
+    /// ## `ftruncate()` vs `fallocate()` (Linux only)
+    ///
+    /// `ftruncate()` only adjusts the logical file size, blocks are lazily on writes,
+    /// and does not guarantees physical block allocations
+    ///
+    /// On the contrary, `fallocate` preallocates immediately, and reduces fragmentation
+    /// for write ops
+    ///
+    /// On Linux, we use `fallocate` by default, and use `ftruncate` as a fallback
     #[inline(always)]
     pub(super) unsafe fn resize(&self, new_len: u64, mid: u8) -> FRes<()> {
-        // sanity check
-        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
+        let fd = self.fd();
+        let curr_len = self.length(mid)?;
 
-        if ftruncate(self.fd(), new_len as off_t) != 0 {
+        // sanity checks
+        debug_assert!(fd != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
+        debug_assert!(curr_len <= new_len, "new_len must not be smaller then curr len");
+
+        #[cfg(target_os = "linux")]
+        {
+            let mut retries = 0;
+            loop {
+                if libc::fallocate(fd, 0, curr_len as off_t, (new_len - curr_len) as off_t) != 0 {
+                    let error = last_os_error();
+                    let error_raw = error.raw_os_error();
+
+                    match error_raw {
+                        // IO interrupt
+                        Some(EINTR) => {
+                            if retries < MAX_RETRIES {
+                                retries += 1;
+                                continue;
+                            }
+
+                            break;
+                        }
+
+                        // invalid fd
+                        Some(libc::EBADF) => {
+                            return new_error(mid, FFErr::Hcf, error);
+                        }
+
+                        // read-only fs (can also be caused by TOCTOU)
+                        Some(libc::EROFS) => {
+                            return new_error(mid, FFErr::Wrt, error);
+                        }
+
+                        // no space available on disk
+                        Some(libc::ENOSPC) => {
+                            return new_error(mid, FFErr::Nsp, error);
+                        }
+
+                        // lack of support for `fallocate`
+                        Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) | Some(libc::ENOSYS) => {
+                            // fall through to ftruncate
+                            break;
+                        }
+
+                        _ => {
+                            return new_error(mid, FFErr::Unk, error);
+                        }
+                    }
+                }
+            }
+        }
+
+        if ftruncate(fd, new_len as off_t) != 0 {
             let error = last_os_error();
             let error_raw = error.raw_os_error();
 
@@ -209,14 +295,14 @@ impl POSIXFile {
         let iov_size = iovecs[0].iov_len;
 
         let mut head = 0usize;
-        let mut consumed = 0usize;
+        let mut off = offset as off_t;
 
         while head < iovecs_len {
             let remaining_iov = iovecs_len - head;
             let cnt = remaining_iov.min(max_iovs) as c_int;
             let ptr = iovecs.as_ptr().add(head);
 
-            let res = preadv(fd, ptr, cnt, offset as off_t + consumed as off_t);
+            let res = preadv(fd, ptr, cnt, off);
             if res <= 0 {
                 let error = io::Error::last_os_error();
                 let error_raw = error.raw_os_error();
@@ -258,20 +344,20 @@ impl POSIXFile {
             // Even though this behavior is situation or filesystem dependent (according to my short research),
             // we opt to handle it for correctness across different systems
 
+            off += res as off_t;
+
             let written = res as usize;
             let full_pages = written / iov_size;
             let partial = written % iov_size;
 
             // fully written pages
             head += full_pages;
-            consumed += full_pages * iov_size;
 
             // partially written page (rare)
             if partial > 0 {
                 let iov = &mut iovecs[head];
                 iov.iov_base = (iov.iov_base as *mut u8).add(partial) as *mut c_void;
                 iov.iov_len -= partial;
-                consumed += partial;
             }
         }
 
@@ -301,14 +387,14 @@ impl POSIXFile {
         let iov_size = iovecs[0].iov_len;
 
         let mut head = 0usize;
-        let mut consumed = 0usize;
+        let mut off = offset as off_t;
 
         while head < iovecs_len {
             let remaining_iov = iovecs_len - head;
             let cnt = remaining_iov.min(max_iovs) as c_int;
             let ptr = iovecs.as_ptr().add(head);
 
-            let res = pwritev(fd, ptr, cnt, offset as off_t + consumed as off_t);
+            let res = pwritev(fd, ptr, cnt, off);
             if res <= 0 {
                 let error = std::io::Error::last_os_error();
                 let error_raw = error.raw_os_error();
@@ -355,20 +441,20 @@ impl POSIXFile {
             // Even though this behavior is situation or filesystem dependent (according to my short research),
             // we opt to handle it for correctness across different systems
 
+            off += res as off_t;
+
             let written = res as usize;
             let full_pages = written / iov_size;
             let partial = written % iov_size;
 
             // fully written pages
             head += full_pages;
-            consumed += full_pages * iov_size;
 
             // partially written page (rare)
             if partial > 0 {
                 let iov = &mut iovecs[head];
                 iov.iov_base = (iov.iov_base as *mut u8).add(partial) as *mut c_void;
                 iov.iov_len -= partial;
-                consumed += partial;
             }
         }
 
@@ -895,7 +981,7 @@ mod tests {
         (dir, tmp, file)
     }
 
-    mod new_open {
+    mod new_open_tests {
         use super::*;
         use crate::fe::from_err_code;
 
@@ -987,7 +1073,7 @@ mod tests {
         }
     }
 
-    mod close {
+    mod close_tests {
         use super::*;
 
         #[test]
@@ -1021,7 +1107,7 @@ mod tests {
         }
     }
 
-    mod sync {
+    mod sync_tests {
         use super::*;
 
         #[test]
@@ -1035,7 +1121,7 @@ mod tests {
         }
     }
 
-    mod unlink {
+    mod unlink_tests {
         use super::*;
 
         #[test]
@@ -1064,7 +1150,7 @@ mod tests {
         }
     }
 
-    mod resize {
+    mod resize_tests {
         use super::*;
 
         #[test]
@@ -1114,7 +1200,7 @@ mod tests {
         }
     }
 
-    mod write_read {
+    mod write_read_tests {
         use super::*;
 
         #[test]
@@ -1241,7 +1327,7 @@ mod tests {
         }
     }
 
-    mod concurrency {
+    mod concurrency_tests {
         use super::*;
 
         #[test]
