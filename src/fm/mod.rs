@@ -1,4 +1,4 @@
-//! Custom implementation of MemMap
+//! Custom implementation of `memmap`
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -483,7 +483,7 @@ where
 mod fm_tests {
     use super::*;
     use crate::fe::{FECheckOk, MID};
-    use crate::ff::{FFCfg, FF};
+    use crate::ff::{FFCfg, FrozenFile};
     use std::path::PathBuf;
     use tempfile::{tempdir, TempDir};
 
@@ -494,11 +494,11 @@ mod fm_tests {
         FFCfg::new(path, MID)
     }
 
-    fn new_tmp() -> (TempDir, PathBuf, FF, FM) {
+    fn new_tmp() -> (TempDir, PathBuf, FrozenFile, FM) {
         let dir = tempdir().expect("temp dir");
         let tmp = dir.path().join("tmp_file");
 
-        let file = FF::new(get_ff_cfg(tmp.clone()), LEN as u64).expect("new FF");
+        let file = FrozenFile::new(get_ff_cfg(tmp.clone()), LEN as u64).expect("new FF");
         let mmap = FM::new(file.fd(), LEN, CFG).expect("new MMap");
 
         (dir, tmp, file, mmap)
@@ -552,7 +552,7 @@ mod fm_tests {
             let path = dir.path().join("persist");
 
             {
-                let file = FF::new(get_ff_cfg(path.clone()), LEN as u64).expect("new");
+                let file = FrozenFile::new(get_ff_cfg(path.clone()), LEN as u64).expect("new");
                 let mmap = FM::new(file.fd(), LEN, CFG).expect("mmap");
 
                 mmap.writer::<u64>(0)
@@ -564,7 +564,7 @@ mod fm_tests {
             }
 
             {
-                let file = FF::open(get_ff_cfg(path.clone())).expect("new");
+                let file = FrozenFile::open(get_ff_cfg(path.clone())).expect("new");
                 let mmap = FM::new(file.fd(), LEN, CFG).expect("mmap");
 
                 let r = mmap.reader::<u64>(0).expect("reader");
@@ -574,7 +574,7 @@ mod fm_tests {
 
         #[test]
         fn mmap_write_visible_to_file_read() {
-            let (_dir, _tmp, file, mmap) = new_tmp();
+            let (_dir, tmp, _file, mmap) = new_tmp();
 
             mmap.writer::<u64>(0)
                 .expect("writer")
@@ -583,14 +583,9 @@ mod fm_tests {
 
             mmap.sync().expect("sync");
 
-            let mut buf = [0u8; 8];
-            let mut iov = libc::iovec {
-                iov_base: buf.as_mut_ptr() as *mut _,
-                iov_len: 8,
-            };
-
-            file.preadv(std::slice::from_mut(&mut iov), 0).expect("readv");
-            assert_eq!(u64::from_le_bytes(buf), 0xCAFEBABECAFEBABE);
+            let buf = std::fs::read(&tmp).expect("read from file");
+            let bytes: [u8; 8] = buf[0..8].try_into().expect("Slice with incorrect length");
+            assert_eq!(u64::from_le_bytes(bytes), 0xCAFEBABECAFEBABE);
         }
     }
 
@@ -636,7 +631,7 @@ mod fm_tests {
             let dir = tempdir().expect("tmp dir");
             let path = dir.path().join("multi");
 
-            let file = FF::new(get_ff_cfg(path), (LEN * N) as u64).expect("new");
+            let file = FrozenFile::new(get_ff_cfg(path), (LEN * N) as u64).expect("new");
             let mmap = sync::Arc::new(FM::new(file.fd(), LEN * N, CFG).expect("mmap"));
 
             let mut handles = Vec::new();

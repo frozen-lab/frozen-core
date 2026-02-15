@@ -161,7 +161,7 @@ fn last_os_error() -> io::Error {
 mod tests {
     use super::*;
     use crate::fe::{FECheckOk, MID};
-    use crate::ff::{FFCfg, FF};
+    use crate::ff::{FFCfg, FrozenFile};
     use std::path::PathBuf;
     use tempfile::{tempdir, TempDir};
 
@@ -171,12 +171,12 @@ mod tests {
         FFCfg::new(path, MID)
     }
 
-    fn new_tmp() -> (TempDir, PathBuf, FF, MMap) {
+    fn new_tmp() -> (TempDir, PathBuf, FrozenFile, MMap) {
         let dir = tempdir().expect("temp dir");
         let tmp = dir.path().join("tmp_file");
 
         unsafe {
-            let file = FF::new(get_ff_cfg(tmp.clone()), LEN as u64).expect("new FF");
+            let file = FrozenFile::new(get_ff_cfg(tmp.clone()), LEN as u64).expect("new FrozenFile");
             let mmap = MMap::new(file.fd(), LEN, MID).expect("new MMap");
 
             (dir, tmp, file, mmap)
@@ -262,7 +262,7 @@ mod tests {
 
             // open + map + read + validate
             unsafe {
-                let file = FF::open(get_ff_cfg(tmp)).expect("open existing");
+                let file = FrozenFile::open(get_ff_cfg(tmp)).expect("open existing");
                 let map = MMap::new(file.fd(), LEN, MID).expect("new mmap");
 
                 // read + validate
@@ -275,7 +275,7 @@ mod tests {
 
         #[test]
         fn mmap_write_is_in_synced_with_file_read() {
-            let (_dir, _tmp, file, map) = new_tmp();
+            let (_dir, tmp, _file, map) = new_tmp();
 
             unsafe {
                 // write + sync
@@ -283,15 +283,9 @@ mod tests {
                 *ptr = 0xDEAD_C0DE_DEAD_C0DE;
                 assert!(map.sync(LEN, MID).check_ok());
 
-                // pread
-                let mut buf = [0u8; 8];
-                let mut iov = libc::iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: 8,
-                };
-
-                file.preadv(std::slice::from_mut(&mut iov), 0).expect("readv");
-                assert_eq!(u64::from_le_bytes(buf), 0xDEAD_C0DE_DEAD_C0DE);
+                let buf = std::fs::read(&tmp).expect("read from file");
+                let bytes: [u8; 8] = buf[0..8].try_into().expect("Slice with incorrect length");
+                assert_eq!(u64::from_le_bytes(bytes), 0xDEAD_C0DE_DEAD_C0DE);
 
                 assert!(map.unmap(LEN, MID).check_ok());
             }
