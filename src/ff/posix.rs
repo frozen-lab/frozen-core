@@ -1,61 +1,206 @@
 use super::{new_error, FFErr};
-use crate::{
-    fe::FRes,
-    hints::{likely, unlikely},
-};
+use crate::{fe::FRes, hints};
 use libc::{
-    c_int, c_uint, c_void, close, fstat, ftruncate, iovec, off_t, open, preadv, pwritev, stat, sysconf, unlink, EACCES,
-    EBADF, EDQUOT, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT, ENOSPC, ENOTDIR, EPERM, EROFS, ESPIPE,
-    O_CLOEXEC, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, S_IRUSR, S_IWUSR, _SC_IOV_MAX,
+    c_int, c_uint, close, fstat, ftruncate, off_t, open, stat, unlink, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO,
+    EISDIR, ENOENT, ENOSPC, ENOTDIR, EPERM, EROFS, O_CLOEXEC, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, S_IRUSR, S_IWUSR,
 };
-use std::{
-    ffi, io,
-    os::unix::ffi::OsStrExt,
-    path,
-    sync::{self, atomic},
-};
+use std::{ffi, io, os::unix::ffi::OsStrExt, path, sync::atomic};
 
 /// type for file descriptor on POSIX systems
 type FD = c_int;
 
 const CLOSED_FD: FD = -1;
 const MAX_RETRIES: usize = 6; // max allowed retries for `EINTR` errors
-const MAX_IOVECS: usize = 512; // max iovecs allowed for single readv/writev calls
 
-static IOV_MAX_CACHE: sync::OnceLock<usize> = sync::OnceLock::new();
-
-/// Linux implementation of `POSIXFile`
+/// Raw implementation of Posix (linux & macos) file for [`FrozenFile`]
 pub(super) struct POSIXFile(atomic::AtomicI32);
 
 unsafe impl Send for POSIXFile {}
 unsafe impl Sync for POSIXFile {}
 
 impl POSIXFile {
-    /// creates/opens a new instance of [`POSIXFile`]
-    ///
-    /// ## Errors
-    ///
-    /// - `FFErr::Inv` is thrown when the given `path` is either invalid or missing sub-dir's
-    pub(super) unsafe fn new(path: &path::PathBuf, is_new: bool, mid: u8) -> FRes<Self> {
-        let fd = open_raw(path, prep_flags(is_new), mid)?;
+    /// Get the file descriptor of [`POSIXFile`]
+    #[inline]
+    pub(super) fn fd(&self) -> FD {
+        self.0.load(atomic::Ordering::Acquire)
+    }
 
-        if is_new {
-            #[cfg(target_os = "macos")]
-            fullsync_raw(fd, mid)?;
+    /// create a new [`POSIXFile`]
+    pub(super) unsafe fn new(path: &path::PathBuf, mid: u8) -> FRes<Self> {
+        let fd = open_raw(path, prep_flags(true), mid)?;
 
-            #[cfg(target_os = "linux")]
-            fsync_raw(fd, mid)?;
+        #[cfg(target_os = "macos")]
+        fullsync_raw(fd, mid)?;
 
-            sync_parent_dir(path, mid)?;
-        }
+        #[cfg(target_os = "linux")]
+        fsync_raw(fd, mid)?;
+
+        sync_parent_dir(path, mid)?;
 
         Ok(Self(atomic::AtomicI32::new(fd)))
     }
 
-    /// Get file descriptor for [`POSIXFile`]
+    /// open an existing [`POSIXFile`]
+    pub(super) unsafe fn open(path: &path::PathBuf, mid: u8) -> FRes<Self> {
+        let fd = open_raw(path, prep_flags(false), mid)?;
+        Ok(Self(atomic::AtomicI32::new(fd)))
+    }
+
+    /// Close [`POSIXFile`] to give up file descriptor
+    ///
+    /// ## Multiple Calls
+    ///
+    /// This function is idempotent, hence it prevents close-on-close errors
+    ///
+    /// ## Sync Error (`FFErr::Syn`)
+    ///
+    /// In POSIX systems, kernal may report delayed write/sync failures when closing, this are
+    /// durability errors, fatel in nature
+    ///
+    /// when these errors are detected, error w/ `FFErr::Syn` is thrown, this must be handled by
+    /// the storage engine to keep durability intact
+    #[inline(always)]
+    pub(super) unsafe fn close(&self, mid: u8) -> FRes<()> {
+        let fd = self.0.swap(CLOSED_FD, atomic::Ordering::AcqRel);
+        if fd == CLOSED_FD {
+            return Ok(());
+        }
+
+        close_raw(fd, mid)
+    }
+
+    /// Unlinks (possibly deletes) the [`POSIXFile`]
     #[inline]
-    pub(super) fn fd(&self) -> FD {
-        self.0.load(atomic::Ordering::Acquire)
+    pub(super) unsafe fn unlink(&self, path: &path::PathBuf, mid: u8) -> FRes<()> {
+        let cpath = path_to_cstring(path, mid)?;
+
+        // NOTE: POSIX systems requires fd to be closed before attempting to unlink the file
+        self.close(mid)?;
+
+        if unlink(cpath.as_ptr()) != 0 {
+            let error = last_os_error();
+
+            match error.raw_os_error() {
+                // missing file or invalid path
+                Some(ENOENT) | Some(ENOTDIR) => return new_error(mid, FFErr::Inv, error),
+
+                // lack of permission
+                Some(EACCES) | Some(EPERM) => return new_error(mid, FFErr::Red, error),
+
+                // read only fs
+                Some(EROFS) => return new_error(mid, FFErr::Wrt, error),
+
+                // IO error (durability failure)
+                Some(EIO) => return new_error(mid, FFErr::Syn, error),
+
+                _ => return new_error(mid, FFErr::Unk, error),
+            }
+        }
+
+        // NOTE: For crash durability, we must `fsync(dir)` for the given `path`
+        sync_parent_dir(path, mid)
+    }
+
+    /// Read current length of [`POSIXFile`] using file metadata (w/ `fstat` syscall)
+    #[inline(always)]
+    pub(super) unsafe fn length(&self, mid: u8) -> FRes<u64> {
+        // sanity check
+        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
+
+        let mut st = std::mem::zeroed::<stat>();
+        let res = fstat(self.fd(), &mut st);
+
+        if res != 0 {
+            let error = last_os_error();
+            let error_raw = error.raw_os_error();
+
+            // bad or invalid fd
+            if error_raw == Some(EBADF) || error_raw == Some(EFAULT) {
+                return new_error(mid, FFErr::Hcf, error);
+            }
+
+            return new_error(mid, FFErr::Unk, error);
+        }
+
+        Ok(st.st_size as u64)
+    }
+
+    /// Grow (zero extend) [`POSIXFile`] w/ given `len_to_add`
+    ///
+    /// ## `ftruncate()` vs `fallocate()` (Linux only)
+    ///
+    /// `ftruncate()` only adjusts the logical file size, blocks are lazily on writes,
+    /// and does not guarantees physical block allocations
+    ///
+    /// On the contrary, `fallocate` preallocates immediately, and reduces fragmentation
+    /// for write ops
+    ///
+    /// On Linux, we use `fallocate` by default, and use `ftruncate` as a fallback
+    #[inline(always)]
+    pub(super) unsafe fn grow(&self, curr_len: u64, len_to_add: u64, mid: u8) -> FRes<()> {
+        let fd = self.fd();
+
+        // sanity check
+        debug_assert!(len_to_add != 0, "len_to_add must never be 0");
+        debug_assert!(fd != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
+
+        #[cfg(target_os = "linux")]
+        {
+            let mut retries = 0;
+            loop {
+                if hints::likely(libc::fallocate(fd, 0, curr_len as off_t, len_to_add as off_t) == 0) {
+                    return Ok(());
+                }
+
+                let error = last_os_error();
+                let error_raw = error.raw_os_error();
+
+                match error_raw {
+                    // IO interrupt
+                    Some(EINTR) => {
+                        if retries < MAX_RETRIES {
+                            retries += 1;
+                            continue;
+                        }
+
+                        break;
+                    }
+
+                    // invalid fd
+                    Some(libc::EBADF) => return new_error(mid, FFErr::Hcf, error),
+
+                    // read-only fs (can also be caused by TOCTOU)
+                    Some(libc::EROFS) => return new_error(mid, FFErr::Wrt, error),
+
+                    // no space available on disk
+                    Some(libc::ENOSPC) => return new_error(mid, FFErr::Nsp, error),
+
+                    // lack of support for `fallocate` (fall through to ftruncate)
+                    Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) | Some(libc::ENOSYS) => break,
+
+                    _ => return new_error(mid, FFErr::Unk, error),
+                }
+            }
+        }
+
+        let res = ftruncate(fd, (curr_len + len_to_add) as off_t);
+        if hints::unlikely(res != 0) {
+            let error = last_os_error();
+            match error.raw_os_error() {
+                // invalid fd or lack of support for sync
+                Some(EINVAL) | Some(EBADF) => return new_error(mid, FFErr::Hcf, error),
+
+                // read-only fs (can also be caused by TOCTOU)
+                Some(EROFS) => return new_error(mid, FFErr::Wrt, error),
+
+                // no space available on disk
+                Some(ENOSPC) => return new_error(mid, FFErr::Nsp, error),
+
+                _ => return new_error(mid, FFErr::Unk, error),
+            }
+        }
+
+        Ok(())
     }
 
     /// Syncs in-mem data on the storage device
@@ -101,369 +246,7 @@ impl POSIXFile {
     pub(super) unsafe fn sync(&self, mid: u8) -> FRes<()> {
         // sanity check
         debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
-
-        let fd = self.fd() as c_int;
-        fdatasync_raw(fd, mid)
-    }
-
-    /// Closes file handle for [`POSIXFile`]
-    ///
-    /// This function is _idempotent_ and prevents close-on-close errors!
-    #[inline(always)]
-    pub(super) unsafe fn close(&self, mid: u8) -> FRes<()> {
-        // prevent multiple close syscalls
-        let fd = self.0.swap(CLOSED_FD, atomic::Ordering::AcqRel);
-        if fd == CLOSED_FD {
-            return Ok(());
-        }
-
-        close_raw(fd, mid)
-    }
-
-    /// Unlinks (possibly deletes) the [`POSIXFile`]
-    ///
-    /// **WARN**: POSIXFile must be closed beforehand, to avoid I/O errors
-    #[inline]
-    pub(super) unsafe fn unlink(&self, path: &path::PathBuf, mid: u8) -> FRes<()> {
-        let cpath = path_to_cstring(path, mid)?;
-        if unlink(cpath.as_ptr()) != 0 {
-            let error = last_os_error();
-            let err_raw = error.raw_os_error();
-
-            // missing file or invalid path
-            if err_raw == Some(ENOENT) || err_raw == Some(ENOTDIR) {
-                return new_error(mid, FFErr::Inv, error);
-            }
-
-            // lack of permission
-            if err_raw == Some(EACCES) || err_raw == Some(EPERM) {
-                return new_error(mid, FFErr::Red, error);
-            }
-
-            // read only fs
-            if err_raw == Some(EROFS) {
-                return new_error(mid, FFErr::Wrt, error);
-            }
-
-            // IO error (durability failure)
-            if err_raw == Some(EIO) {
-                return new_error(mid, FFErr::Syn, error);
-            }
-
-            return new_error(mid, FFErr::Unk, error);
-        }
-
-        // NOTE: For crash durability, we must `fsync(dir)` for the given `path`
-        sync_parent_dir(path, mid)?;
-        Ok(())
-    }
-
-    /// Fetches current length of [`POSIXFile`] using `fstat` syscall
-    #[inline(always)]
-    pub(super) unsafe fn length(&self, mid: u8) -> FRes<u64> {
-        // sanity check
-        debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
-
-        let mut st = std::mem::zeroed::<stat>();
-        let res = fstat(self.fd(), &mut st);
-
-        if res != 0 {
-            let error = last_os_error();
-            let error_raw = error.raw_os_error();
-
-            // bad or invalid fd
-            if error_raw == Some(EBADF) || error_raw == Some(EFAULT) {
-                return new_error(mid, FFErr::Hcf, error);
-            }
-
-            return new_error(mid, FFErr::Unk, error);
-        }
-
-        Ok(st.st_size as u64)
-    }
-
-    /// Resize [`POSIXFile`] w/ `new_len`
-    ///
-    /// ## `ftruncate()` vs `fallocate()` (Linux only)
-    ///
-    /// `ftruncate()` only adjusts the logical file size, blocks are lazily on writes,
-    /// and does not guarantees physical block allocations
-    ///
-    /// On the contrary, `fallocate` preallocates immediately, and reduces fragmentation
-    /// for write ops
-    ///
-    /// On Linux, we use `fallocate` by default, and use `ftruncate` as a fallback
-    #[inline(always)]
-    pub(super) unsafe fn resize(&self, new_len: u64, mid: u8) -> FRes<()> {
-        let fd = self.fd();
-        let curr_len = self.length(mid)?;
-
-        // sanity checks
-        debug_assert!(fd != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
-        debug_assert!(curr_len < new_len, "new_len must not be smaller then curr len");
-
-        #[cfg(target_os = "linux")]
-        {
-            let mut retries = 0;
-            loop {
-                if likely(libc::fallocate(fd, 0, curr_len as off_t, (new_len - curr_len) as off_t) == 0) {
-                    return Ok(());
-                }
-
-                let error = last_os_error();
-                let error_raw = error.raw_os_error();
-
-                match error_raw {
-                    // IO interrupt
-                    Some(EINTR) => {
-                        if retries < MAX_RETRIES {
-                            retries += 1;
-                            continue;
-                        }
-
-                        break;
-                    }
-
-                    // invalid fd
-                    Some(libc::EBADF) => {
-                        return new_error(mid, FFErr::Hcf, error);
-                    }
-
-                    // read-only fs (can also be caused by TOCTOU)
-                    Some(libc::EROFS) => {
-                        return new_error(mid, FFErr::Wrt, error);
-                    }
-
-                    // no space available on disk
-                    Some(libc::ENOSPC) => {
-                        return new_error(mid, FFErr::Nsp, error);
-                    }
-
-                    // lack of support for `fallocate`
-                    Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) | Some(libc::ENOSYS) => {
-                        // fall through to ftruncate
-                        break;
-                    }
-
-                    _ => {
-                        return new_error(mid, FFErr::Unk, error);
-                    }
-                }
-            }
-        }
-
-        if unlikely(ftruncate(fd, new_len as off_t) != 0) {
-            let error = last_os_error();
-            let error_raw = error.raw_os_error();
-
-            // invalid fd or lack of support for sync
-            if error_raw == Some(EINVAL) || error_raw == Some(EBADF) {
-                return new_error(mid, FFErr::Hcf, error);
-            }
-
-            // read-only fs (can also be caused by TOCTOU)
-            if error_raw == Some(EROFS) {
-                return new_error(mid, FFErr::Wrt, error);
-            }
-
-            // no space available on disk
-            if error_raw == Some(ENOSPC) {
-                return new_error(mid, FFErr::Nsp, error);
-            }
-
-            return new_error(mid, FFErr::Unk, error);
-        }
-
-        Ok(())
-    }
-
-    /// Read (multiple vectors) at given `offset` w/ `preadv` syscall from [`POSIXFile`]
-    #[inline(always)]
-    pub(super) unsafe fn preadv(&self, iovecs: &mut [iovec], offset: usize, mid: u8) -> FRes<()> {
-        // sanity checks
-        #[cfg(debug_assertions)]
-        {
-            debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
-            debug_assert_ne!(iovecs.len(), 0, "iovecs must not be empty");
-
-            let iov_len = iovecs[0].iov_len;
-            debug_assert_ne!(iov_len, 0, "invalid iov length");
-
-            for iov in iovecs.iter() {
-                debug_assert_eq!(iov_len, iov.iov_len, "all iov's must be of same length");
-            }
-        }
-
-        let fd = self.fd();
-        let max_iovs = max_iovecs();
-        let iovecs_len = iovecs.len();
-        let iov_size = iovecs[0].iov_len;
-
-        let mut head = 0usize;
-        let mut off = offset as off_t;
-
-        while head < iovecs_len {
-            let remaining_iov = iovecs_len - head;
-            let cnt = remaining_iov.min(max_iovs) as c_int;
-            let ptr = iovecs.as_ptr().add(head);
-
-            let res = preadv(fd, ptr, cnt, off);
-            if unlikely(res <= 0) {
-                let error = io::Error::last_os_error();
-                let error_raw = error.raw_os_error();
-
-                // interrupted syscall
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-
-                // unexpected EOF
-                if res == 0 {
-                    return new_error(mid, FFErr::Eof, error);
-                }
-
-                // permission denied
-                if error_raw == Some(EACCES) || error_raw == Some(EPERM) {
-                    return new_error(mid, FFErr::Red, error);
-                }
-
-                // invalid fd, bad pointer, illegal seek, etc.
-                if error_raw == Some(EINVAL)
-                    || error_raw == Some(EBADF)
-                    || error_raw == Some(EFAULT)
-                    || error_raw == Some(ESPIPE)
-                    || error_raw == Some(EMSGSIZE)
-                {
-                    return new_error(mid, FFErr::Hcf, error);
-                }
-
-                return new_error(mid, FFErr::Unk, error);
-            }
-
-            // NOTE: In POSIX systems, preadv may -
-            //
-            // - read fewer bytes than requested
-            // - stop in-between iovec's
-            // - stop mid iovec
-            //
-            // Even though this behavior is situation or filesystem dependent (according to my short research),
-            // we opt to handle it for correctness across different systems
-
-            off += res as off_t;
-
-            let written = res as usize;
-            let full_pages = written / iov_size;
-            let partial = written % iov_size;
-
-            // fully written pages
-            head += full_pages;
-
-            // partially written page (rare)
-            if partial > 0 {
-                let iov = &mut iovecs[head];
-                iov.iov_base = (iov.iov_base as *mut u8).add(partial) as *mut c_void;
-                iov.iov_len -= partial;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Write (multiple vectors) at given `offset` w/ `pwritev` syscall to [`POSIXFile`]
-    #[inline(always)]
-    pub(super) unsafe fn pwritev(&self, iovecs: &mut [iovec], offset: usize, mid: u8) -> FRes<()> {
-        // sanity checks
-        #[cfg(debug_assertions)]
-        {
-            debug_assert!(self.fd() != CLOSED_FD, "Invalid fd for LinuxPOSIXFile");
-            debug_assert_ne!(iovecs.len(), 0, "iovecs must not be empty");
-
-            let iov_len = iovecs[0].iov_len;
-            debug_assert_ne!(iov_len, 0, "invalid iov length");
-
-            for iov in iovecs.iter() {
-                debug_assert_eq!(iov_len, iov.iov_len, "all iov's must be of same length");
-            }
-        }
-
-        let fd = self.fd();
-        let max_iovs = max_iovecs();
-        let iovecs_len = iovecs.len();
-        let iov_size = iovecs[0].iov_len;
-
-        let mut head = 0usize;
-        let mut off = offset as off_t;
-
-        while head < iovecs_len {
-            let remaining_iov = iovecs_len - head;
-            let cnt = remaining_iov.min(max_iovs) as c_int;
-            let ptr = iovecs.as_ptr().add(head);
-
-            let res = pwritev(fd, ptr, cnt, off);
-            if unlikely(res <= 0) {
-                let error = std::io::Error::last_os_error();
-                let error_raw = error.raw_os_error();
-
-                // io interrupt
-                if error.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-
-                // unexpected EOF
-                if res == 0 {
-                    return new_error(mid, FFErr::Eof, error);
-                }
-
-                // read-only file (can also be caused by TOCTOU)
-                if error_raw == Some(EROFS) {
-                    return new_error(mid, FFErr::Wrt, error);
-                }
-
-                // no space available on disk
-                if error_raw == Some(ENOSPC) || error_raw == Some(EDQUOT) {
-                    return new_error(mid, FFErr::Nsp, error);
-                }
-
-                // invalid fd, invalid fd type, bad pointer, etc.
-                if error_raw == Some(EINVAL)
-                    || error_raw == Some(EBADF)
-                    || error_raw == Some(EFAULT)
-                    || error_raw == Some(ESPIPE)
-                    || error_raw == Some(EMSGSIZE)
-                {
-                    return new_error(mid, FFErr::Hcf, error);
-                }
-
-                return new_error(mid, FFErr::Unk, error);
-            }
-
-            // NOTE: In POSIX systems, pwritev may -
-            //
-            // - write fewer bytes than requested
-            // - stop in-between iovec's
-            // - stop mid iovec
-            //
-            // Even though this behavior is situation or filesystem dependent (according to my short research),
-            // we opt to handle it for correctness across different systems
-
-            off += res as off_t;
-
-            let written = res as usize;
-            let full_pages = written / iov_size;
-            let partial = written % iov_size;
-
-            // fully written pages
-            head += full_pages;
-
-            // partially written page (rare)
-            if partial > 0 {
-                let iov = &mut iovecs[head];
-                iov.iov_base = (iov.iov_base as *mut u8).add(partial) as *mut c_void;
-                iov.iov_len -= partial;
-            }
-        }
-
-        Ok(())
+        fdatasync_raw(self.fd(), mid)
     }
 }
 
@@ -498,57 +281,48 @@ unsafe fn open_raw(path: &path::PathBuf, flags: FD, mid: u8) -> FRes<FD> {
             open(cpath.as_ptr(), flags)
         };
 
-        if unlikely(fd < 0) {
+        if hints::unlikely(fd < 0) {
             let error = last_os_error();
-            let err_raw = error.raw_os_error();
-
-            // NOTE: We must retry on interuption errors (EINTR retry)
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
+            let error_raw = error.raw_os_error();
 
             // NOTE: Fallback for `EPERM` error, when `O_NOATIME` is not supported by current FS
             #[cfg(target_os = "linux")]
             {
-                if err_raw == Some(EPERM) && (flags & libc::O_NOATIME) != 0 && !tried_noatime {
+                if error_raw == Some(EPERM) && (flags & libc::O_NOATIME) != 0 && !tried_noatime {
                     flags &= !libc::O_NOATIME;
                     tried_noatime = true;
                     continue;
                 }
             }
 
-            // no space available on disk
-            if err_raw == Some(ENOSPC) {
-                return new_error(mid, FFErr::Nsp, error);
-            }
+            match error_raw {
+                // NOTE: We must retry on interuption errors (EINTR retry)
+                Some(EINTR) => continue,
 
-            // path is a dir (hcf)
-            if err_raw == Some(EISDIR) {
-                return new_error(mid, FFErr::Hcf, error);
-            }
+                // no space available on disk
+                Some(ENOSPC) => return new_error(mid, FFErr::Nsp, error),
 
-            // invalid path (missing sub dir's)
-            if err_raw == Some(ENOENT) || err_raw == Some(ENOTDIR) {
-                return new_error(mid, FFErr::Inv, error);
-            }
+                // path is a dir (hcf)
+                Some(EISDIR) => return new_error(mid, FFErr::Hcf, error),
 
-            // permission denied
-            if err_raw == Some(EACCES) || err_raw == Some(EPERM) {
-                return new_error(mid, FFErr::Red, error);
-            }
+                // invalid path (missing sub dir's)
+                Some(ENOENT) | Some(ENOTDIR) => return new_error(mid, FFErr::Inv, error),
 
-            // read-only fs
-            if err_raw == Some(EROFS) {
-                return new_error(mid, FFErr::Wrt, error);
-            }
+                // permission denied
+                Some(EACCES) | Some(EPERM) => return new_error(mid, FFErr::Red, error),
 
-            return new_error(mid, FFErr::Unk, error);
+                // read-only fs
+                Some(EROFS) => return new_error(mid, FFErr::Wrt, error),
+
+                _ => return new_error(mid, FFErr::Unk, error),
+            }
         }
 
         return Ok(fd);
     }
 }
 
+/// close a file or dir via given `fd`
 unsafe fn close_raw(fd: FD, mid: u8) -> FRes<()> {
     if close(fd) != 0 {
         let error = last_os_error();
@@ -582,38 +356,32 @@ unsafe fn fsync_raw(fd: FD, mid: u8) -> FRes<()> {
     // only for EINTR errors
     let mut retries = 0;
     loop {
-        if unlikely(libc::fsync(fd) != 0) {
+        if hints::unlikely(libc::fsync(fd) != 0) {
             let error = last_os_error();
-            let error_raw = error.raw_os_error();
+            match error.raw_os_error() {
+                // IO interrupt
+                Some(EINTR) => {
+                    if retries < MAX_RETRIES {
+                        retries += 1;
+                        continue;
+                    }
 
-            // IO interrupt
-            if error_raw == Some(EINTR) {
-                if retries < MAX_RETRIES {
-                    retries += 1;
-                    continue;
+                    // NOTE: sync error indicates that retries exhausted and durability is broken
+                    // in the current/last window/batch
+                    return new_error(mid, FFErr::Syn, error);
                 }
 
-                // NOTE: sync error indicates that retries exhausted and durability is broken
-                // in the current/last window/batch
-                return new_error(mid, FFErr::Syn, error);
-            }
+                // invalid fd or lack of support for sync
+                Some(libc::EBADF) | Some(libc::EINVAL) => return new_error(mid, FFErr::Hcf, error),
 
-            // invalid fd or lack of support for sync
-            if error_raw == Some(libc::EBADF) || error_raw == Some(libc::EINVAL) {
-                return new_error(mid, FFErr::Hcf, error);
-            }
+                // read-only file (can also be caused by TOCTOU)
+                Some(libc::EROFS) => return new_error(mid, FFErr::Wrt, error),
 
-            // read-only file (can also be caused by TOCTOU)
-            if error_raw == Some(libc::EROFS) {
-                return new_error(mid, FFErr::Wrt, error);
-            }
+                // fatel error, i.e. no sync for writes in recent window/batch
+                Some(libc::EIO) => return new_error(mid, FFErr::Syn, error),
 
-            // fatel error, i.e. no sync for writes in recent window/batch
-            if error_raw == Some(libc::EIO) {
-                return new_error(mid, FFErr::Syn, error);
+                _ => return new_error(mid, FFErr::Unk, error),
             }
-
-            return new_error(mid, FFErr::Unk, error);
         }
 
         return Ok(());
@@ -648,46 +416,36 @@ unsafe fn fullsync_raw(fd: c_int, mid: u8) -> FRes<()> {
     let mut retries = 0;
 
     loop {
-        if unlikely(libc::fcntl(fd, libc::F_FULLFSYNC) != 0) {
+        if hints::unlikely(libc::fcntl(fd, libc::F_FULLFSYNC) != 0) {
             let error = last_os_error();
-            let error_raw = error.raw_os_error();
 
-            // IO interrupt
-            if error_raw == Some(EINTR) {
-                if retries < MAX_RETRIES {
-                    retries += 1;
-                    continue;
+            match error.raw_os_error() {
+                // IO interrupt
+                Some(EINTR) => {
+                    if retries < MAX_RETRIES {
+                        retries += 1;
+                        continue;
+                    }
+
+                    // NOTE: sync error indicates that retries exhausted and durability is broken
+                    // in the current/last window/batch
+                    return new_error(mid, FFErr::Syn, error);
                 }
 
-                // NOTE: sync error indicates that retries exhausted and durability is broken
-                // in the current/last window/batch
-                return new_error(mid, FFErr::Syn, error);
-            }
+                // lack of support for `F_FULLSYNC` (must fallback to fsync)
+                Some(libc::EINVAL) | Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) => break,
 
-            // lack of support for `F_FULLSYNC` (must fallback to fsync)
-            if error_raw == Some(libc::EINVAL)
-                || error_raw == Some(libc::ENOTSUP)
-                || error_raw == Some(libc::EOPNOTSUPP)
-            {
-                break;
-            }
+                // invalid fd
+                Some(EBADF) => return new_error(mid, FFErr::Hcf, error),
 
-            // invalid fd
-            if error_raw == Some(EBADF) {
-                return new_error(mid, FFErr::Hcf, error);
-            }
+                // read-only file (can also be caused by TOCTOU)
+                Some(EROFS) => return new_error(mid, FFErr::Wrt, error),
 
-            // read-only file (can also be caused by TOCTOU)
-            if error_raw == Some(EROFS) {
-                return new_error(mid, FFErr::Wrt, error);
-            }
+                // fatel error, i.e. no sync for writes in recent window/batch
+                Some(EIO) => return new_error(mid, FFErr::Syn, error),
 
-            // fatel error, i.e. no sync for writes in recent window/batch
-            if error_raw == Some(EIO) {
-                return new_error(mid, FFErr::Syn, error);
+                _ => return new_error(mid, FFErr::Unk, error),
             }
-
-            return new_error(mid, FFErr::Unk, error);
         }
 
         return Ok(());
@@ -701,7 +459,7 @@ unsafe fn fullsync_raw(fd: c_int, mid: u8) -> FRes<()> {
     fsync_raw(fd, mid)
 }
 
-/// perform `fsync` on given `FD` (can be File or Directory)
+/// perform `fdatasync` on given `FD` (can be File or Directory)
 ///
 /// **NOTE:** This function is `linux` only
 ///
@@ -718,62 +476,51 @@ unsafe fn fullsync_raw(fd: c_int, mid: u8) -> FRes<()> {
 /// avoiding non-essential metadata updates, such as access time (`atime`), modification time (`mtime`),
 /// and other bookkeeping info
 ///
-/// But, not all systems support
-///
-/// We use `fdatasync()` instead of `fsync()` for persistence, as `fdatasync()` guarantees,
-/// all modified file data and any metadata required to retrieve that data, like file size
-/// changes are flushed to stable storage
-///
-/// This way we avoid non-essential metadata updates, such as access time (`atime`),
-/// mod time (`mtime`), and other inode bookkeeping info
+/// But, not all systems support use of `O_NOATIME` (including macos), in such caces we use `fsync` as fallback
 #[cfg(target_os = "linux")]
 unsafe fn fdatasync_raw(fd: FD, mid: u8) -> FRes<()> {
     // only for EIO & EINTR errors
     let mut retries = 0;
     loop {
-        if unlikely(libc::fdatasync(fd) != 0) {
+        if hints::unlikely(libc::fdatasync(fd) != 0) {
             let error = last_os_error();
-            let error_raw = error.raw_os_error();
+            match error.raw_os_error() {
+                // IO interrupt (must retry)
+                Some(EINTR) => {
+                    if retries < MAX_RETRIES {
+                        retries += 1;
+                        continue;
+                    }
 
-            // IO interrupt (must retry)
-            if error_raw == Some(EINTR) {
-                if retries < MAX_RETRIES {
-                    retries += 1;
-                    continue;
+                    // NOTE: sync error indicates that retries exhausted and durability is broken
+                    // in the current/last window/batch
+                    return new_error(mid, FFErr::Syn, error);
                 }
 
-                // NOTE: sync error indicates that retries exhausted and durability is broken
-                // in the current/last window/batch
-                return new_error(mid, FFErr::Syn, error);
-            }
+                // invalid fd or lack of support for sync
+                Some(EINVAL) | Some(EBADF) => return new_error(mid, FFErr::Hcf, error),
 
-            // invalid fd or lack of support for sync
-            if error_raw == Some(EINVAL) || error_raw == Some(EBADF) {
-                return new_error(mid, FFErr::Hcf, error);
-            }
+                // read-only file (can also be caused by TOCTOU)
+                Some(EROFS) => return new_error(mid, FFErr::Wrt, error),
 
-            // read-only file (can also be caused by TOCTOU)
-            if error_raw == Some(EROFS) {
-                return new_error(mid, FFErr::Wrt, error);
-            }
+                // fatel error, i.e. no sync for writes in recent window/batch
+                //
+                // NOTE: this must be handled seperately, cuase, if this error occurs,
+                // the storage system must act, mark recent writes as failed or notify users,
+                // etc. to keep the system robust and fault tolerent!
+                Some(EIO) => {
+                    if retries < MAX_RETRIES {
+                        retries += 1;
+                        continue;
+                    }
 
-            // fatel error, i.e. no sync for writes in recent window/batch
-            //
-            // NOTE: this must be handled seperately, cuase, if this error occurs,
-            // the storage system must act, mark recent writes as failed or notify users,
-            // etc. to keep the system robust and fault tolerent!
-            if error_raw == Some(EIO) {
-                if retries < MAX_RETRIES {
-                    retries += 1;
-                    continue;
+                    // NOTE: sync error indicates that retries exhausted and durability is broken
+                    // in the current/last window/batch
+                    return new_error(mid, FFErr::Syn, error);
                 }
 
-                // NOTE: sync error indicates that retries exhausted and durability is broken
-                // in the current/last window/batch
-                return new_error(mid, FFErr::Syn, error);
+                _ => return new_error(mid, FFErr::Unk, error),
             }
-
-            return new_error(mid, FFErr::Unk, error);
         }
 
         return Ok(());
@@ -805,18 +552,6 @@ unsafe fn sync_parent_dir(path: &path::PathBuf, mid: u8) -> FRes<()> {
     close_raw(fd, mid)?;
 
     res
-}
-
-/// fetch max allowed `iovecs` per `preadv` & `pwritev` syscalls
-fn max_iovecs() -> usize {
-    *IOV_MAX_CACHE.get_or_init(|| unsafe {
-        let res = sysconf(_SC_IOV_MAX);
-        if res <= 0 {
-            MAX_IOVECS
-        } else {
-            res as usize
-        }
-    })
 }
 
 /// prep flags for `open` syscall
@@ -863,381 +598,4 @@ fn path_to_cstring(path: &path::PathBuf, mid: u8) -> FRes<ffi::CString> {
 #[inline]
 fn last_os_error() -> std::io::Error {
     io::Error::last_os_error()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::fe::{FECheckOk, MID};
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-    use tempfile::{tempdir, TempDir};
-
-    fn new_tmp() -> (TempDir, path::PathBuf, POSIXFile) {
-        let dir = tempdir().expect("temp dir");
-        let tmp = dir.path().join("tmp_file");
-        let file = unsafe { POSIXFile::new(&tmp, true, MID) }.expect("new LinuxPOSIXFile");
-
-        (dir, tmp, file)
-    }
-
-    mod new_open_tests {
-        use super::*;
-        use crate::fe::from_err_code;
-
-        #[test]
-        fn new_works() {
-            let (_dir, tmp, file) = new_tmp();
-            assert!(file.fd() >= 0);
-
-            // sanity check
-            assert!(tmp.exists());
-            assert!(unsafe { file.close(MID).check_ok() });
-        }
-
-        #[test]
-        fn open_works() {
-            let (_dir, tmp, file) = new_tmp();
-            unsafe {
-                assert!(file.fd() >= 0);
-                assert!(file.close(MID).check_ok());
-
-                match POSIXFile::new(&tmp, false, MID) {
-                    Ok(file) => {
-                        assert!(file.fd() >= 0);
-                        assert!(file.close(MID).check_ok());
-                    }
-                    Err(e) => panic!("failed to open file due to E: {:?}", e),
-                }
-            }
-        }
-
-        #[test]
-        fn open_fails_when_file_is_unlinked() {
-            let (_dir, tmp, file) = new_tmp();
-
-            unsafe {
-                assert!(file.fd() >= 0);
-                assert!(file.close(MID).check_ok());
-                assert!(file.unlink(&tmp, MID).check_ok());
-
-                let file = POSIXFile::new(&tmp, false, MID);
-                assert!(file.is_err());
-            }
-        }
-
-        #[test]
-        fn open_fails_when_no_permissions() {
-            // NOTE: When running as root (UID 0), perm (read & write) checks are bypassed
-            if unsafe { libc::geteuid() } == 0 {
-                panic!("Tests must not run as root (UID 0); root bypasses Unix file permission checks");
-            }
-
-            let (_dir, tmp, file) = new_tmp();
-
-            // remove all permissions
-            unsafe { assert!(file.close(MID).check_ok()) };
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o000)).expect("chmod");
-
-            // re-open
-            let res = unsafe { POSIXFile::new(&tmp, false, MID) };
-
-            assert!(res.is_err());
-            let err = res.err().expect("must fail");
-
-            let (_, _, code) = from_err_code(err.code);
-            assert_eq!(code, FFErr::Red as u16);
-        }
-
-        #[test]
-        fn open_fails_when_read_only_file() {
-            // NOTE: When running as root (UID 0), perm (read & write) checks are bypassed
-            if unsafe { libc::geteuid() } == 0 {
-                panic!("Tests must not run as root (UID 0); root bypasses Unix file permission checks");
-            }
-
-            let (_dir, tmp, file) = new_tmp();
-
-            // read-only permission
-            unsafe { assert!(file.close(MID).check_ok()) };
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o400)).expect("chmod");
-
-            // re-open
-            let res = unsafe { POSIXFile::new(&tmp, false, MID) };
-
-            assert!(res.is_err());
-            let err = res.err().expect("must fail");
-
-            let (_, _, code) = from_err_code(err.code);
-            assert_eq!(code, FFErr::Red as u16);
-        }
-    }
-
-    mod close_tests {
-        use super::*;
-
-        #[test]
-        fn close_works() {
-            let (_dir, tmp, file) = new_tmp();
-
-            unsafe {
-                assert!(file.close(MID).check_ok());
-
-                // sanity check
-                assert!(tmp.exists());
-            }
-        }
-
-        #[test]
-        fn close_after_close_does_not_fail() {
-            let (_dir, tmp, file) = new_tmp();
-
-            unsafe {
-                // should never fail
-                assert!(file.close(MID).check_ok());
-                assert!(file.close(MID).check_ok());
-                assert!(file.close(MID).check_ok());
-
-                // sanity check
-                assert!(tmp.exists());
-            }
-
-            // NOTE: We need this protection, cause in multithreaded env's, more then one thread
-            // could try to close the file at same time, hence the system should not panic in these cases
-        }
-    }
-
-    mod sync_tests {
-        use super::*;
-
-        #[test]
-        fn sync_works() {
-            let (_dir, _tmp, file) = new_tmp();
-
-            unsafe {
-                assert!(file.sync(MID).check_ok());
-                assert!(file.close(MID).check_ok());
-            }
-        }
-    }
-
-    mod unlink_tests {
-        use super::*;
-
-        #[test]
-        fn unlink_correctly_deletes_file() {
-            let (_dir, tmp, file) = new_tmp();
-
-            unsafe {
-                assert!(file.close(MID).check_ok());
-                assert!(file.unlink(&tmp, MID).check_ok());
-                assert!(!tmp.exists());
-            }
-        }
-
-        #[test]
-        fn unlink_fails_on_unlinked_file() {
-            let (_dir, tmp, file) = new_tmp();
-
-            unsafe {
-                assert!(file.close(MID).check_ok());
-                assert!(file.unlink(&tmp, MID).check_ok());
-                assert!(!tmp.exists());
-
-                // should fail on missing
-                assert!(file.unlink(&tmp, MID).is_err());
-            }
-        }
-    }
-
-    mod resize_tests {
-        use super::*;
-
-        #[test]
-        fn extend_zero_extends_file() {
-            const NEW_LEN: u64 = 0x80;
-            let (_dir, tmp, file) = new_tmp();
-
-            unsafe {
-                assert!(file.resize(NEW_LEN, MID).check_ok());
-
-                let curr_len = file.length(MID).expect("fetch metadata");
-                assert_eq!(curr_len, NEW_LEN);
-                assert!(file.close(MID).check_ok());
-            }
-
-            // strict sanity check to ensure file is zero byte extended
-            let file_contents = std::fs::read(&tmp).expect("read from file");
-            assert_eq!(file_contents.len(), NEW_LEN as usize, "len mismatch for file");
-            assert!(
-                file_contents.iter().all(|b| *b == 0u8),
-                "file must be zero byte extended"
-            );
-        }
-
-        #[test]
-        fn open_preserves_existing_length() {
-            const NEW_LEN: u64 = 0x80;
-            let (_dir, tmp, file) = new_tmp();
-
-            unsafe {
-                assert!(file.resize(NEW_LEN, MID).check_ok());
-
-                let curr_len = file.length(MID).expect("fetch metadata");
-                assert_eq!(curr_len, NEW_LEN);
-
-                assert!(file.sync(MID).check_ok());
-                assert!(file.close(MID).check_ok());
-
-                match POSIXFile::new(&tmp, false, MID) {
-                    Err(e) => panic!("{:?}", e),
-                    Ok(file) => {
-                        let curr_len = file.length(MID).expect("fetch metadata");
-                        assert_eq!(curr_len, NEW_LEN);
-                    }
-                }
-            }
-        }
-    }
-
-    mod write_read_tests {
-        use super::*;
-
-        #[test]
-        fn pwritev_preadv_cycle() {
-            let (_dir, _tmp, file) = new_tmp();
-
-            const LEN: usize = 0x20;
-            const DATA: [u8; LEN] = [0x1A; LEN];
-
-            let ptrs = vec![DATA.as_ptr(); LEN];
-            let mut iovecs: Vec<iovec> = ptrs
-                .iter()
-                .map(|ptr| iovec {
-                    iov_base: *ptr as *mut c_void,
-                    iov_len: LEN,
-                })
-                .collect();
-            let total_len = ptrs.len() * LEN;
-
-            unsafe {
-                file.resize(total_len as u64, MID).expect("resize file");
-                assert!(file.pwritev(&mut iovecs, 0, MID).check_ok());
-
-                let mut read_bufs: Vec<Vec<u8>> = (0..LEN).map(|_| vec![0u8; LEN]).collect();
-                let mut read_iovecs: Vec<iovec> = read_bufs
-                    .iter_mut()
-                    .map(|buf| iovec {
-                        iov_base: buf.as_mut_ptr() as *mut c_void,
-                        iov_len: LEN,
-                    })
-                    .collect();
-
-                assert!(file.preadv(&mut read_iovecs, 0, MID).check_ok(), "preadv failed");
-
-                // verify each buffer
-                for buf in read_bufs.iter() {
-                    assert_eq!(buf.as_slice(), &DATA, "data mismatch in pwritev/preadv cycle");
-                }
-
-                assert!(file.close(MID).check_ok());
-            }
-        }
-
-        #[test]
-        fn pwritev_preadv_cycle_across_sessions() {
-            let (_dir, tmp, file) = new_tmp();
-
-            const LEN: usize = 0x20;
-            const DATA: [u8; LEN] = [0x1A; LEN];
-
-            // create + write + sync + close
-            unsafe {
-                let mut write_iovecs = vec![iovec {
-                    iov_base: DATA.as_ptr() as *mut c_void,
-                    iov_len: LEN,
-                }];
-
-                assert!(file.resize(LEN as u64, MID).check_ok());
-                assert!(file.pwritev(&mut write_iovecs, 0, MID).check_ok());
-
-                assert!(file.sync(MID).check_ok());
-                assert!(file.close(MID).check_ok());
-            }
-
-            // open + read + verify
-            unsafe {
-                let mut read_buf = vec![0u8; LEN];
-                let mut read_iovecs = vec![iovec {
-                    iov_base: read_buf.as_mut_ptr() as *mut c_void,
-                    iov_len: LEN,
-                }];
-
-                let file = POSIXFile::new(&tmp, false, MID).expect("open file");
-
-                assert!(file.preadv(&mut read_iovecs, 0, MID).check_ok());
-                assert_eq!(&DATA, read_buf.as_slice(), "mismatch between read and write");
-                assert!(file.close(MID).check_ok());
-            }
-        }
-    }
-
-    mod concurrency_tests {
-        use super::*;
-
-        #[test]
-        fn concurrent_writes_then_read() {
-            const THREADS: usize = 8;
-            const CHUNK: usize = 0x100;
-
-            let (_dir, _tmp, file) = new_tmp();
-            let file = std::sync::Arc::new(file);
-
-            // required len
-            unsafe { file.resize((THREADS * CHUNK) as u64, MID).expect("extend") };
-
-            let mut handles = Vec::new();
-            for i in 0..THREADS {
-                let f = file.clone();
-                handles.push(std::thread::spawn(move || {
-                    let data = vec![i as u8; CHUNK];
-
-                    let mut iov = vec![iovec {
-                        iov_base: data.as_ptr() as *mut c_void,
-                        iov_len: CHUNK,
-                    }];
-
-                    unsafe {
-                        f.pwritev(&mut iov, i * CHUNK, MID).expect("pwritev failed");
-                    }
-                }));
-            }
-
-            for h in handles {
-                assert!(h
-                    .join()
-                    .map_err(|e| {
-                        eprintln!("\n{:?}\n", e);
-                    })
-                    .is_ok());
-            }
-
-            //
-            // read back (sanity check)
-            //
-
-            let mut read_buf = vec![0u8; THREADS * CHUNK];
-            let mut read_iov = vec![iovec {
-                iov_base: read_buf.as_mut_ptr() as *mut c_void,
-                iov_len: read_buf.len(),
-            }];
-
-            unsafe { assert!(file.preadv(&mut read_iov, 0, MID).check_ok()) };
-
-            for i in 0..THREADS {
-                let chunk = &read_buf[i * CHUNK..(i + 1) * CHUNK];
-                assert!(chunk.iter().all(|b| *b == i as u8));
-            }
-        }
-    }
 }
