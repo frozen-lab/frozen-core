@@ -32,6 +32,8 @@ frozen-core = { version = "0.0.4", features = ["ff"] }
 | `aarch64-apple-darwin`                | ✅      |
 | `x86_64-apple-darwin`                 | ✅      |
 
+For Example usage, refer to [example](./examples/ff.rs)
+
 ## FrozenMMap
 
 `FrozenMMap` is a custom implementation of `mmap`.
@@ -53,6 +55,8 @@ frozen-core = { version = "0.0.4", features = ["fm"] }
 | `x86_64-pc-windows-msvc`              | ❌      |
 | `aarch64-apple-darwin`                | ✅      |
 | `x86_64-apple-darwin`                 | ✅      |
+
+For Example usage, refer to [example](./examples/fm.rs)
 
 ## FrozenError
 
