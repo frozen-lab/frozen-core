@@ -1,7 +1,7 @@
 //! Custom implementation of `memmap`
 
-#[cfg(target_os = "linux")]
-mod linux;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod posix;
 
 use crate::{
     fe::{FErr, FRes},
@@ -13,7 +13,7 @@ use std::{
     thread, time,
 };
 
-/// Domain Id for [`FM`] is **18**
+/// Domain Id for [`FrozenMMap`] is **18**
 const ERRDOMAIN: u8 = 0x12;
 
 /// default auto flush state for [`FMCfg`]
@@ -22,7 +22,7 @@ const AUTO_FLUSH: bool = false;
 /// default flush duration for [`FMCfg`]
 const FLUSH_DURATION: time::Duration = time::Duration::from_millis(250);
 
-/// Error codes for [`FM`]
+/// Error codes for [`FrozenMMap`]
 #[repr(u16)]
 pub enum FMErr {
     /// (512) internal fuck up
@@ -44,16 +44,16 @@ pub enum FMErr {
     Lpn = 0x205,
 }
 
-/// Config for [`FM`]
+/// Config for [`FrozenMMap`]
 #[derive(Clone)]
 pub struct FMCfg {
-    /// module id for [`FM`]
+    /// module id for [`FrozenMMap`]
     ///
     /// This id is used for error codes
     ///
     /// ## Why
     ///
-    /// It enables for easier identification of error boundries when multiple [`FM`]
+    /// It enables for easier identification of error boundries when multiple [`FrozenMMap`]
     /// modules are present in the codebase
     pub module_id: u8,
 
@@ -74,13 +74,13 @@ impl FMCfg {
         }
     }
 
-    /// Enable `auto_flush` for intervaled background sync for [`FM`]
+    /// Enable `auto_flush` for intervaled background sync for [`FrozenMMap`]
     pub const fn enable_auto_flush(mut self) -> Self {
         self.auto_flush = true;
         self
     }
 
-    /// Set the interval for sync in [`FM`]
+    /// Set the interval for sync in [`FrozenMMap`]
     pub const fn flush_duration(mut self, interval: time::Duration) -> Self {
         self.flush_duration = interval;
         self
@@ -88,16 +88,21 @@ impl FMCfg {
 }
 
 /// Custom implementation of MemMap
-pub struct FM(sync::Arc<Core>);
+pub struct FrozenMMap(sync::Arc<Core>);
 
-unsafe impl Send for FM {}
-unsafe impl Sync for FM {}
+unsafe impl Send for FrozenMMap {}
+unsafe impl Sync for FrozenMMap {}
 
-impl FM {
-    /// Create a new [`FM`] for given `fd` w/ read & write permissions
-    #[cfg(target_os = "linux")]
+impl FrozenMMap {
+    /// Read current length of [`FrozenMMap`]
+    #[inline]
+    pub fn length(&self) -> usize {
+        self.0.length
+    }
+
+    /// Create a new [`FrozenMMap`] for given `fd` w/ read & write permissions
     pub fn new(fd: i32, length: usize, cfg: FMCfg) -> FRes<Self> {
-        let mmap = unsafe { linux::MMap::new(fd, length, cfg.module_id) }?;
+        let mmap = unsafe { posix::POSIXMMap::new(fd, length, cfg.module_id) }?;
         let core = sync::Arc::new(Core::new(mmap, cfg.clone(), length));
 
         if cfg.auto_flush {
@@ -107,24 +112,30 @@ impl FM {
         Ok(Self(core))
     }
 
-    /// Get current length of [`FM`]
+    /// Returns the [`FErr`] representing the last error occurred in [`FrozenMMap`]
     #[inline]
-    pub fn length(&self) -> usize {
-        self.0.length
-    }
-
-    /// Returns the [`FErr`] representing the last error occurred in [`FM`]
-    #[inline]
-    #[cfg(target_os = "linux")]
     pub fn last_error(&self) -> Option<&FErr> {
         self.0.error.get()
     }
 
     /// Syncs in-mem data on the storage device
+    ///
+    /// ## Durability on mac
+    ///
+    /// On mac, map sync (`msync(MS_SYNC)`) is not enough for crash durability, hence for
+    /// harder durability guarantee, we must use `FrozenFile::sync` (i.e. `fcntl(F_FULLSYNC)`)
     #[inline]
     pub fn sync(&self) -> FRes<()> {
-        // sanity check
-        self.ensure_sanity()?;
+        if let Some(err) = self.0.error.get() {
+            return Err(err.clone());
+        }
+
+        let closed = self.0.dropped.load(atomic::Ordering::Acquire);
+        if unlikely(closed) {
+            let error = io::Error::new(io::ErrorKind::BrokenPipe, "Trying to access closed FrozenMMap");
+            return new_error(self.0.cfg.module_id, FMErr::Hcf, error);
+        }
+
         self.0.sync()
     }
 
@@ -157,31 +168,9 @@ impl FM {
         Ok(writer)
     }
 
+    #[inline]
     fn munmap(&self) -> FRes<()> {
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
-        unsafe {
-            self.get_mmap().unmap(self.length(), self.0.cfg.module_id)?;
-        }
-
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn ensure_sanity(&self) -> FRes<()> {
-        if let Some(err) = self.0.error.get() {
-            return Err(err.clone());
-        }
-
-        let closed = self.0.dropped.load(atomic::Ordering::Acquire);
-        if unlikely(closed) {
-            let error = io::Error::new(io::ErrorKind::BrokenPipe, "Trying to access closed FM");
-            return new_error(self.0.cfg.module_id, FMErr::Hcf, error);
-        }
-
-        Ok(())
+        unsafe { self.get_mmap().unmap(self.length(), self.0.cfg.module_id) }
     }
 
     #[inline]
@@ -190,7 +179,7 @@ impl FM {
     }
 }
 
-impl Drop for FM {
+impl Drop for FrozenMMap {
     fn drop(&mut self) {
         if self.0.dropped.swap(true, atomic::Ordering::AcqRel) {
             return;
@@ -222,15 +211,11 @@ impl Drop for FM {
     }
 }
 
-impl fmt::Display for FM {
+impl fmt::Display for FrozenMMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
         write!(
             f,
-            "FM {{len: {}, id: {}, mode: {}, has_error: {}}}",
+            "FrozenMMap{{len: {}, id: {}, mode: {}, has_error: {}}}",
             self.length(),
             self.0.cfg.module_id,
             self.0.cfg.auto_flush,
@@ -239,10 +224,10 @@ impl fmt::Display for FM {
     }
 }
 
-#[cfg(target_os = "linux")]
-type FMMap = linux::MMap;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+type FMMap = posix::POSIXMMap;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 type FMMap = ();
 
 struct Core {
@@ -279,13 +264,7 @@ impl Core {
 
     #[inline]
     fn sync(&self) -> FRes<()> {
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        #[cfg(target_os = "linux")]
-        unsafe {
-            (&*self.mmap.get()).sync(self.length, self.cfg.module_id)
-        }
+        unsafe { (&*self.mmap.get()).sync(self.length, self.cfg.module_id) }
     }
 
     #[inline]
@@ -414,7 +393,7 @@ impl Drop for ActiveGuard<'_> {
     }
 }
 
-/// Reader object for [`FM`]
+/// Reader object for [`FrozenMMap`]
 pub struct FMReader<'a, T> {
     ptr: *const T,
     _guard: ActiveGuard<'a>,
@@ -428,10 +407,10 @@ impl<'a, T> FMReader<'a, T> {
     }
 }
 
-/// Writer object for [`FM`]
+/// Writer object for [`FrozenMMap`]
 pub struct FMWriter<'a, T> {
     ptr: *mut T,
-    map: &'a FM,
+    map: &'a FrozenMMap,
     _guard: ActiveGuard<'a>,
 }
 
@@ -494,12 +473,12 @@ mod fm_tests {
         FFCfg::new(path, MID)
     }
 
-    fn new_tmp() -> (TempDir, PathBuf, FrozenFile, FM) {
+    fn new_tmp() -> (TempDir, PathBuf, FrozenFile, FrozenMMap) {
         let dir = tempdir().expect("temp dir");
         let tmp = dir.path().join("tmp_file");
 
         let file = FrozenFile::new(get_ff_cfg(tmp.clone()), LEN as u64).expect("new FF");
-        let mmap = FM::new(file.fd(), LEN, CFG).expect("new MMap");
+        let mmap = FrozenMMap::new(file.fd(), LEN, CFG).expect("new MMap");
 
         (dir, tmp, file, mmap)
     }
@@ -553,7 +532,7 @@ mod fm_tests {
 
             {
                 let file = FrozenFile::new(get_ff_cfg(path.clone()), LEN as u64).expect("new");
-                let mmap = FM::new(file.fd(), LEN, CFG).expect("mmap");
+                let mmap = FrozenMMap::new(file.fd(), LEN, CFG).expect("mmap");
 
                 mmap.writer::<u64>(0)
                     .expect("writer")
@@ -565,7 +544,7 @@ mod fm_tests {
 
             {
                 let file = FrozenFile::open(get_ff_cfg(path.clone())).expect("new");
-                let mmap = FM::new(file.fd(), LEN, CFG).expect("mmap");
+                let mmap = FrozenMMap::new(file.fd(), LEN, CFG).expect("mmap");
 
                 let r = mmap.reader::<u64>(0).expect("reader");
                 assert_eq!(r.read(|v| *v), 0xAABBCCDDEEFF0011);
@@ -614,8 +593,6 @@ mod fm_tests {
             }
 
             for h in handles {
-                // assert!(h.join().check_ok());
-
                 assert!(h
                     .join()
                     .map_err(|e| {
@@ -632,7 +609,7 @@ mod fm_tests {
             let path = dir.path().join("multi");
 
             let file = FrozenFile::new(get_ff_cfg(path), (LEN * N) as u64).expect("new");
-            let mmap = sync::Arc::new(FM::new(file.fd(), LEN * N, CFG).expect("mmap"));
+            let mmap = sync::Arc::new(FrozenMMap::new(file.fd(), LEN * N, CFG).expect("mmap"));
 
             let mut handles = Vec::new();
             for i in 0..N {
