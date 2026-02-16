@@ -5,6 +5,11 @@
 - `FF` module
   - Yanked `read` & `write` ops
   - Migrated io ops to use `iovecs` for linux impl
+  - (Rename) `FF` -> `FrozenFile`
+  - Added `mac` support
+- `FM` module
+  - (Rename) `FM` -> `FrozenMMap`
+  - Added `mac` support
 
 ## `0.0.3`
 
