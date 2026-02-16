@@ -1,9 +1,12 @@
 use super::{new_error, FMErr, FRes};
+use crate::hints;
 use core::{ptr, sync::atomic};
 use libc::{
     c_void, mmap, msync, munmap, off_t, size_t, EACCES, EBADF, EBUSY, EINTR, EINVAL, EIO, ENOMEM, MAP_FAILED,
     MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
 };
+
+const MAX_RETRIES: usize = 6; // max allowed retries for `EINTR` errors
 
 /// Raw implementation of Posix (linux & macos) `memmap` for [`FrozenMMap`]
 pub(super) struct POSIXMMap {
@@ -79,18 +82,13 @@ impl POSIXMMap {
     }
 
     /// Syncs in-mem data on the storage device
-    ///
-    /// ## Durability on mac
-    ///
-    /// On mac, map sync (`msync(MS_SYNC)`) is not enough for crash durability, hence for
-    /// harder durability guarantee, we must use `FrozenFile::sync` (i.e. `fcntl(F_FULLSYNC)`)
     pub(super) unsafe fn sync(&self, length: usize, mid: u8) -> FRes<()> {
         // only for EIO and EBUSY errors
-        const MAX_RETRIES: usize = 4;
         let mut retries = 0;
 
         loop {
-            if msync(self.ptr, length, MS_SYNC) != 0 {
+            let res = msync(self.ptr, length, MS_SYNC);
+            if hints::unlikely(res != 0) {
                 let error = last_os_error();
                 let error_raw = error.raw_os_error();
 
@@ -123,6 +121,77 @@ impl POSIXMMap {
 
             return Ok(());
         }
+    }
+
+    /// Syncs in-mem data on the storage device
+    ///
+    /// **NOTE:** This function is `macos` only
+    ///
+    /// ## Why do we retry?
+    ///
+    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases,
+    /// no progress is guaranteed, so the syscall must be retried
+    ///
+    /// For reliability, we retry on `EINTR` w/o busy waiting to avoid strain on resources
+    ///
+    /// ## Durability Guaranty
+    ///
+    /// `fsync()` does not provide instant durability on mac. So, we use `fcntl(F_FULLFSYNC)` as it
+    /// forces data to stable storage
+    ///
+    /// `fcntl(F_FULLSYNC)` may result in `EINVAL` or `ENOTSUP` on fs which does not support full flush,
+    /// such as _network filesystems, FUSE mounts, FAT32 volumes, or some external devices_
+    ///
+    /// To guard this, we fallback to `fsync()`, which does not guaranty durability for sudden crash or
+    /// power loss, which is acceptable when _strong durability is not available or allowed_
+    #[inline(always)]
+    #[cfg(target_os = "macos")]
+    pub(super) unsafe fn full_sync(&self, length: usize, fd: i32, mid: u8) -> FRes<()> {
+        // only for EINTR errors
+        let mut retries = 0;
+
+        loop {
+            if hints::unlikely(libc::fcntl(fd, libc::F_FULLFSYNC) != 0) {
+                let error = last_os_error();
+
+                match error.raw_os_error() {
+                    // IO interrupt
+                    Some(EINTR) => {
+                        if retries < MAX_RETRIES {
+                            retries += 1;
+                            continue;
+                        }
+
+                        // NOTE: sync error indicates that retries exhausted and durability is broken
+                        // in the current/last window/batch
+                        return new_error(mid, FMErr::Syn, error);
+                    }
+
+                    // lack of support for `F_FULLSYNC` (must fallback to fsync)
+                    Some(libc::EINVAL) | Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) => break,
+
+                    // invalid fd
+                    Some(EBADF) => return new_error(mid, FMErr::Hcf, error),
+
+                    // read-only file (can also be caused by TOCTOU)
+                    Some(libc::EROFS) => return new_error(mid, FMErr::Prm, error),
+
+                    // fatel error, i.e. no sync for writes in recent window/batch
+                    Some(EIO) => return new_error(mid, FMErr::Syn, error),
+
+                    _ => return new_error(mid, FMErr::Unk, error),
+                }
+            }
+
+            return Ok(());
+        }
+
+        // NOTE: As a fallback to `F_FULLFSYNC` we use `fsync`
+        //
+        // HACK: On mac, fsync does NOT mean "data is on disk". The drive is still free to cache,
+        // reorder, and generally do whatever it wants with your supposedly "synced" data. But for us,
+        // this is the least-bad fallback when `F_FULLFSYNC` isn’t supported or working
+        self.sync(length, mid)
     }
 
     /// Get an immutable typed pointer to `T` at given `offset`
@@ -170,6 +239,14 @@ mod tests {
         }
     }
 
+    unsafe fn perf_sync(mmap: &POSIXMMap, _fd: i32, length: usize, mid: u8) -> FRes<()> {
+        #[cfg(target_os = "linux")]
+        return mmap.sync(length, mid);
+
+        #[cfg(target_os = "macos")]
+        return mmap.full_sync(length, _fd, mid);
+    }
+
     mod mmap_new_and_unmap {
         use super::*;
 
@@ -198,18 +275,15 @@ mod tests {
         }
     }
 
-    // NOTE: All the sync tests would pass on macos, as `msync` synchronizes kernel page cache
-    // to fs, it just lacks stronger durability required in case of crash, etc.
-
     mod mmap_sync {
         use super::*;
 
         #[test]
         fn msync_works() {
-            let (_dir, _tmp, _file, map) = new_tmp();
+            let (_dir, _tmp, file, map) = new_tmp();
 
             unsafe {
-                assert!(map.sync(LEN, MID).check_ok());
+                assert!(perf_sync(&map, file.fd(), LEN, MID).check_ok());
                 assert!(map.unmap(LEN, MID).check_ok());
             }
         }
@@ -221,7 +295,7 @@ mod tests {
             unsafe {
                 *map.get_mut::<u64>(16) = 0xABCD;
 
-                assert!(map.sync(LEN, MID).check_ok());
+                assert!(perf_sync(&map, file.fd(), LEN, MID).check_ok());
                 assert!(map.unmap(LEN, MID).check_ok());
 
                 drop(file);
@@ -238,13 +312,13 @@ mod tests {
 
         #[test]
         fn repeated_sync_is_stable() {
-            let (_dir, _tmp, _file, map) = new_tmp();
+            let (_dir, _tmp, file, map) = new_tmp();
 
             unsafe {
                 *map.get_mut::<u64>(0) = 7;
 
                 for _ in 0..0x20 {
-                    assert!(map.sync(LEN, MID).check_ok());
+                    assert!(perf_sync(&map, file.fd(), LEN, MID).check_ok());
                 }
 
                 assert!(map.unmap(LEN, MID).check_ok());
@@ -253,13 +327,11 @@ mod tests {
 
         #[test]
         fn sync_after_unmap_should_fail_or_noop() {
-            let (_dir, _tmp, _file, map) = new_tmp();
+            let (_dir, _tmp, file, map) = new_tmp();
 
             unsafe {
                 assert!(map.unmap(LEN, MID).check_ok());
-
-                let res = map.sync(LEN, MID);
-                assert!(res.is_err());
+                assert!(perf_sync(&map, file.fd(), LEN, MID).is_err());
             }
         }
     }
@@ -269,13 +341,13 @@ mod tests {
 
         #[test]
         fn write_read_cycle() {
-            let (_dir, _tmp, _file, map) = new_tmp();
+            let (_dir, _tmp, file, map) = new_tmp();
 
             unsafe {
                 // write + sync
                 let ptr = map.get_mut::<u64>(0);
                 *ptr = 0xDEAD_C0DE_DEAD_C0DE;
-                assert!(map.sync(LEN, MID).check_ok());
+                assert!(perf_sync(&map, file.fd(), LEN, MID).check_ok());
 
                 // read + validate
                 let val = *map.get::<u64>(0);
@@ -293,7 +365,7 @@ mod tests {
             unsafe {
                 let ptr = map.get_mut::<u64>(0);
                 *ptr = 0xDEAD_C0DE_DEAD_C0DE;
-                assert!(map.sync(LEN, MID).check_ok());
+                assert!(perf_sync(&map, file.fd(), LEN, MID).check_ok());
 
                 assert!(map.unmap(LEN, MID).check_ok());
                 drop(file);
@@ -314,13 +386,13 @@ mod tests {
 
         #[test]
         fn mmap_write_is_in_synced_with_file_read() {
-            let (_dir, tmp, _file, map) = new_tmp();
+            let (_dir, tmp, file, map) = new_tmp();
 
             unsafe {
                 // write + sync
                 let ptr = map.get_mut::<u64>(0);
                 *ptr = 0xDEAD_C0DE_DEAD_C0DE;
-                assert!(map.sync(LEN, MID).check_ok());
+                assert!(perf_sync(&map, file.fd(), LEN, MID).check_ok());
 
                 let buf = std::fs::read(&tmp).expect("read from file");
                 let bytes: [u8; 8] = buf[0..8].try_into().expect("Slice with incorrect length");
@@ -332,14 +404,14 @@ mod tests {
 
         #[test]
         fn multiple_writes_single_sync() {
-            let (_dir, _tmp, _file, map) = new_tmp();
+            let (_dir, _tmp, file, map) = new_tmp();
 
             unsafe {
                 for i in 0..16u64 {
                     *map.get_mut::<u64>((i as usize) * 8) = i;
                 }
 
-                assert!(map.sync(LEN, MID).check_ok());
+                assert!(perf_sync(&map, file.fd(), LEN, MID).check_ok());
 
                 for i in 0..16u64 {
                     assert_eq!(*map.get::<u64>((i as usize) * 8), i);
@@ -380,9 +452,10 @@ mod tests {
 
         #[test]
         fn msync_is_thread_safe() {
-            let (_dir, _tmp, _file, map) = new_tmp();
+            let (_dir, _tmp, file, map) = new_tmp();
 
             let mut handles = Vec::new();
+            let fd = file.fd();
             let map = sync::Arc::new(map);
 
             unsafe {
@@ -392,7 +465,7 @@ mod tests {
             for _ in 0..8 {
                 let m = map.clone();
                 handles.push(thread::spawn(move || unsafe {
-                    assert!(m.sync(LEN, MID).check_ok());
+                    assert!(perf_sync(&m, fd, LEN, MID).check_ok());
                 }));
             }
 
@@ -413,7 +486,7 @@ mod tests {
 
         #[test]
         fn concurrent_writes_then_sync() {
-            let (_dir, _tmp, _file, map) = new_tmp();
+            let (_dir, _tmp, file, map) = new_tmp();
 
             let mut handles = Vec::new();
             let map = sync::Arc::new(map);
@@ -436,14 +509,14 @@ mod tests {
             }
 
             unsafe {
-                assert!(map.sync(LEN, MID).check_ok());
+                assert!(perf_sync(&map, file.fd(), LEN, MID).check_ok());
                 assert!(map.unmap(LEN, MID).check_ok());
             }
         }
 
         #[test]
         fn concurrent_writes_distinct_offsets() {
-            let (_dir, _tmp, _file, map) = new_tmp();
+            let (_dir, _tmp, file, map) = new_tmp();
 
             let mut handles = Vec::new();
             let map = std::sync::Arc::new(map);
@@ -460,7 +533,7 @@ mod tests {
             }
 
             unsafe {
-                assert!(map.sync(LEN, MID).check_ok());
+                assert!(perf_sync(&map, file.fd(), LEN, MID).check_ok());
 
                 for i in 0..8u64 {
                     assert_eq!(*map.get::<u64>((i as usize) * 8), i);

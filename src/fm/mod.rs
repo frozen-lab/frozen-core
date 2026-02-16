@@ -22,6 +22,9 @@ const AUTO_FLUSH: bool = false;
 /// default flush duration for [`FMCfg`]
 const FLUSH_DURATION: time::Duration = time::Duration::from_millis(250);
 
+#[cfg(target_os = "macos")]
+static FD: sync::OnceLock<i32> = sync::OnceLock::new();
+
 /// Error codes for [`FrozenMMap`]
 #[repr(u16)]
 pub enum FMErr {
@@ -42,6 +45,9 @@ pub enum FMErr {
 
     /// (517) lock error (failed or poisoned)
     Lpn = 0x205,
+
+    /// (518) perm error (read or write)
+    Prm = 0x208,
 }
 
 /// Config for [`FrozenMMap`]
@@ -105,6 +111,9 @@ impl FrozenMMap {
         let mmap = unsafe { posix::POSIXMMap::new(fd, length, cfg.module_id) }?;
         let core = sync::Arc::new(Core::new(mmap, cfg.clone(), length));
 
+        #[cfg(target_os = "macos")]
+        let _ = FD.set(fd);
+
         if cfg.auto_flush {
             Core::spawn_tx(core.clone())?;
         }
@@ -120,10 +129,20 @@ impl FrozenMMap {
 
     /// Syncs in-mem data on the storage device
     ///
-    /// ## Durability on mac
+    /// ## `F_FULLFSYNC` vs `msync`
     ///
-    /// On mac, map sync (`msync(MS_SYNC)`) is not enough for crash durability, hence for
-    /// harder durability guarantee, we must use `FrozenFile::sync` (i.e. `fcntl(F_FULLSYNC)`)
+    /// On mac (the supposed best os),`msync()` does not guarantee that the dirty pages are flushed
+    /// by the storage device, and it may not physically write the data to the platters for
+    /// quite some time
+    ///
+    /// More info [here](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/msync.2.html)
+    ///
+    /// To achieve true crash durability (including protection against power loss),
+    /// we must use `fcntl(fd, F_FULLFSYNC)` which provides strict durability guarantees
+    ///
+    /// If `F_FULLFSYNC` is not supported by the underlying filesystem or device
+    /// (e.g., returns `EINVAL`, `ENOTSUP`, or `EOPNOTSUPP`), we fall back to
+    /// `fsync()` as a best-effort persistence mechanism
     #[inline]
     pub fn sync(&self) -> FRes<()> {
         if let Some(err) = self.0.error.get() {
@@ -264,7 +283,24 @@ impl Core {
 
     #[inline]
     fn sync(&self) -> FRes<()> {
-        unsafe { (&*self.mmap.get()).sync(self.length, self.cfg.module_id) }
+        unsafe {
+            let mmap = &*self.mmap.get();
+
+            #[cfg(target_os = "linux")]
+            return mmap.sync(self.length, self.cfg.module_id);
+
+            #[cfg(target_os = "macos")]
+            return mmap.full_sync(self.length, self.get_fd()?, self.cfg.module_id);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn get_fd(&self) -> FRes<i32> {
+        if let Some(fd) = FD.get() {
+            return Ok(*fd);
+        }
+
+        new_error(self.cfg.module_id, FMErr::Hcf, "Failed to read fd for sync")
     }
 
     #[inline]
