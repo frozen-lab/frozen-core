@@ -590,6 +590,13 @@ fn path_to_cstring(path: &path::PathBuf, mid: u8) -> FRes<ffi::CString> {
     }
 }
 
+// fn path_to_cstring2(path: &[u8], mid: u8) -> FRes<alloc::ffi::CString> {
+//     match alloc::ffi::CString::new(path) {
+//         Ok(cs) => Ok(cs),
+//         Err(e) => new_error(mid, FFErr::Inv, format!("{e}")),
+//     }
+// }
+
 #[inline]
 fn last_os_error() -> std::io::Error {
     io::Error::last_os_error()
