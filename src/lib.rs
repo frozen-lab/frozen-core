@@ -14,5 +14,5 @@ pub mod hints;
 #[cfg(any(test, feature = "ffile"))]
 pub mod ffile;
 
-#[cfg(any(test, feature = "fmmap"))]
-pub mod fmmap;
+// #[cfg(any(test, feature = "fmmap"))]
+// pub mod fmmap;

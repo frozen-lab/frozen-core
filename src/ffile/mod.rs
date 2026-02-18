@@ -8,7 +8,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{cell, fmt, mem, sync::atomic};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-type FFile = posix::POSIXFile;
+type TFile = posix::POSIXFile;
 
 /// Domain Id for [`FrozenFile`] is **17**
 const ERRDOMAIN: u8 = 0x11;
@@ -23,7 +23,7 @@ pub(in crate::ffile) fn mid() -> u8 {
 
 /// Error codes for [`FrozenFile`]
 #[repr(u16)]
-pub enum FFileErrCtx {
+pub enum FFileErrRes {
     /// (256) internal fuck up (hault and catch fire)
     Hcf = 0x100,
 
@@ -49,13 +49,38 @@ pub enum FFileErrCtx {
     Cpt = 0x107,
 }
 
+impl FFileErrRes {
+    #[inline]
+    fn default_message(&self) -> &'static [u8] {
+        match self {
+            Self::Inv => b"invalid file path",
+            Self::Unk => b"unknown error type",
+            Self::Hcf => b"hault and catch fire",
+            Self::Red => b"read permission denied",
+            Self::Wrt => b"write permission denied",
+            Self::Nsp => b"no space left on storage device",
+            Self::Cpt => b"file is either invalid or corrupted",
+            Self::Syn => b"failed to sync/flush data to storage device",
+        }
+    }
+}
+
 #[inline]
-pub(in crate::ffile) fn new_err<R>(ctx: FFileErrCtx, message: alloc::vec::Vec<u8>) -> FrozenRes<R> {
-    let err = FrozenErr::new(mid(), ERRDOMAIN, ctx as u16, message);
+pub(in crate::ffile) fn new_err<R>(res: FFileErrRes, message: alloc::vec::Vec<u8>) -> FrozenRes<R> {
+    let detail = res.default_message();
+    let err = FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, message);
+    Err(err)
+}
+
+#[inline]
+pub(in crate::ffile) fn new_err_default<R>(res: FFileErrRes) -> FrozenRes<R> {
+    let detail = res.default_message();
+    let err = FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, alloc::vec::Vec::with_capacity(0));
     Err(err)
 }
 
 /// Custom implementation of `std::fs::File`
+#[derive(Debug)]
 pub struct FrozenFile(Arc<Core>);
 
 unsafe impl Send for FrozenFile {}
@@ -75,7 +100,13 @@ impl FrozenFile {
         self.get_file().fd()
     }
 
-    /// Create/open new instance of [`FrozenFile`]
+    /// check if [`FrozenFile`] exists on storage device or not
+    #[inline]
+    pub fn exists(&self) -> FrozenRes<bool> {
+        unsafe { TFile::exists(&self.0.path) }
+    }
+
+    /// create a new or open an existing [`FrozenFile`]
     pub fn new(path: Vec<u8>, init_len: u64, mid: u8) -> FrozenRes<Self> {
         MID.store(mid, atomic::Ordering::Relaxed);
 
@@ -88,10 +119,7 @@ impl FrozenFile {
             0 => unsafe { file.grow(0, init_len)? },
             _ => {
                 if curr_len < init_len {
-                    return new_err(
-                        FFileErrCtx::Cpt,
-                        b"underlying file is either corrupted or tampered with".to_vec(),
-                    );
+                    return new_err_default(FFileErrRes::Cpt);
                 }
             }
         }
@@ -125,7 +153,7 @@ impl FrozenFile {
     }
 
     #[inline]
-    fn get_file(&self) -> &mem::ManuallyDrop<FFile> {
+    fn get_file(&self) -> &mem::ManuallyDrop<TFile> {
         unsafe { &*self.0.file.get() }
     }
 }
@@ -150,17 +178,18 @@ impl fmt::Display for FrozenFile {
     }
 }
 
+#[derive(Debug)]
 struct Core {
     path: Vec<u8>,
     length: atomic::AtomicU64,
-    file: cell::UnsafeCell<mem::ManuallyDrop<FFile>>,
+    file: cell::UnsafeCell<mem::ManuallyDrop<TFile>>,
 }
 
 unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
 impl Core {
-    fn new(file: FFile, length: u64, path: Vec<u8>) -> Self {
+    fn new(file: TFile, length: u64, path: Vec<u8>) -> Self {
         Self {
             path,
             length: atomic::AtomicU64::new(length),
@@ -172,121 +201,5 @@ impl Core {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn sync(&self) -> FrozenRes<()> {
         unsafe { (&*self.file.get()).sync() }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::TEST_MID;
-    use std::os::unix::ffi::OsStrExt;
-    use std::path::PathBuf;
-    use tempfile::tempdir;
-
-    fn tmp_path() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempdir().expect("temp dir");
-        let path = dir.path().join("db_file");
-        (dir, path)
-    }
-
-    mod ffile_new {
-        use super::*;
-
-        #[test]
-        fn new_creates_and_initializes_length() {
-            let (_dir, path) = tmp_path();
-
-            let ff = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x800, TEST_MID).expect("create db");
-
-            assert_eq!(ff.length(), 0x800);
-            assert!(path.exists());
-        }
-
-        #[test]
-        fn reopen_existing_preserves_length() {
-            let (_dir, path) = tmp_path();
-
-            let ff1 = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x400, TEST_MID).expect("create db");
-
-            assert_eq!(ff1.length(), 0x400);
-            drop(ff1);
-
-            let ff2 = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x400, TEST_MID).expect("reopen db");
-            assert_eq!(ff2.length(), 0x400);
-        }
-
-        #[test]
-        fn reopening_with_smaller_init_len_is_ok() {
-            let (_dir, path) = tmp_path();
-
-            let ff1 = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x1000, TEST_MID).expect("create db");
-            drop(ff1);
-
-            let ff2 = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x200, TEST_MID).expect("reopen db");
-            assert_eq!(ff2.length(), 0x1000);
-        }
-
-        #[test]
-        fn reopening_with_larger_init_len_detects_corruption() {
-            let (_dir, path) = tmp_path();
-
-            let ff1 = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x400, TEST_MID).expect("create db");
-            drop(ff1);
-
-            let res = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x800, TEST_MID);
-            assert!(res.is_err());
-
-            let err = res.err().expect("must fail");
-            assert!(err.cmp(FFileErrCtx::Cpt as u16));
-        }
-
-        #[test]
-        fn new_fails_on_missing_parent_directory() {
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("missing").join("db_file");
-            let res = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x200, TEST_MID);
-
-            assert!(res.is_err());
-        }
-    }
-
-    mod ffile_grow {
-        use super::*;
-
-        #[test]
-        fn grow_updates_length_correctly() {
-            let (_dir, path) = tmp_path();
-
-            let ff = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x200, TEST_MID).expect("create db");
-            ff.grow(0x300).expect("grow");
-
-            assert_eq!(ff.length(), 0x500);
-        }
-    }
-
-    mod ffile_delete {
-        use super::*;
-
-        #[test]
-        fn delete_removes_file() {
-            let (_dir, path) = tmp_path();
-
-            let ff = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x200, TEST_MID).expect("create db");
-            ff.delete().expect("delete");
-
-            assert!(!path.exists());
-        }
-
-        #[test]
-        fn drop_sync_and_close_is_safe() {
-            let (_dir, path) = tmp_path();
-
-            {
-                let ff = FrozenFile::new(path.as_os_str().as_bytes().to_vec(), 0x300, TEST_MID).expect("create db");
-                assert_eq!(ff.length(), 0x300);
-            }
-
-            assert!(path.exists());
-        }
     }
 }

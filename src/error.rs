@@ -8,33 +8,49 @@ pub type FrozenRes<T> = Result<T, FrozenErr>;
 pub struct FrozenErr {
     module: u8,
     domain: u8,
-    context: u16,
-    message: alloc::vec::Vec<u8>,
+    reason: u16,
+    detail: &'static [u8],
+    errmsg: alloc::vec::Vec<u8>,
 }
 
 impl FrozenErr {
     /// constrcut a new instance from raw id's
     #[inline]
-    pub const fn new(module: u8, domain: u8, context: u16, message: alloc::vec::Vec<u8>) -> Self {
+    pub fn new(module: u8, domain: u8, reason: u16, detail: &'static [u8], errmsg: alloc::vec::Vec<u8>) -> Self {
         Self {
             module,
             domain,
-            context,
-            message,
+            reason,
+            detail,
+            errmsg,
         }
     }
 
-    /// compare [`Self::context`] w/ given `context` id
+    /// compare [`Self::reason`] w/ given `reason` id
     #[inline]
-    pub const fn cmp(&self, context: u16) -> bool {
-        self.context == context
+    pub fn cmp(&self, reason: u16) -> bool {
+        self.reason == reason
     }
 }
 
 impl core::fmt::Display for FrozenErr {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let msg = core::str::from_utf8(&self.message).unwrap_or("<non-utf8>");
-        write!(f, "[m={}, d={}, c={}] {msg}", self.module, self.domain, self.context,)
+        let detail = core::str::from_utf8(&self.errmsg).unwrap_or("<non-utf8>");
+        let errmsg = core::str::from_utf8(&self.errmsg).unwrap_or("<non-utf8>");
+
+        write!(
+            f,
+            "[m={}, d={}, c={}] ({detail}) {errmsg}",
+            self.module, self.domain, self.reason
+        )
+    }
+}
+
+impl core::fmt::Debug for FrozenErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "\n----------\n")?;
+        core::fmt::Display::fmt(self, f)?;
+        write!(f, "\n----------\n")
     }
 }
 
