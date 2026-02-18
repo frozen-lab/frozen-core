@@ -106,8 +106,8 @@ impl FrozenFile {
 
     /// check if [`FrozenFile`] exists on storage device or not
     #[inline]
-    pub fn exists(&self) -> FrozenRes<bool> {
-        unsafe { TFile::exists(&self.0.path) }
+    pub fn exists(path: &[u8]) -> FrozenRes<bool> {
+        unsafe { TFile::exists(&path) }
     }
 
     /// create a new or open an existing [`FrozenFile`]
@@ -219,5 +219,192 @@ impl Core {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn sync(&self) -> FrozenRes<()> {
         unsafe { (&*self.file.get()).sync() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::TEST_MID;
+
+    const INIT_LEN: u64 = 0;
+
+    fn new_tmp(id: &'static [u8]) -> (Vec<u8>, FrozenFile) {
+        let mut path = Vec::with_capacity(b"./target/".len() + id.len());
+        path.extend_from_slice(b"./target/");
+        path.extend_from_slice(id);
+
+        let file = FrozenFile::new(path.clone(), INIT_LEN, TEST_MID).expect("new FrozenFile");
+
+        (path, file)
+    }
+
+    mod ff_new {
+        use super::*;
+
+        #[test]
+        fn new_create_a_file() {
+            let (_, file) = new_tmp(b"frozenfile_new");
+
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            assert!(file.fd() >= 0);
+
+            file.delete().expect("delete file");
+        }
+
+        #[test]
+        fn new_opens_existing_file() {
+            let (path, file) = new_tmp(b"frozenfile_open");
+
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            assert!(file.fd() >= 0);
+
+            drop(file);
+
+            match FrozenFile::new(path, INIT_LEN, TEST_MID) {
+                Ok(file) => {
+                    assert!(file.fd() >= 0);
+                    file.delete().expect("delete file");
+                }
+                Err(e) => panic!("failed to open file due to E: {:?}", e),
+            }
+        }
+
+        #[test]
+        fn new_creates_file_with_init_len() {
+            let (_, file) = new_tmp(b"frozenfile_new_len");
+
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            assert!(file.fd() >= 0);
+
+            {
+                assert_eq!(file.length(), INIT_LEN);
+                file.delete().expect("delete file");
+            }
+        }
+
+        #[test]
+        fn new_preserves_existing_len() {
+            const LEN: u64 = 0x100;
+            let (path, file) = new_tmp(b"frozenfile_open_len");
+
+            file.grow(LEN).expect("grow");
+
+            let file2 = { FrozenFile::new(path, INIT_LEN, TEST_MID) }.expect("open existing");
+            let len = file2.length();
+            assert_eq!(len, LEN);
+            file2.delete().expect("delete file");
+        }
+
+        #[test]
+        fn new_fails_on_dirpath() {
+            FrozenFile::new(b"./target/".to_vec(), INIT_LEN, TEST_MID).expect_err("must fail");
+        }
+    }
+
+    mod ff_delete {
+        use super::*;
+
+        #[test]
+        fn delete_works() {
+            let (path, file) = new_tmp(b"frozenfile_delete_works");
+
+            {
+                file.delete().expect("delete file");
+
+                let exists = FrozenFile::exists(&path).expect("check exists");
+                assert!(!exists);
+            }
+        }
+    }
+
+    mod ff_grow {
+        use super::*;
+
+        #[test]
+        fn grow_works() {
+            let (_, file) = new_tmp(b"frozenfile_grow_works");
+
+            {
+                file.grow(0x80).expect("grow");
+                file.delete().expect("delete file");
+            }
+        }
+
+        #[test]
+        fn grow_updates_length() {
+            let (_, file) = new_tmp(b"frozenfile_grow_length");
+
+            {
+                file.grow(0x80).expect("grow");
+                assert_eq!(file.length(), 0x80);
+                file.delete().expect("delete file");
+            }
+        }
+
+        #[test]
+        fn grow_after_grow() {
+            let (_, file) = new_tmp(b"frozenfile_grow_after_grow");
+
+            {
+                let mut total = 0;
+                for _ in 0..4 {
+                    file.grow(0x100).expect("grow step");
+                    total += 0x100;
+                }
+
+                assert_eq!(file.length(), total);
+                file.delete().expect("delete file");
+            }
+        }
+    }
+
+    mod write_read {
+        use super::*;
+
+        #[test]
+        fn write_read_cycle() {
+            let (_, file) = new_tmp(b"frozenfile_write_read_cycle");
+
+            const LEN: usize = 0x20;
+            const DATA: [u8; LEN] = [0x1A; LEN];
+
+            {
+                let mut buf = alloc::vec![0u8; LEN];
+
+                file.grow(LEN as u64).expect("resize file");
+                file.write(DATA.as_ptr(), 0, LEN).expect("write");
+
+                file.read(buf.as_mut_ptr(), 0, LEN).expect("read");
+                assert_eq!(DATA.to_vec(), buf, "mismatch between read and write");
+
+                file.delete().expect("delete file");
+            }
+        }
+
+        #[test]
+        fn write_read_across_sessions() {
+            let (path, file) = new_tmp(b"frozenfile_write_read_across_sessions");
+
+            const LEN: usize = 0x20;
+            const DATA: [u8; LEN] = [0x1A; LEN];
+
+            {
+                file.grow(LEN as u64).expect("resize file");
+                file.write(DATA.as_ptr(), 0, LEN).expect("write");
+                file.sync().expect("sync");
+                drop(file);
+            }
+
+            {
+                let mut buf = alloc::vec![0u8; LEN];
+                let file2 = FrozenFile::new(path, INIT_LEN, TEST_MID).expect("open existing");
+
+                file2.read(buf.as_mut_ptr(), 0, LEN).expect("read");
+                assert_eq!(DATA.to_vec(), buf, "mismatch between read and write");
+
+                file2.delete().expect("delete file");
+            }
+        }
     }
 }

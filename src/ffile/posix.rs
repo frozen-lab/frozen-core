@@ -817,4 +817,53 @@ mod tests {
             }
         }
     }
+
+    mod write_read {
+        use super::*;
+
+        #[test]
+        fn write_read_cycle() {
+            let (path, file) = new_tmp(b"ffile_write_read_cycle");
+
+            const LEN: usize = 0x20;
+            const DATA: [u8; LEN] = [0x1A; LEN];
+
+            unsafe {
+                let mut buf = alloc::vec![0u8; LEN];
+
+                file.grow(0, LEN as u64).expect("resize file");
+                file.pwrite(DATA.as_ptr(), 0, LEN).expect("write");
+
+                file.pread(buf.as_mut_ptr(), 0, LEN).expect("read");
+                assert_eq!(DATA.to_vec(), buf, "mismatch between read and write");
+
+                file.unlink(&path).expect("unlink file");
+            }
+        }
+
+        #[test]
+        fn write_read_across_sessions() {
+            let (path, file) = new_tmp(b"ffile_write_read_across_sessions");
+
+            const LEN: usize = 0x20;
+            const DATA: [u8; LEN] = [0x1A; LEN];
+
+            unsafe {
+                file.grow(0, LEN as u64).expect("resize file");
+                file.pwrite(DATA.as_ptr(), 0, LEN).expect("write");
+                file.sync().expect("sync");
+                file.close().expect("close");
+            }
+
+            unsafe {
+                let mut buf = alloc::vec![0u8; LEN];
+                let file2 = POSIXFile::new(&path).expect("open existing");
+
+                file2.pread(buf.as_mut_ptr(), 0, LEN).expect("read");
+                assert_eq!(DATA.to_vec(), buf, "mismatch between read and write");
+
+                file2.unlink(&path).expect("unlink file");
+            }
+        }
+    }
 }
