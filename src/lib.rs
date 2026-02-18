@@ -5,14 +5,14 @@
 
 extern crate alloc;
 
-#[cfg(any(test, feature = "error"))]
+#[cfg(feature = "error")]
 pub mod error;
 
-#[cfg(any(test, feature = "hints"))]
+#[cfg(feature = "hints")]
 pub mod hints;
 
-#[cfg(any(test, feature = "ffile"))]
+#[cfg(feature = "ffile")]
 pub mod ffile;
 
-// #[cfg(any(test, feature = "fmmap"))]
-// pub mod fmmap;
+#[cfg(feature = "fmmap")]
+pub mod fmmap;

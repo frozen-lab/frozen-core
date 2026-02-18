@@ -26,7 +26,7 @@ fn new_fails_when_no_write_perm() {
         panic!("Tests must not run as root (UID 0); root bypasses Unix file permission checks");
     }
 
-    let (path, file) = new_tmp(b"frozenfile_open");
+    let (path, file) = new_tmp(b"frozenfile_no_perm_open");
 
     // read-only permission
     drop(file);
@@ -46,7 +46,7 @@ fn new_fails_when_no_perm() {
         panic!("Tests must not run as root (UID 0); root bypasses Unix file permission checks");
     }
 
-    let (path, file) = new_tmp(b"frozenfile_open");
+    let (path, file) = new_tmp(b"frozenfile_no_read_open");
 
     // read-only permission
     drop(file);

@@ -70,7 +70,7 @@ impl FFileErrRes {
 }
 
 #[inline]
-pub(in crate::ffile) fn new_err<R>(res: FFileErrRes, message: alloc::vec::Vec<u8>) -> FrozenRes<R> {
+pub(in crate::ffile) fn new_err<R>(res: FFileErrRes, message: Vec<u8>) -> FrozenRes<R> {
     let detail = res.default_message();
     let err = FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, message);
     Err(err)
@@ -79,7 +79,7 @@ pub(in crate::ffile) fn new_err<R>(res: FFileErrRes, message: alloc::vec::Vec<u8
 #[inline]
 pub(in crate::ffile) fn new_err_default<R>(res: FFileErrRes) -> FrozenRes<R> {
     let detail = res.default_message();
-    let err = FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, alloc::vec::Vec::with_capacity(0));
+    let err = FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, Vec::with_capacity(0));
     Err(err)
 }
 
