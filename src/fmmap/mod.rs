@@ -280,15 +280,14 @@ impl Core {
 
     #[inline]
     fn sync(&self) -> FrozenRes<()> {
+        #[cfg(target_os = "linux")]
         unsafe {
             let mmap = &*self.mmap.get();
-
-            #[cfg(target_os = "linux")]
             return mmap.sync(self.length);
-
-            #[cfg(target_os = "macos")]
-            return self._ffile.sync();
         }
+
+        #[cfg(target_os = "macos")]
+        return self._ffile.sync();
     }
 
     #[inline]

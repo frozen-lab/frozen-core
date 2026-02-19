@@ -1,11 +1,12 @@
 use super::{new_err, FMMapErrRes};
-use crate::{error::FrozenRes, hints};
+use crate::error::FrozenRes;
 use core::{ffi::CStr, ptr, sync::atomic};
 use libc::{
-    c_char, c_void, mmap, msync, munmap, off_t, size_t, EACCES, EBADF, EBUSY, EINTR, EINVAL, EIO, ENOMEM, MAP_FAILED,
-    MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
+    c_char, c_void, mmap, munmap, off_t, size_t, EACCES, EBADF, EINVAL, ENOMEM, MAP_FAILED, MAP_SHARED, PROT_READ,
+    PROT_WRITE,
 };
 
+#[cfg(target_os = "linux")]
 const MAX_RETRIES: usize = 6; // max allowed retries for `EINTR` errors
 
 /// Raw implementation of Posix (linux & macos) `memmap` for [`FrozenMMap`]
@@ -83,18 +84,19 @@ impl POSIXMMap {
     }
 
     /// Syncs in-mem data on the storage device
+    #[cfg(target_os = "linux")]
     pub(super) unsafe fn sync(&self, length: usize) -> FrozenRes<()> {
         // only for EIO and EBUSY errors
         let mut retries = 0;
 
         loop {
-            let res = msync(self.ptr, length, MS_SYNC);
-            if hints::unlikely(res != 0) {
+            let res = libc::msync(self.ptr, length, libc::MS_SYNC);
+            if crate::hints::unlikely(res != 0) {
                 let errno = last_errno();
                 let err_msg = err_msg(errno);
 
                 // IO interrupt (must retry)
-                if errno == EINTR {
+                if errno == libc::EINTR {
                     continue;
                 }
 
@@ -107,7 +109,7 @@ impl POSIXMMap {
                 //
                 // NOTE: this is handled seperately, as if this error occurs, we must
                 // notify users that the sync failed, hence the data is not persisted
-                if errno == EIO || errno == EBUSY {
+                if errno == libc::EIO || errno == libc::EBUSY {
                     if retries < MAX_RETRIES {
                         retries += 1;
                         continue;
@@ -181,14 +183,12 @@ mod tests {
         (path, file, mmap)
     }
 
-    fn perf_sync(_file: &FrozenFile, mmap: &POSIXMMap, length: usize) {
-        unsafe {
-            #[cfg(target_os = "linux")]
-            mmap.sync(length).expect("per sync");
+    fn perf_sync(_file: &FrozenFile, _mmap: &POSIXMMap, _length: usize) {
+        #[cfg(target_os = "linux")]
+        unsafe { _mmap.sync(_length) }.expect("per sync");
 
-            #[cfg(target_os = "macos")]
-            _file.sync().expect("perf sync");
-        }
+        #[cfg(target_os = "macos")]
+        _file.sync().expect("perf sync");
     }
 
     mod posix_map_unmap {
