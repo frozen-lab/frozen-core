@@ -4,8 +4,8 @@
 mod posix;
 
 use crate::error::{FrozenErr, FrozenRes};
-use alloc::{sync::Arc, vec::Vec};
 use core::{cell, fmt, mem, sync::atomic};
+use std::sync::Arc;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 type TFile = posix::POSIXFile;
@@ -84,7 +84,7 @@ pub(in crate::ffile) fn new_err_default<R>(res: FFileErrRes) -> FrozenRes<R> {
 }
 
 /// Custom implementation of `std::fs::File`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FrozenFile(Arc<Core>);
 
 unsafe impl Send for FrozenFile {}
@@ -370,7 +370,7 @@ mod tests {
             const DATA: [u8; LEN] = [0x1A; LEN];
 
             {
-                let mut buf = alloc::vec![0u8; LEN];
+                let mut buf = vec![0u8; LEN];
 
                 file.grow(LEN as u64).expect("resize file");
                 file.write(DATA.as_ptr(), 0, LEN).expect("write");
@@ -397,7 +397,7 @@ mod tests {
             }
 
             {
-                let mut buf = alloc::vec![0u8; LEN];
+                let mut buf = vec![0u8; LEN];
                 let file2 = FrozenFile::new(path, INIT_LEN, TEST_MID).expect("open existing");
 
                 file2.read(buf.as_mut_ptr(), 0, LEN).expect("read");

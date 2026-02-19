@@ -1,12 +1,12 @@
 use super::{new_err, FFileErrRes};
 use crate::{error::FrozenRes, hints};
-use alloc::{ffi::CString, vec::Vec};
 use core::{ffi::CStr, sync::atomic};
 use libc::{
     access, c_char, c_int, c_uint, c_void, close, fstat, ftruncate, off_t, open, pread, pwrite, size_t, stat, unlink,
     EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOTDIR, EPERM, EROFS, ESPIPE, F_OK, O_CLOEXEC,
     O_CREAT, O_RDWR, S_IRUSR, S_IWUSR,
 };
+use std::ffi::CString;
 
 /// type for file descriptor on POSIX systems
 type FD = c_int;
@@ -687,6 +687,10 @@ mod tests {
 
     mod posix_new {
         use super::*;
+        use std::{
+            fs::{set_permissions, Permissions},
+            os::unix::fs::PermissionsExt,
+        };
 
         #[test]
         fn new_create_a_file() {
@@ -746,6 +750,49 @@ mod tests {
         #[test]
         fn new_fails_on_dirpath() {
             unsafe { POSIXFile::new(b"./target/") }.expect_err("must fail");
+        }
+
+        #[test]
+        fn new_fails_when_no_write_perm() {
+            // NOTE: When running as root (UID 0), perm (read & write) checks are bypassed
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if unsafe { libc::geteuid() } == 0 {
+                panic!("Tests must not run as root (UID 0); root bypasses Unix file permission checks");
+            }
+
+            let (path, file) = new_tmp(b"frozenfile_no_perm_open");
+
+            // read-only permission
+            unsafe { file.close() }.expect("close");
+
+            let p = std::path::Path::new(std::str::from_utf8(&path).expect("utf8 path"));
+            set_permissions(p, Permissions::from_mode(0o400)).expect("chmod");
+
+            let err = unsafe { POSIXFile::new(&path) }.expect_err("must fail");
+            assert!(err.cmp(FFileErrRes::Red as u16));
+
+            unsafe { file.unlink(&path) }.expect("unlink file");
+        }
+
+        #[test]
+        fn new_fails_when_no_perm() {
+            // NOTE: When running as root (UID 0), perm (read & write) checks are bypassed
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if unsafe { libc::geteuid() } == 0 {
+                panic!("Tests must not run as root (UID 0); root bypasses Unix file permission checks");
+            }
+
+            let (path, file) = new_tmp(b"frozenfile_no_read_open");
+            unsafe { file.close() }.expect("close");
+
+            // read-only permission
+            let p = std::path::Path::new(std::str::from_utf8(&path).expect("utf8 path"));
+            set_permissions(p, Permissions::from_mode(0o000)).expect("chmod");
+
+            let err = unsafe { POSIXFile::new(&path) }.expect_err("must fail");
+            assert!(err.cmp(FFileErrRes::Red as u16));
+
+            unsafe { file.unlink(&path) }.expect("unlink file");
         }
     }
 
@@ -829,7 +876,7 @@ mod tests {
             const DATA: [u8; LEN] = [0x1A; LEN];
 
             unsafe {
-                let mut buf = alloc::vec![0u8; LEN];
+                let mut buf = vec![0u8; LEN];
 
                 file.grow(0, LEN as u64).expect("resize file");
                 file.pwrite(DATA.as_ptr(), 0, LEN).expect("write");
@@ -856,7 +903,7 @@ mod tests {
             }
 
             unsafe {
-                let mut buf = alloc::vec![0u8; LEN];
+                let mut buf = vec![0u8; LEN];
                 let file2 = POSIXFile::new(&path).expect("open existing");
 
                 file2.pread(buf.as_mut_ptr(), 0, LEN).expect("read");

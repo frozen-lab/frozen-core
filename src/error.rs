@@ -10,13 +10,13 @@ pub struct FrozenErr {
     domain: u8,
     reason: u16,
     detail: &'static [u8],
-    errmsg: alloc::vec::Vec<u8>,
+    errmsg: Vec<u8>,
 }
 
 impl FrozenErr {
     /// constrcut a new instance from raw id's
     #[inline]
-    pub fn new(module: u8, domain: u8, reason: u16, detail: &'static [u8], errmsg: alloc::vec::Vec<u8>) -> Self {
+    pub fn new(module: u8, domain: u8, reason: u16, detail: &'static [u8], errmsg: Vec<u8>) -> Self {
         Self {
             module,
             domain,
