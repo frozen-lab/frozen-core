@@ -10,7 +10,45 @@ permissions:
   id-token: write
 
 jobs:
+  lints:
+    name: Lints
+    env:
+      RUSTFLAGS: "-D warnings"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+          - os: macos-15-intel
+            arch: x86_64
+          - os: macos-latest
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint-${{ matrix.arch }}
+
+      - name: Cargo check (lib)
+        run: cargo check
+
+      - name: Cargo check (tests)
+        run: cargo check --tests
+
+      - name: Cargo check (examples)
+        run: cargo check --examples
+  
   examples:
+    needs: lints
     strategy:
       fail-fast: false
       matrix:
