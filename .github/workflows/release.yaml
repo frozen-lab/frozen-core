@@ -36,7 +36,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: lint-${{ matrix.arch }}
+          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
 
       - name: Cargo check (lib)
         run: cargo check
@@ -76,7 +76,7 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: examples-${{ matrix.platform.arch }}
+          key: rust-${{ runner.os }}-${{ matrix.platform.arch }}-stable
           cache-on-failure: true
 
       - name: Run example
