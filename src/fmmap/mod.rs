@@ -1,4 +1,26 @@
 //! Custom implementation of `memmap`
+//!
+//! # Example Usage
+//!
+//! ```
+//! use frozen_core::{ffile::FrozenFile, fmmap::{FrozenMMap, FMCfg}};
+//! use tempfile::tempdir;
+//!
+//! let dir = tempdir().expect("tmp dir");
+//! let path = dir.path().join("example.bin");
+//!
+//! let file = FrozenFile::new(path, 0x10, 1).expect("file");
+//! let mmap = FrozenMMap::new(file, FMCfg::new(1)).expect("mmap");
+//! let (_, epoch) = mmap.with_write::<u64, _>(0, |v| *v = 0xDEADC0DE).expect("write");
+//!
+//! match mmap.wait_for_durability(epoch) {
+//!     Ok(_) => {
+//!         let value = mmap.with_read::<u64, u64>(0, |v| *v).unwrap();
+//!         assert_eq!(value, 0xDEADC0DE);
+//!     }
+//!     Err(e) => panic!("{e}"),
+//! }
+//! ```
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
@@ -115,6 +137,28 @@ impl FMCfg {
 }
 
 /// Custom implementation of MemMap
+///
+/// # Example
+///
+/// ```
+/// use frozen_core::{ffile::FrozenFile, fmmap::{FrozenMMap, FMCfg}};
+/// use tempfile::tempdir;
+///
+/// let dir = tempdir().expect("tmp dir");
+/// let path = dir.path().join("example.bin");
+///
+/// let file = FrozenFile::new(path, 0x10, 1).expect("file");
+/// let mmap = FrozenMMap::new(file, FMCfg::new(1)).expect("mmap");
+/// let (_, epoch) = mmap.with_write::<u64, _>(0, |v| *v = 0xDEADC0DE).expect("write");
+///
+/// match mmap.wait_for_durability(epoch) {
+///     Ok(_) => {
+///         let value = mmap.with_read::<u64, u64>(0, |v| *v).unwrap();
+///         assert_eq!(value, 0xDEADC0DE);
+///     }
+///     Err(e) => panic!("{e}"),
+/// }
+/// ```
 #[derive(Debug)]
 pub struct FrozenMMap(sync::Arc<Core>);
 
@@ -141,27 +185,6 @@ impl FrozenMMap {
         Ok(Self(core))
     }
 
-    /// Syncs in-mem data on the storage device
-    ///
-    /// ## `F_FULLFSYNC` vs `msync`
-    ///
-    /// On mac (the supposed best os),`msync()` does not guarantee that the dirty pages are flushed
-    /// by the storage device, and it may not physically write the data to the platters for
-    /// quite some time
-    ///
-    /// More info [here](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/msync.2.html)
-    ///
-    /// To achieve true crash durability (including protection against power loss),
-    /// we must use `fcntl(fd, F_FULLFSYNC)` which provides strict durability guarantees
-    ///
-    /// If `F_FULLFSYNC` is not supported by the underlying filesystem or device
-    /// (e.g., returns `EINVAL`, `ENOTSUP`, or `EOPNOTSUPP`), we fall back to
-    /// `fsync()` as a best-effort persistence mechanism
-    #[inline]
-    pub fn sync(&self) -> FrozenRes<()> {
-        self.0.sync()
-    }
-
     /// Returns the [`FrozenErr`] representing the last error occurred in [`FrozenMMap`]
     #[inline]
     pub fn last_error(&self) -> Option<&FrozenErr> {
@@ -169,6 +192,30 @@ impl FrozenMMap {
     }
 
     /// Wait for durability for the given write `epoch`
+    ///
+    /// This functions blocks until epoch becomes durable
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use frozen_core::{ffile::FrozenFile, fmmap::{FrozenMMap, FMCfg}};
+    /// use tempfile::tempdir;
+    ///
+    /// let dir = tempdir().expect("tmp");
+    /// let path = dir.path().join("durable.bin");
+    ///
+    /// let file = FrozenFile::new(path, 0x10, 1).expect("file");
+    /// let mmap = FrozenMMap::new(file, FMCfg::new(1)).expect("mmap");
+    /// let (_, epoch) = mmap.with_write::<u64, _>(0, |v| *v = 1).expect("write");
+    ///
+    /// match mmap.wait_for_durability(epoch) {
+    ///     Ok(_) => {
+    ///         let value = mmap.with_read::<u64, u64>(0, |v| *v).unwrap();
+    ///         assert_eq!(value, 1);
+    ///     }
+    ///     Err(e) => panic!("{e}"),
+    /// }
+    /// ```
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
         if self.0.durable_epoch.load(atomic::Ordering::Acquire) >= epoch {
             return Ok(());
@@ -209,6 +256,8 @@ impl FrozenMMap {
         let ptr = unsafe { self.get_mmap().get_mut(offset) };
         let res = unsafe { f(&mut *ptr) };
         let epoch = self.0.write_epoch.fetch_add(1, atomic::Ordering::AcqRel) + 1;
+
+        self.0.dirty.store(true, atomic::Ordering::Release);
 
         drop(guard);
         Ok((res, epoch))
@@ -345,7 +394,7 @@ impl Drop for FrozenMMap {
 
         // sync if dirty
         if self.0.dirty.swap(false, atomic::Ordering::AcqRel) {
-            let _ = self.sync();
+            let _ = self.0.sync();
         }
 
         let mut guard = match self.0.lock.lock() {
@@ -652,6 +701,24 @@ impl<'a, T> FMWriter<'a, T> {
         let epoch = self.map.0.write_epoch.fetch_add(1, atomic::Ordering::AcqRel) + 1;
 
         self.map.0.dirty.store(true, atomic::Ordering::Release);
+
+        (res, epoch)
+    }
+
+    /// Get's a mutable (read & write) typed pointer for `T`
+    ///
+    /// ## NOTE
+    ///
+    /// This function notifies sync thread for sync operation right after `f()` is computed,
+    /// skipping the `[FMCfg::flush_duration]`
+    ///
+    /// Only use this for instant flush, overuse may strain the available resources
+    #[inline]
+    pub fn write_instant<R>(&self, f: impl FnOnce(&mut T) -> R) -> (R, TEpoch) {
+        let res = unsafe { f(&mut *self.ptr) };
+        let epoch = self.map.0.write_epoch.fetch_add(1, atomic::Ordering::AcqRel) + 1;
+
+        self.map.0.dirty.store(true, atomic::Ordering::Release);
         self.map.0.cv.notify_one();
 
         (res, epoch)
@@ -678,6 +745,21 @@ mod tests {
         (dir, path, mmap)
     }
 
+    mod fm_new {
+        use super::*;
+
+        #[test]
+        fn new_works() {
+            let (_dir, _path, mmap) = new_tmp();
+
+            assert!(mmap.0.ffile.fd() >= 0);
+            assert_eq!(mmap.0.ffile.length(), LEN);
+            assert!(!mmap.0.dirty.load(atomic::Ordering::Relaxed));
+            assert_eq!(mmap.0.active.load(atomic::Ordering::Relaxed), 0);
+            assert!(mmap.last_error().is_none());
+        }
+    }
+
     mod fm_lifetime {
         use super::*;
 
@@ -700,7 +782,7 @@ mod tests {
         #[test]
         fn sync_works() {
             let (_dir, _path, mmap) = new_tmp();
-            mmap.sync().expect("sync");
+            mmap.0.sync().expect("sync");
         }
 
         #[test]
@@ -709,7 +791,7 @@ mod tests {
 
             let _ = mmap.writer::<u64>(0x10).unwrap().write(|v| *v = 0xABCD);
 
-            mmap.sync().expect("sync");
+            mmap.0.sync().expect("sync");
             drop(mmap);
 
             let file2 = FrozenFile::new(path, LEN, TEST_MID).expect("open existing");
@@ -726,40 +808,8 @@ mod tests {
             mmap.writer::<u64>(0).unwrap().write(|v| *v = 7);
 
             for _ in 0..0x20 {
-                mmap.sync().expect("sync");
+                mmap.0.sync().expect("sync");
             }
-        }
-    }
-
-    mod fm_reader_writer {
-        use super::*;
-
-        #[test]
-        fn reader_fails_after_real_drop() {
-            let (_dir, _path, mmap) = new_tmp();
-
-            let reader = mmap.reader::<u64>(0);
-            drop(reader);
-
-            // Move into thread and drop the only instance
-            let handle = std::thread::spawn(move || {
-                drop(mmap);
-            });
-
-            handle.join().unwrap();
-        }
-
-        #[test]
-        fn active_counter_tracks_readers() {
-            let (_dir, _path, mmap) = new_tmp();
-
-            let r1 = mmap.reader::<u64>(0);
-            let r2 = mmap.reader::<u64>(0);
-
-            assert!(mmap.0.active.load(std::sync::atomic::Ordering::Acquire) >= 2);
-
-            drop(r1);
-            drop(r2);
         }
     }
 
@@ -789,14 +839,6 @@ mod tests {
             let v = mmap.reader::<u64>(0).unwrap().read(|v| *v);
             assert_eq!(v, 123);
         }
-
-        // #[test]
-        // fn dirty_flag_resets_after_flush() {
-        //     let (_dir, _path, mmap) = new_tmp();
-
-        //     mmap.writer::<u64>(0).unwrap().write(|v| *v = 1);
-        //     assert!(!mmap.0.dirty.load(std::sync::atomic::Ordering::Acquire));
-        // }
     }
 
     mod fm_with_api {
@@ -851,6 +893,19 @@ mod tests {
 
     mod fm_write_read {
         use super::*;
+
+        #[test]
+        fn active_counter_tracks_readers() {
+            let (_dir, _path, mmap) = new_tmp();
+
+            let r1 = mmap.reader::<u64>(0);
+            let r2 = mmap.reader::<u64>(0);
+
+            assert!(mmap.0.active.load(std::sync::atomic::Ordering::Acquire) >= 2);
+
+            drop(r1);
+            drop(r2);
+        }
 
         #[test]
         fn write_read_cycle() {
@@ -985,7 +1040,7 @@ mod tests {
                 .map(|_| {
                     let m = mmap.clone();
                     thread::spawn(move || {
-                        m.sync().expect("sync");
+                        m.0.sync().expect("sync");
                     })
                 })
                 .collect();

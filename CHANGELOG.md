@@ -7,6 +7,7 @@
   - added `epoch` ids for every writes
   - added `wait_for_durability` to enable waiting for durability
 - improved test coverage (80+ tests)
+- improved docs
 
 ## `0.0.5`
 

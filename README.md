@@ -45,7 +45,28 @@ frozen-core = { version = "0.0.6", default-features = false, features = ["ffile"
 | `aarch64-apple-darwin`                | ✅      |
 | `x86_64-apple-darwin`                 | ✅      |
 
-For example usage, refer to [example](./examples/ff.rs)
+See below for example usage,
+
+```rs
+use frozen_core::ffile::FrozenFile;
+use tempfile::tempdir;
+
+fn main() {
+    let dir = tempdir().expect("tmp");
+    let path = dir.path().join("standalone.bin");
+  
+    let file = FrozenFile::new(path.clone(), 0x20, 7).expect("file");
+    assert!(FrozenFile::exists(&path).expect("exists"));
+  
+    file.grow(0x20).expect("grow");
+    assert!(file.length() >= 0x40);
+  
+    file.delete().expect("delete");
+    assert!(!FrozenFile::exists(&path).expect("exists after delete"));
+}
+```
+
+refer to [example](./examples/ff.rs) for more details
 
 ## FrozenMMap
 
@@ -69,7 +90,31 @@ frozen-core = { version = "0.0.6", default-features = false, features = ["fmmap"
 | `aarch64-apple-darwin`                | ✅      |
 | `x86_64-apple-darwin`                 | ✅      |
 
-For example usage, refer to [example](./examples/fm.rs)
+See below for example usage,
+
+```rs
+use frozen_core::{ffile::FrozenFile, fmmap::{FrozenMMap, FMCfg}};
+use tempfile::tempdir;
+
+fn main() {   
+    let dir = tempdir().expect("tmp dir");
+    let path = dir.path().join("example.bin");
+   
+    let file = FrozenFile::new(path, 0x10, 1).expect("file");
+    let mmap = FrozenMMap::new(file, FMCfg::new(1)).expect("mmap");
+    let (_, epoch) = mmap.with_write::<u64, _>(0, |v| *v = 0xDEADC0DE).expect("write");
+   
+    match mmap.wait_for_durability(epoch) {
+        Ok(_) => {
+            let value = mmap.with_read::<u64, u64>(0, |v| *v).unwrap();
+            assert_eq!(value, 0xDEADC0DE);
+        }
+        Err(e) => panic!("{e}"),
+    }
+}
+```
+
+refer to [example](./examples/fm.rs) for more details.
 
 ## FrozenErr
 

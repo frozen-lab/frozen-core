@@ -1,4 +1,29 @@
 //! Custom implementation of `std::fs::File`
+//!
+//! # Example
+//!
+//! ```
+//! use frozen_core::ffile::FrozenFile;
+//! use tempfile::tempdir;
+//!
+//! let dir = tempdir().expect("tmp dir");
+//! let path = dir.path().join("file.bin");
+//!
+//! let file = FrozenFile::new(path.clone(), 0x10, 1).expect("create file");
+//! assert!(file.length() >= 0x10);
+//!
+//! let value: u64 = 0xDEADC0DE;
+//! let ptr = &value as *const u64 as *const u8;
+//!
+//! file.write(ptr, 0, 8).expect("write");
+//! file.sync().expect("sync");
+//!
+//! let mut out: u64 = 0;
+//! let out_ptr = &mut out as *mut u64 as *mut u8;
+//!
+//! file.read(out_ptr, 0, 8).expect("read");
+//! assert_eq!(out, 0xDEADC0DE);
+//! ```
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
@@ -84,6 +109,26 @@ pub(in crate::ffile) fn new_err_default<R>(res: FFileErrRes) -> FrozenRes<R> {
 }
 
 /// Custom implementation of `std::fs::File`
+///
+/// # Example
+///
+/// ```
+/// use frozen_core::ffile::FrozenFile;
+/// use tempfile::tempdir;
+///
+/// let dir = tempdir().expect("tmp");
+/// let path = dir.path().join("standalone.bin");
+///
+/// let file = FrozenFile::new(path.clone(), 0x20, 7).expect("file");
+///
+/// assert!(FrozenFile::exists(&path).expect("exists"));
+///
+/// file.grow(0x20).expect("grow");
+/// assert!(file.length() >= 0x40);
+///
+/// file.delete().expect("delete");
+/// assert!(!FrozenFile::exists(&path).expect("exists after delete"));
+/// ```
 #[derive(Debug)]
 pub struct FrozenFile(Arc<Core>);
 
