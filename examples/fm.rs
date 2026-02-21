@@ -11,11 +11,11 @@ fn main() {
     let ff = ffile::FrozenFile::new(path, len, module_id).expect("new FFile");
     assert!(ff.fd() >= 0);
 
-    let fm = fmmap::FrozenMMap::new(ff, len as usize, fmmap::FMCfg::new(module_id)).expect("mmap");
+    let fm = fmmap::FrozenMMap::new(ff, fmmap::FMCfg::new(module_id)).expect("mmap");
 
-    fm.with_write::<u64, _>(0, |v| *v = 0xDEADC0DE);
+    fm.with_write::<u64, _>(0, |v| *v = 0xDEADC0DE).unwrap();
     fm.sync().expect("sync");
 
-    let value = fm.with_read::<u64, u64>(0, |v| *v);
+    let value = fm.with_read::<u64, u64>(0, |v| *v).unwrap();
     assert_eq!(value, 0xDEADBEEF);
 }
