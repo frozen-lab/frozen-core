@@ -14,6 +14,9 @@ use std::{
     thread, time,
 };
 
+/// type for `epoch` used by write ops
+type TEpoch = u64;
+
 /// Domain Id for [`FrozenMMap`] is **18**
 const ERRDOMAIN: u8 = 0x12;
 
@@ -165,6 +168,27 @@ impl FrozenMMap {
         self.0.get_sync_error()
     }
 
+    /// Wait for durability for the given write `epoch`
+    pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
+        if self.0.durable_epoch.load(atomic::Ordering::Acquire) >= epoch {
+            return Ok(());
+        }
+
+        let mut guard = match self.0.durable_lock.lock() {
+            Ok(g) => g,
+            Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
+        };
+
+        while self.0.durable_epoch.load(atomic::Ordering::Acquire) < epoch {
+            guard = match self.0.durable_cv.wait(guard) {
+                Ok(g) => g,
+                Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get's a read only typed pointer for `T`
     #[inline]
     pub fn with_read<T, R>(&self, offset: usize, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
@@ -179,14 +203,15 @@ impl FrozenMMap {
 
     /// Get's a mutable typed pointer for `T`
     #[inline]
-    pub fn with_write<T, R>(&self, offset: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<R> {
+    pub fn with_write<T, R>(&self, offset: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
         let guard = self.acquire_guard()?;
 
         let ptr = unsafe { self.get_mmap().get_mut(offset) };
         let res = unsafe { f(&mut *ptr) };
+        let epoch = self.0.write_epoch.fetch_add(1, atomic::Ordering::AcqRel) + 1;
 
         drop(guard);
-        Ok(res)
+        Ok((res, epoch))
     }
 
     /// Get a [`FMReader`] object for `T` at given `offset`
@@ -366,9 +391,13 @@ struct Core {
     ffile: FrozenFile,
     lock: sync::Mutex<()>,
     dirty: atomic::AtomicBool,
+    active: atomic::AtomicU64,
+    durable_cv: sync::Condvar,
     shutdown_cv: sync::Condvar,
     growing: atomic::AtomicBool,
-    active: atomic::AtomicUsize,
+    durable_lock: sync::Mutex<()>,
+    write_epoch: atomic::AtomicU64,
+    durable_epoch: atomic::AtomicU64,
     error: atomic::AtomicPtr<FrozenErr>,
     mmap: cell::UnsafeCell<mem::ManuallyDrop<TMap>>,
 }
@@ -383,10 +412,14 @@ impl Core {
             ffile,
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
+            durable_cv: sync::Condvar::new(),
             shutdown_cv: sync::Condvar::new(),
-            active: atomic::AtomicUsize::new(0),
+            active: atomic::AtomicU64::new(0),
+            durable_lock: sync::Mutex::new(()),
             dirty: atomic::AtomicBool::new(false),
+            write_epoch: atomic::AtomicU64::new(0),
             growing: atomic::AtomicBool::new(false),
+            durable_epoch: atomic::AtomicU64::new(0),
             error: atomic::AtomicPtr::new(std::ptr::null_mut()),
             mmap: cell::UnsafeCell::new(mem::ManuallyDrop::new(mmap)),
         }
@@ -527,7 +560,31 @@ impl Core {
                 // guarenty for the old data as well
 
                 match core.sync() {
-                    Ok(_) => core.clear_sync_error(),
+                    Ok(_) => {
+                        let current = core.write_epoch.load(atomic::Ordering::Acquire);
+                        core.durable_epoch.store(current, atomic::Ordering::Release);
+
+                        let _g = match core.durable_lock.lock() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                let res = FMMapErrRes::Lpn;
+                                let detail = res.default_message();
+
+                                let err = FrozenErr::new(
+                                    mid(),
+                                    ERRDOMAIN,
+                                    res as u16,
+                                    detail,
+                                    e.to_string().as_bytes().to_vec(),
+                                );
+                                core.set_sync_error(err);
+                                return;
+                            }
+                        };
+
+                        core.durable_cv.notify_all();
+                        core.clear_sync_error();
+                    }
                     Err(err) => core.set_sync_error(err),
                 }
 
@@ -590,11 +647,14 @@ pub struct FMWriter<'a, T> {
 impl<'a, T> FMWriter<'a, T> {
     /// Get's a mutable (read & write) typed pointer for `T`
     #[inline]
-    pub fn write<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+    pub fn write<R>(&self, f: impl FnOnce(&mut T) -> R) -> (R, TEpoch) {
         let res = unsafe { f(&mut *self.ptr) };
+        let epoch = self.map.0.write_epoch.fetch_add(1, atomic::Ordering::AcqRel) + 1;
+
         self.map.0.dirty.store(true, atomic::Ordering::Release);
         self.map.0.cv.notify_one();
-        res
+
+        (res, epoch)
     }
 }
 
@@ -984,6 +1044,115 @@ mod tests {
                 let v = mmap.with_read::<u64, _>((i as usize) * 8, |v| *v).unwrap();
                 assert_eq!(v, i);
             }
+        }
+    }
+
+    mod fm_epoch {
+        use super::*;
+
+        #[test]
+        fn epoch_monotonicity() {
+            let (_dir, _path, mmap) = new_tmp();
+
+            let (_, e1) = mmap.writer::<u64>(0).unwrap().write(|v| *v = 1);
+            let (_, e2) = mmap.writer::<u64>(8).unwrap().write(|v| *v = 2);
+            let (_, e3) = mmap.writer::<u64>(16).unwrap().write(|v| *v = 3);
+
+            assert!(e1 < e2);
+            assert!(e2 < e3);
+        }
+
+        #[test]
+        fn wait_for_durability_blocks_until_flush() {
+            let (_dir, _path, mmap) = new_tmp();
+
+            let (_, epoch) = mmap.writer::<u64>(0).unwrap().write(|v| *v = 10);
+
+            // Should block until background flush occurs
+            mmap.wait_for_durability(epoch).expect("wait");
+
+            assert!(mmap.0.durable_epoch.load(std::sync::atomic::Ordering::Acquire) >= epoch);
+        }
+
+        #[test]
+        fn wait_returns_immediately_if_already_durable() {
+            let (_dir, _path, mmap) = new_tmp();
+
+            let (_, epoch) = mmap.writer::<u64>(0).unwrap().write(|v| *v = 11);
+
+            mmap.wait_for_durability(epoch).expect("wait");
+
+            // second call must return immediately
+            mmap.wait_for_durability(epoch).expect("wait again");
+        }
+
+        #[test]
+        fn multiple_waiters_are_notified() {
+            let (_dir, _path, mmap) = new_tmp();
+            let mmap = Arc::new(mmap);
+
+            let (_, epoch) = mmap.writer::<u64>(0).unwrap().write(|v| *v = 99);
+
+            let mut handles = Vec::new();
+
+            for _ in 0..4 {
+                let m = mmap.clone();
+                handles.push(thread::spawn(move || {
+                    m.wait_for_durability(epoch).expect("wait");
+                }));
+            }
+
+            for h in handles {
+                h.join().expect("join");
+            }
+
+            assert!(mmap.0.durable_epoch.load(std::sync::atomic::Ordering::Acquire) >= epoch);
+        }
+
+        #[test]
+        fn durable_epoch_tracks_latest_write() {
+            let (_dir, _path, mmap) = new_tmp();
+
+            let mut last = 0;
+
+            for i in 0..8u64 {
+                let (_, e) = mmap.writer::<u64>((i as usize) * 8).unwrap().write(|v| *v = i);
+                last = e;
+            }
+
+            mmap.wait_for_durability(last).expect("wait");
+
+            let durable = mmap.0.durable_epoch.load(std::sync::atomic::Ordering::Acquire);
+
+            assert!(durable >= last);
+        }
+
+        #[test]
+        fn concurrent_wait_and_writes() {
+            let (_dir, _path, mmap) = new_tmp();
+            let mmap = Arc::new(mmap);
+
+            let m_writer = mmap.clone();
+            let writer = thread::spawn(move || {
+                let mut last = 0;
+                for i in 0..16u64 {
+                    let (_, e) = m_writer.writer::<u64>((i as usize) * 8).unwrap().write(|v| *v = i);
+                    last = e;
+                }
+                last
+            });
+
+            let m_waiter = mmap.clone();
+            let waiter = thread::spawn(move || {
+                let target = writer.join().expect("join writer");
+                m_waiter.wait_for_durability(target).expect("wait");
+            });
+
+            waiter.join().expect("join waiter");
+
+            let durable = mmap.0.durable_epoch.load(std::sync::atomic::Ordering::Acquire);
+
+            assert!(durable >= mmap.0.write_epoch.load(std::sync::atomic::Ordering::Acquire));
         }
     }
 }
