@@ -2,9 +2,9 @@ use super::{new_err, new_err_default, FFId, FFileErrRes};
 use crate::{error::FrozenRes, hints};
 use core::{ffi::CStr, sync::atomic};
 use libc::{
-    access, c_char, c_int, c_uint, c_void, close, fstat, ftruncate, off_t, open, pread, pwrite, size_t, stat, unlink,
-    EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS, ENOTDIR, EOPNOTSUPP, EPERM, EROFS,
-    ESPIPE, F_OK, O_CLOEXEC, O_CREAT, O_RDWR, S_IRUSR, S_IWUSR,
+    access, c_char, c_int, c_uint, c_void, close, fstat, ftruncate, off_t, open, pread, pwrite,
+    size_t, stat, unlink, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, ENOENT, ENOSPC,
+    ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, F_OK, O_CLOEXEC, O_CREAT, O_RDWR, S_IRUSR, S_IWUSR,
 };
 
 const CLOSED_FD: FFId = FFId::MIN;
@@ -221,7 +221,12 @@ impl POSIXFile {
 
     /// Read at given `offset` w/ `pread` syscall from [`POSIXFile`]
     #[inline(always)]
-    pub(super) unsafe fn pread(&self, buf_ptr: *mut u8, offset: usize, len_to_read: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn pread(
+        &self,
+        buf_ptr: *mut u8,
+        offset: usize,
+        len_to_read: usize,
+    ) -> FrozenRes<()> {
         let mut read = 0usize;
         while read < len_to_read {
             let res = pread(
@@ -261,7 +266,12 @@ impl POSIXFile {
 
     /// Write at given `offset` w/ `pwrite` syscall to [`POSIXFile`]
     #[inline(always)]
-    pub(super) unsafe fn pwrite(&self, buf_ptr: *const u8, offset: usize, len_to_write: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn pwrite(
+        &self,
+        buf_ptr: *const u8,
+        offset: usize,
+        len_to_write: usize,
+    ) -> FrozenRes<()> {
         let mut written = 0usize;
         while written < len_to_write {
             let res = pwrite(
@@ -559,7 +569,7 @@ unsafe fn fallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenR
             // NOTE: on many fs `fallocate` may not be supported due to old kernel or fs
             // limitations, as use of this is only to hint the fs (for perf gains while writes),
             // we simply let go of this and do not elivate any kind of errors
-            EOPNOTSUPP | ENOSYS => return Ok(false),
+            EOPNOTSUPP | libc::ENOSYS => return Ok(false),
 
             _ => return new_err(FFileErrRes::Unk, err_msg),
         }
@@ -642,7 +652,7 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
     };
 
     loop {
-        if fcntl(fd, libc::F_PREALLOCATE, &store) == 0 {
+        if libc::fcntl(fd, libc::F_PREALLOCATE, &store) == 0 {
             return Ok(());
         }
 
@@ -663,8 +673,8 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
             ENOSPC => {
                 // NOTE: we must retry w/ non-contiguous allocs for correctness, as sometimes
                 // we do get `ENOSPC` only for contiguous allocs
-                if store.fst_flags == F_ALLOCATECONTIG {
-                    store.fst_flags = F_ALLOCATEALL;
+                if store.fst_flags == libc::F_ALLOCATECONTIG {
+                    store.fst_flags = libc::F_ALLOCATEALL;
                     retries = 0;
                     continue;
                 }
@@ -675,7 +685,7 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
             // NOTE: on many fs `fcntl(F_PREALLOCATE)` may not be supported due to old kernel
             // or fs limitations, as use of this is only to hint the fs (for perf gains while writes),
             // we simply let go of this and do not elivate any kind of errors
-            EOPNOTSUPP | ENOTSUP => return Ok(()),
+            EOPNOTSUPP | libc::ENOTSUP => return Ok(()),
 
             // invalid fd or lack of support
             EBADF | EINVAL => return new_err(FFileErrRes::Hcf, err_msg),
