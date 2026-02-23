@@ -111,12 +111,10 @@ impl FrozenFile {
 
     /// create a new or open an existing [`FrozenFile`]
     pub fn new(path: &std::path::Path, init_len: usize, mid: u8) -> FrozenRes<Self> {
-        MID.store(mid, atomic::Ordering::Relaxed);
+        MID.store(mid, atomic::Ordering::Relaxed); // used for err logging
 
         let file = unsafe { posix::POSIXFile::new(&path) }?;
         let mut curr_len = unsafe { file.length()? };
-
-        // TODO: (in future) improve corruption handling for file
 
         match curr_len {
             0 => unsafe {
@@ -136,7 +134,7 @@ impl FrozenFile {
     /// Grow [`FrozenFile`] w/ given `len_to_add`
     pub fn grow(&self, len_to_add: usize) -> FrozenRes<usize> {
         unsafe { self.get_file().grow(self.length(), len_to_add) }.inspect(|new_len| {
-            let _ = self.0.length.fetch_add(*new_len, atomic::Ordering::Release);
+            self.0.length.store(*new_len, atomic::Ordering::Release);
         })
     }
 
@@ -244,5 +242,208 @@ impl Core {
     #[cfg(any(target_os = "linux"))]
     fn sync_range(&self, offset: usize, len: usize) -> FrozenRes<()> {
         unsafe { (&*self.file.get()).sync_range(offset, len) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::TEST_MID;
+    use std::path::PathBuf;
+
+    fn tmp_path() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tmp_frozen_file");
+
+        (dir, path)
+    }
+
+    mod ff_new {
+        use super::*;
+
+        #[test]
+        fn ok_new_with_init_len() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x1000, TEST_MID).unwrap();
+
+            assert!(path.exists());
+            assert_eq!(file.length(), 0x1000);
+        }
+
+        #[test]
+        fn ok_new_existing() {
+            let (_dir, path) = tmp_path();
+
+            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+            assert_eq!(file.length(), 0x200);
+
+            let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+            assert_eq!(reopened.length(), 0x200);
+        }
+
+        #[test]
+        fn err_new_when_file_smaller_than_init_len() {
+            let (_dir, path) = tmp_path();
+
+            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+            assert_eq!(file.length(), 0x200);
+
+            let res = FrozenFile::new(&path, 0x400, 1);
+            assert!(res.is_err());
+        }
+    }
+
+    mod ff_grow {
+        use super::*;
+
+        #[test]
+        fn ok_grow_updates_length() {
+            let (_dir, path) = tmp_path();
+
+            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+            assert_eq!(file.length(), 0x100);
+
+            file.grow(0x100).unwrap();
+            assert_eq!(file.length(), 0x200);
+        }
+    }
+
+    mod ff_read_write {
+        use super::*;
+
+        #[test]
+        fn ok_single_write_read_cycle() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x400, TEST_MID).unwrap();
+
+            let data = b"grave";
+            let iov = libc::iovec {
+                iov_base: data.as_ptr() as *mut _,
+                iov_len: data.len(),
+            };
+
+            file.write(&iov, 0x80).unwrap();
+            file.sync().unwrap();
+
+            let mut buf = vec![0u8; data.len()];
+            let mut read_iov = libc::iovec {
+                iov_base: buf.as_mut_ptr() as *mut _,
+                iov_len: buf.len(),
+            };
+
+            file.read(&mut read_iov, 0x80).unwrap();
+            assert_eq!(&buf, data);
+        }
+
+        #[test]
+        fn ok_vectored_write_read_cycle() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x400, TEST_MID).unwrap();
+
+            let mut bufs = [vec![1u8; 0x40], vec![2u8; 0x40]];
+            let mut iovs: Vec<libc::iovec> = bufs
+                .iter_mut()
+                .map(|b| libc::iovec {
+                    iov_base: b.as_mut_ptr() as *mut _,
+                    iov_len: b.len(),
+                })
+                .collect();
+
+            file.pwritev(&mut iovs, 0).unwrap();
+            file.sync().unwrap();
+
+            let mut read_bufs = [vec![0u8; 0x40], vec![0u8; 0x40]];
+            let mut read_iovs: Vec<libc::iovec> = read_bufs
+                .iter_mut()
+                .map(|b| libc::iovec {
+                    iov_base: b.as_mut_ptr() as *mut _,
+                    iov_len: b.len(),
+                })
+                .collect();
+
+            file.preadv(&mut read_iovs, 0).unwrap();
+            assert!(read_bufs[0].iter().all(|b| *b == 1));
+            assert!(read_bufs[1].iter().all(|b| *b == 2));
+        }
+
+        #[test]
+        fn ok_write_concurrent_non_overlapping() {
+            let (_dir, path) = tmp_path();
+            let file = Arc::new(FrozenFile::new(&path, 0x1000, TEST_MID).unwrap());
+
+            let mut handles = vec![];
+            for i in 0..0x0A {
+                let f = file.clone();
+                handles.push(std::thread::spawn(move || {
+                    let data = vec![i as u8; 0x80];
+                    let iov = libc::iovec {
+                        iov_base: data.as_ptr() as *mut _,
+                        iov_len: data.len(),
+                    };
+
+                    f.write(&iov, i * 0x80).unwrap();
+                }));
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            file.sync().unwrap();
+
+            for i in 0..0x0A {
+                let mut buf = vec![0u8; 0x80];
+                let mut iov = libc::iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                file.read(&mut iov, i * 0x80).unwrap();
+                assert!(buf.iter().all(|b| *b == i as u8));
+            }
+        }
+    }
+
+    mod ff_lifecycle {
+        use super::*;
+
+        #[test]
+        fn ok_delete_file() {
+            let (_dir, path) = tmp_path();
+
+            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+            assert!(path.exists());
+
+            file.delete().unwrap();
+            assert!(!path.exists());
+        }
+
+        #[test]
+        fn ok_drop_flushes() {
+            let (_dir, path) = tmp_path();
+
+            {
+                let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+                let data = b"persist";
+                let iov = libc::iovec {
+                    iov_base: data.as_ptr() as *mut _,
+                    iov_len: data.len(),
+                };
+                file.write(&iov, 0).unwrap();
+                drop(file);
+            }
+
+            {
+                let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+                let mut buf = vec![0u8; 7];
+                let mut iov = libc::iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                reopened.read(&mut iov, 0).unwrap();
+                assert_eq!(&buf, b"persist");
+            }
+        }
     }
 }

@@ -1310,6 +1310,180 @@ mod tests {
         }
     }
 
+    mod write_read_vectored {
+        use super::*;
+
+        #[test]
+        fn ok_pwritev_preadv_cycle() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x1000).unwrap();
+
+                let mut buffers = [vec![1u8; 0x80], vec![2u8; 0x80], vec![3u8; 0x80]];
+                let mut iovecs: Vec<iovec> = buffers
+                    .iter_mut()
+                    .map(|b| iovec {
+                        iov_base: b.as_mut_ptr() as *mut _,
+                        iov_len: b.len(),
+                    })
+                    .collect();
+                file.pwritev(&mut iovecs, 0).unwrap();
+
+                let mut read_bufs = [vec![0u8; 0x80], vec![0u8; 0x80], vec![0u8; 0x80]];
+                let mut read_iovs: Vec<iovec> = read_bufs
+                    .iter_mut()
+                    .map(|b| iovec {
+                        iov_base: b.as_mut_ptr() as *mut _,
+                        iov_len: b.len(),
+                    })
+                    .collect();
+                file.preadv(&mut read_iovs, 0).unwrap();
+
+                assert!(read_bufs[0].iter().all(|b| *b == 1));
+                assert!(read_bufs[1].iter().all(|b| *b == 2));
+                assert!(read_bufs[2].iter().all(|b| *b == 3));
+            }
+        }
+
+        #[test]
+        fn ok_pwritev_handles_large_iovec_batches() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let count = read_max_iovecs() + 5;
+
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, count * 0x40).unwrap();
+
+                let mut buffers: Vec<Vec<u8>> = (0..count).map(|i| vec![i as u8; 0x40]).collect();
+                let mut iovecs: Vec<iovec> = buffers
+                    .iter_mut()
+                    .map(|b| iovec {
+                        iov_base: b.as_mut_ptr() as *mut _,
+                        iov_len: b.len(),
+                    })
+                    .collect();
+
+                file.pwritev(&mut iovecs, 0).unwrap();
+                file.sync().unwrap();
+
+                for i in 0..count {
+                    let mut buf = vec![0u8; 0x40];
+                    let mut iov = iovec {
+                        iov_base: buf.as_mut_ptr() as *mut _,
+                        iov_len: buf.len(),
+                    };
+
+                    file.pread(&mut iov, i * 0x40).unwrap();
+                    assert!(buf.iter().all(|b| *b == i as u8));
+                }
+            }
+        }
+
+        #[test]
+        fn ok_pwritev_preadv_across_sessions() {
+            let (_dir, path) = tmp_path();
+
+            // new + write + close
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x400).unwrap();
+
+                let mut bufs = [vec![9u8; 0x80], vec![8u8; 0x80]];
+                let mut iovs: Vec<iovec> = bufs
+                    .iter_mut()
+                    .map(|b| iovec {
+                        iov_base: b.as_mut_ptr() as *mut _,
+                        iov_len: b.len(),
+                    })
+                    .collect();
+
+                file.pwritev(&mut iovs, 0).unwrap();
+                file.sync().unwrap();
+                file.close().unwrap();
+            }
+
+            // open + read + close
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+
+                let mut read_bufs = [vec![0u8; 0x80], vec![0u8; 0x80]];
+                let mut read_iovs: Vec<iovec> = read_bufs
+                    .iter_mut()
+                    .map(|b| iovec {
+                        iov_base: b.as_mut_ptr() as *mut _,
+                        iov_len: b.len(),
+                    })
+                    .collect();
+
+                file.preadv(&mut read_iovs, 0).unwrap();
+
+                assert!(read_bufs[0].iter().all(|b| *b == 9));
+                assert!(read_bufs[1].iter().all(|b| *b == 8));
+            }
+        }
+
+        #[test]
+        fn ok_pwritev_concurrent_non_overlapping() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = std::sync::Arc::new(POSIXFile::new(&path).unwrap());
+
+                let threads = 8usize;
+                let page = 0x80usize;
+                let per_thread_iovs = 4usize;
+
+                let total = threads * per_thread_iovs * page;
+                file.grow(0, total).unwrap();
+
+                let mut handles = Vec::new();
+                for t in 0..threads {
+                    let f = file.clone();
+
+                    handles.push(std::thread::spawn(move || {
+                        let mut bufs: Vec<Vec<u8>> =
+                            (0..per_thread_iovs).map(|i| vec![(t * 10 + i) as u8; page]).collect();
+                        let mut iovs: Vec<iovec> = bufs
+                            .iter_mut()
+                            .map(|b| iovec {
+                                iov_base: b.as_mut_ptr() as *mut _,
+                                iov_len: b.len(),
+                            })
+                            .collect();
+
+                        let offset = t * per_thread_iovs * page;
+                        f.pwritev(&mut iovs, offset).unwrap();
+                    }));
+                }
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+
+                file.sync().unwrap();
+
+                for t in 0..threads {
+                    for i in 0..per_thread_iovs {
+                        let mut buf = vec![0u8; page];
+                        let mut iov = iovec {
+                            iov_base: buf.as_mut_ptr() as *mut _,
+                            iov_len: buf.len(),
+                        };
+
+                        let offset = (t * per_thread_iovs + i) * page;
+                        file.pread(&mut iov, offset).unwrap();
+
+                        let expected = (t * 10 + i) as u8;
+                        assert!(buf.iter().all(|b| *b == expected));
+                    }
+                }
+            }
+        }
+    }
+
     mod utils {
         use super::*;
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
