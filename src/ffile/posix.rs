@@ -87,7 +87,7 @@ impl POSIXFile {
         close_raw(fd)
     }
 
-    /// Unlinks (possibly deletes) the [`POSIXFile`]
+    /// Deletes the [`POSIXFile`] entery from the fs
     pub(super) unsafe fn unlink(&self, path: &std::path::PathBuf) -> FrozenRes<()> {
         let cpath = path_to_cstring(path)?;
 
@@ -210,6 +210,20 @@ impl POSIXFile {
     #[cfg(target_os = "linux")]
     pub(super) unsafe fn sync(&self) -> FrozenRes<()> {
         fdatasync_raw(self.fd())
+    }
+
+    /// Initiates writeback (best-effort) of dirty pages in the specified range
+    ///
+    /// ## Why
+    ///
+    /// In our case, `sync_range` is used as a prompt for the kernel to start flushing dirty pages in the
+    /// specified range, which result in reduced latency for `fdatasync` and `fcntl(F_FULLSYNC)` syscalls
+    ///
+    /// This syscall, by itself, does not guarantee any kind of durability, and must always be paired with
+    /// strong sync calls like `fdatasync()` and `fcntl(F_FULLSYNC)`
+    #[cfg(target_os = "linux")]
+    pub(super) unsafe fn sync_range(&self, offset: usize, len: usize) -> FrozenRes<()> {
+        sync_file_range_raw(self.fd(), offset, len)
     }
 
     /// Read a single `iovec` from given `offset` w/ `pread` syscall
@@ -689,6 +703,53 @@ unsafe fn fsync_raw(fd: FFId) -> FrozenRes<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
+unsafe fn sync_file_range_raw(fd: FFId, offset: usize, len: usize) -> FrozenRes<()> {
+    let flag = libc::SYNC_FILE_RANGE_WRITE;
+    let mut retries = 0; // only for EINTR errors
+
+    loop {
+        let res = libc::sync_file_range(fd, offset as off_t, len as off_t, flag);
+        if hints::likely(res == 0) {
+            return Ok(());
+        }
+
+        let errno = last_errno();
+        let err_msg = err_msg(errno);
+
+        match errno {
+            // IO interrupt
+            EINTR => {
+                if retries < MAX_RETRIES {
+                    retries += 1;
+                    continue;
+                }
+
+                // NOTE: sync error indicates that retries exhausted and durability is broken
+                // in the current/last window/batch
+                return new_err(FFileErrRes::Syn, err_msg);
+            }
+
+            // invalid fd or lack of support for sync
+            EBADF | EINVAL => return new_err(FFileErrRes::Hcf, err_msg),
+
+            // read-only file (can also be caused by TOCTOU)
+            EROFS => return new_err(FFileErrRes::Prm, err_msg),
+
+            // fatal error, i.e. no sync for writes in recent window/batch
+            EIO => return new_err(FFileErrRes::Syn, err_msg),
+
+            // NOTE: on many fs mainly ones w/o local journaling, and older kernels does not support
+            // `sync_file_range(SYNC_FILE_RANGE_WRITE)`, also as the use of this is only to hint the
+            // fs (for perf gains for later sync), we simply let go of this and do not elivate any
+            // kind of errors
+            EOPNOTSUPP | libc::ENOSYS => return Ok(()),
+
+            _ => return new_err(FFileErrRes::Unk, err_msg),
+        }
+    }
+}
+
 /// extend the [`POSIXFile`] to `len = curr_len + len_to_add`, reserves disk block for newly added
 /// range, and guarantees reads return zero after file size is extended
 ///
@@ -879,16 +940,19 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
 ///
 /// we must `fsync(parent_dir)`, for crash safe durability
 unsafe fn sync_parent_dir(path: &std::path::PathBuf) -> FrozenRes<()> {
-    let parent = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => std::path::Path::new("."),
-    };
-
+    let parent = extract_parent_dir(path);
     let flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
-    let fd = open_raw(&parent.to_path_buf(), flags)?;
-    fsync_raw(fd).inspect(|_| {
-        let _ = close_raw(fd);
-    })
+    let fd = open_raw(&parent, flags)?;
+
+    #[cfg(target_os = "linux")]
+    let res = fsync_raw(fd);
+
+    #[cfg(target_os = "macos")]
+    let res = f_fullsync_raw(fd);
+
+    let _ = close_raw(fd);
+
+    res
 }
 
 /// preps flags for `open()` syscall
@@ -959,4 +1023,11 @@ fn read_max_iovecs() -> usize {
             res as usize
         }
     })
+}
+
+fn extract_parent_dir(path: &std::path::PathBuf) -> std::path::PathBuf {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::Path::new(".").to_path_buf(),
+    }
 }

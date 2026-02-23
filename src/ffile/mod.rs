@@ -105,7 +105,6 @@ impl FrozenFile {
     }
 
     /// check if [`FrozenFile`] exists on storage device or not
-    #[inline]
     pub fn exists(path: &std::path::PathBuf) -> FrozenRes<bool> {
         unsafe { TFile::exists(path) }
     }
@@ -135,7 +134,6 @@ impl FrozenFile {
     }
 
     /// Grow [`FrozenFile`] w/ given `len_to_add`
-    #[inline(always)]
     pub fn grow(&self, len_to_add: usize) -> FrozenRes<usize> {
         unsafe { self.get_file().grow(self.length(), len_to_add) }.inspect(|new_len| {
             let _ = self.0.length.fetch_add(*new_len, atomic::Ordering::Release);
@@ -143,9 +141,14 @@ impl FrozenFile {
     }
 
     /// Syncs in-mem data on the storage device
-    #[inline]
     pub fn sync(&self) -> FrozenRes<()> {
         self.0.sync()
+    }
+
+    /// Initiates writeback (best-effort) of dirty pages in the specified range
+    #[cfg(any(target_os = "linux"))]
+    pub fn sync_range(&self, offset: usize, len: usize) -> FrozenRes<()> {
+        self.0.sync_range(offset, len)
     }
 
     /// Delete [`FrozenFile`] from filesystem
@@ -235,5 +238,11 @@ impl Core {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn sync(&self) -> FrozenRes<()> {
         unsafe { (&*self.file.get()).sync() }
+    }
+
+    #[inline]
+    #[cfg(any(target_os = "linux"))]
+    fn sync_range(&self, offset: usize, len: usize) -> FrozenRes<()> {
+        unsafe { (&*self.file.get()).sync_range(offset, len) }
     }
 }
