@@ -1,5 +1,13 @@
 # Changelog
 
+## `0.0.7`
+
+- `FF`
+  - improved public api
+  - revised test suites
+  - impl of `sync_range` (linux only)
+  - impl of vectored write/read ops
+
 ## `0.0.6`
 
 - `FF` improved public api

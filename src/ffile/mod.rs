@@ -1,4 +1,37 @@
 //! Custom implementation of `std::fs::File`
+//!
+//! # Example
+//!
+//! ```
+//! use frozen_core::ffile::FrozenFile;
+//! use std::path::Path;
+//! use libc::iovec;
+//!
+//! let mid = 0u8;
+//! let path = Path::new("./target/grave.data");
+//! let file = FrozenFile::new(&path, 0x1000, mid).unwrap();
+//!
+//! let data = b"hello grave";
+//! let iov = iovec {
+//!     iov_base: data.as_ptr() as *mut _,
+//!     iov_len: data.len(),
+//! };
+//!
+//! file.write(&iov, 0x80).unwrap();
+//! file.sync().unwrap();
+//!
+//! let mut buf = vec![0u8; data.len()];
+//! let mut read_iov = iovec {
+//!     iov_base: buf.as_mut_ptr() as *mut _,
+//!     iov_len: buf.len(),
+//! };
+//!
+//! file.read(&mut read_iov, 0x80).unwrap();
+//! assert_eq!(&buf, data);
+//!
+//! file.delete().unwrap();
+//! assert!(!path.exists());
+//! ```
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;

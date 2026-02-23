@@ -1,26 +1,4 @@
 //! Custom implementation of `memmap`
-//!
-//! # Example Usage
-//!
-//! ```
-//! use frozen_core::{ffile::FrozenFile, fmmap::{FrozenMMap, FMCfg}};
-//! use tempfile::tempdir;
-//!
-//! let dir = tempdir().expect("tmp dir");
-//! let path = dir.path().join("example.bin");
-//!
-//! let file = FrozenFile::new(path, 0x10, 1).expect("file");
-//! let mmap = FrozenMMap::new(file, FMCfg::new(1)).expect("mmap");
-//! let (_, epoch) = mmap.with_write::<u64, _>(0, |v| *v = 0xDEADC0DE).expect("write");
-//!
-//! match mmap.wait_for_durability(epoch) {
-//!     Ok(_) => {
-//!         let value = mmap.with_read::<u64, u64>(0, |v| *v).unwrap();
-//!         assert_eq!(value, 0xDEADC0DE);
-//!     }
-//!     Err(e) => panic!("{e}"),
-//! }
-//! ```
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
@@ -137,28 +115,6 @@ impl FMCfg {
 }
 
 /// Custom implementation of MemMap
-///
-/// # Example
-///
-/// ```
-/// use frozen_core::{ffile::FrozenFile, fmmap::{FrozenMMap, FMCfg}};
-/// use tempfile::tempdir;
-///
-/// let dir = tempdir().expect("tmp dir");
-/// let path = dir.path().join("example.bin");
-///
-/// let file = FrozenFile::new(path, 0x10, 1).expect("file");
-/// let mmap = FrozenMMap::new(file, FMCfg::new(1)).expect("mmap");
-/// let (_, epoch) = mmap.with_write::<u64, _>(0, |v| *v = 0xDEADC0DE).expect("write");
-///
-/// match mmap.wait_for_durability(epoch) {
-///     Ok(_) => {
-///         let value = mmap.with_read::<u64, u64>(0, |v| *v).unwrap();
-///         assert_eq!(value, 0xDEADC0DE);
-///     }
-///     Err(e) => panic!("{e}"),
-/// }
-/// ```
 #[derive(Debug)]
 pub struct FrozenMMap(sync::Arc<Core>);
 
@@ -194,28 +150,6 @@ impl FrozenMMap {
     /// Wait for durability for the given write `epoch`
     ///
     /// This functions blocks until epoch becomes durable
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use frozen_core::{ffile::FrozenFile, fmmap::{FrozenMMap, FMCfg}};
-    /// use tempfile::tempdir;
-    ///
-    /// let dir = tempdir().expect("tmp");
-    /// let path = dir.path().join("durable.bin");
-    ///
-    /// let file = FrozenFile::new(path, 0x10, 1).expect("file");
-    /// let mmap = FrozenMMap::new(file, FMCfg::new(1)).expect("mmap");
-    /// let (_, epoch) = mmap.with_write::<u64, _>(0, |v| *v = 1).expect("write");
-    ///
-    /// match mmap.wait_for_durability(epoch) {
-    ///     Ok(_) => {
-    ///         let value = mmap.with_read::<u64, u64>(0, |v| *v).unwrap();
-    ///         assert_eq!(value, 1);
-    ///     }
-    ///     Err(e) => panic!("{e}"),
-    /// }
-    /// ```
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
         if self.0.durable_epoch.load(atomic::Ordering::Acquire) >= epoch {
             return Ok(());
