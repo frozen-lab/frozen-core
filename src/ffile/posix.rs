@@ -40,7 +40,7 @@ impl POSIXFile {
     ///
     /// By using `access(2)` syscall w/ `F_OK`, we check whether the calling process
     /// can resolve the given `path` in underlying fs
-    pub(super) unsafe fn exists(path: &std::path::PathBuf) -> FrozenRes<bool> {
+    pub(super) unsafe fn exists(path: &std::path::Path) -> FrozenRes<bool> {
         let cpath = path_to_cstring(path)?;
         Ok(access(cpath.as_ptr(), F_OK) == 0)
     }
@@ -59,7 +59,7 @@ impl POSIXFile {
     /// In our case, when a new [`FrozenFile`] is created, we zero-extend it using `ftruncate()`,
     /// and perform `fdatasync()` or `fcntl(F_FULLSYNC)`, which in result provides us the crash safe
     /// durability we need
-    pub(super) unsafe fn new(path: &std::path::PathBuf) -> FrozenRes<Self> {
+    pub(super) unsafe fn new(path: &std::path::Path) -> FrozenRes<Self> {
         let fd = open_raw(path, prep_flags())?;
         Ok(Self(atomic::AtomicI32::new(fd)))
     }
@@ -88,7 +88,7 @@ impl POSIXFile {
     }
 
     /// Deletes the [`POSIXFile`] entery from the fs
-    pub(super) unsafe fn unlink(&self, path: &std::path::PathBuf) -> FrozenRes<()> {
+    pub(super) unsafe fn unlink(&self, path: &std::path::Path) -> FrozenRes<()> {
         let cpath = path_to_cstring(path)?;
 
         // NOTE: POSIX systems requires fd to be closed before attempting to unlink the file
@@ -484,7 +484,7 @@ impl POSIXFile {
 ///
 /// To remain sane across ownership models, containers, and shared filesystems,
 /// we explicitly retry the `open()` w/o `O_NOATIME` when `EPERM` is encountered
-unsafe fn open_raw(path: &std::path::PathBuf, flags: c_int) -> FrozenRes<FFId> {
+unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenRes<FFId> {
     let cpath = path_to_cstring(path)?;
 
     // write + read permissions
@@ -939,7 +939,7 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
 /// resulting in catastrophic consequences
 ///
 /// we must `fsync(parent_dir)`, for crash safe durability
-unsafe fn sync_parent_dir(path: &std::path::PathBuf) -> FrozenRes<()> {
+unsafe fn sync_parent_dir(path: &std::path::Path) -> FrozenRes<()> {
     let parent = extract_parent_dir(path);
     let flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
     let fd = open_raw(&parent, flags)?;
@@ -969,18 +969,18 @@ unsafe fn sync_parent_dir(path: &std::path::PathBuf) -> FrozenRes<()> {
 /// - not all fs support this flag, many silently ignore it, but some throw `EPERM` error
 /// - It only works when the UID's are matched for calling processe and file owner
 #[cfg(target_os = "linux")]
-fn prep_flags() -> c_int {
+const fn prep_flags() -> c_int {
     return O_RDWR | O_CLOEXEC | libc::O_NOATIME | O_CREAT;
 }
 
 /// preps flags for `open()` syscall
 #[cfg(target_os = "macos")]
-fn prep_flags() -> c_int {
+const fn prep_flags() -> c_int {
     return O_RDWR | O_CLOEXEC | O_CREAT;
 }
 
-/// convert a `std::path::PathBuf` into `std::ffu::CString`
-fn path_to_cstring(path: &std::path::PathBuf) -> FrozenRes<std::ffi::CString> {
+/// convert a `std::path::Path` into `std::ffu::CString`
+fn path_to_cstring(path: &std::path::Path) -> FrozenRes<std::ffi::CString> {
     match std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
         Ok(cs) => Ok(cs),
         Err(e) => new_err(FFileErrRes::Inv, e.into_vec()),
@@ -1025,9 +1025,364 @@ fn read_max_iovecs() -> usize {
     })
 }
 
-fn extract_parent_dir(path: &std::path::PathBuf) -> std::path::PathBuf {
+fn extract_parent_dir(path: &std::path::Path) -> std::path::PathBuf {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => std::path::Path::new(".").to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tmp_path() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tmp_file");
+
+        (dir, path)
+    }
+
+    mod file_new_close {
+        use super::*;
+
+        #[test]
+        fn ok_new_close_cycle() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+
+                assert!(path.exists());
+                file.close().unwrap();
+            }
+        }
+
+        #[test]
+        fn ok_new_close_cycle_on_existing() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file1 = POSIXFile::new(&path).unwrap();
+                file1.close().unwrap();
+
+                let file2 = POSIXFile::new(&path).unwrap();
+                file2.close().unwrap();
+            }
+        }
+
+        #[test]
+        fn ok_close_on_close() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+
+                file.close().unwrap();
+                file.close().unwrap();
+                file.close().unwrap();
+            }
+        }
+
+        #[test]
+        fn err_new_on_missing_parent_dir() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let missing = path.join("/missing/file");
+                let err = POSIXFile::new(&missing).unwrap_err();
+                assert!(err.cmp(FFileErrRes::Inv as u16))
+            }
+        }
+    }
+
+    mod file_unlink {
+        use super::*;
+
+        #[test]
+        fn ok_unlink_existing() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                assert!(path.exists());
+
+                file.unlink(&path).unwrap();
+                assert!(!path.exists());
+            }
+        }
+
+        #[test]
+        fn err_unlink_missing() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.unlink(&path).unwrap();
+
+                let err = file.unlink(&path).unwrap_err();
+                assert!(err.cmp(FFileErrRes::Inv as u16));
+            }
+        }
+    }
+
+    mod file_grow {
+        use super::*;
+
+        #[test]
+        fn ok_grow() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+
+                let initial = file.length().unwrap();
+                assert_eq!(initial, 0);
+
+                let new_len = file.grow(0, 0x1000).unwrap();
+                assert_eq!(new_len, 0x1000);
+
+                let actual = file.length().unwrap();
+                assert_eq!(actual, 0x1000);
+
+                file.close().unwrap();
+            }
+        }
+
+        #[test]
+        fn ok_grow_extends_with_zero() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x500).unwrap();
+
+                let mut buf = vec![0u8; 0x500];
+                let mut iov = libc::iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                file.pread(&mut iov, 0).unwrap();
+                assert!(buf.iter().all(|b| *b == 0));
+
+                file.close().unwrap();
+            }
+        }
+    }
+
+    mod write_read_single {
+        use super::*;
+
+        #[test]
+        fn ok_pwrite_pread_cycle() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x200).unwrap();
+
+                let data = b"grave_engine";
+                let write_iov = libc::iovec {
+                    iov_base: data.as_ptr() as *mut _,
+                    iov_len: data.len(),
+                };
+                file.pwrite(&write_iov, 0x80).unwrap();
+
+                let mut buf = vec![0u8; data.len()];
+                let mut read_iov = libc::iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+                file.pread(&mut read_iov, 0x80).unwrap();
+                assert_eq!(&buf, data);
+            }
+        }
+
+        #[test]
+        fn ok_pwrite_pread_across_sessions() {
+            let (_dir, path) = tmp_path();
+
+            // new + write + close
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x1000).unwrap();
+
+                let data = b"persist_me";
+                let iov = libc::iovec {
+                    iov_base: data.as_ptr() as *mut _,
+                    iov_len: data.len(),
+                };
+
+                file.pwrite(&iov, 0).unwrap();
+                file.sync().unwrap();
+                file.close().unwrap();
+            }
+
+            // open + read + close
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+
+                let mut buf = vec![0u8; 10];
+                let mut iov = libc::iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                file.pread(&mut iov, 0).unwrap();
+                assert_eq!(&buf, b"persist_me");
+            }
+        }
+
+        #[test]
+        fn ok_pwrite_concurrent_non_overlapping() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = std::sync::Arc::new(POSIXFile::new(&path).unwrap());
+                file.grow(0, 0x2000).unwrap();
+
+                let mut handles = vec![];
+                for i in 0..0x0A {
+                    let f = file.clone();
+                    handles.push(std::thread::spawn(move || {
+                        let data = vec![i as u8; 0x100];
+                        let iov = libc::iovec {
+                            iov_base: data.as_ptr() as *mut _,
+                            iov_len: data.len(),
+                        };
+
+                        f.pwrite(&iov, i * 0x100).unwrap();
+                    }));
+                }
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+
+                file.sync().unwrap();
+                for i in 0..0x0A {
+                    let mut buf = vec![0u8; 0x100];
+                    let mut iov = libc::iovec {
+                        iov_base: buf.as_mut_ptr() as *mut _,
+                        iov_len: buf.len(),
+                    };
+
+                    file.pread(&mut iov, i * 0x100).unwrap();
+                    assert!(buf.iter().all(|b| *b == i as u8));
+                }
+            }
+        }
+
+        #[test]
+        fn ok_pwrite_when_overlapping_last_wins() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x100).unwrap();
+
+                let a = [1u8; 0x80];
+                let b = [2u8; 0x80];
+
+                let iov_a = libc::iovec {
+                    iov_base: a.as_ptr() as *mut _,
+                    iov_len: a.len(),
+                };
+                let iov_b = libc::iovec {
+                    iov_base: b.as_ptr() as *mut _,
+                    iov_len: b.len(),
+                };
+
+                file.pwrite(&iov_a, 0).unwrap();
+                file.pwrite(&iov_b, 0).unwrap();
+
+                let mut buf = vec![0u8; 0x80];
+                let mut read_iov = libc::iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                file.pread(&mut read_iov, 0).unwrap();
+                assert!(buf.iter().all(|b| *b == 2));
+            }
+        }
+    }
+
+    mod utils {
+        use super::*;
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        #[test]
+        fn ok_extract_parent_dir() {
+            let cases = [
+                ("/", "."),
+                ("file.db", "."),
+                ("data/file.db", "data"),
+                ("./a/b/c.log", "./a/b"),
+                ("/var/lib/grave/", "/var/lib"),
+                ("/tmp/grave/file.db", "/tmp/grave"),
+            ];
+
+            for (input, expected) in cases {
+                let path = PathBuf::from(input);
+                let parent = extract_parent_dir(&path);
+                assert_eq!(parent, PathBuf::from(expected), "failed for input: {input}");
+            }
+        }
+
+        #[test]
+        fn ok_path_to_cstring() {
+            let cases: &[(&[u8], bool)] = &[
+                (b"", true),
+                (b"file.db", true),
+                (b"bad\0path.db", false),
+                (b"relative/path.db", true),
+                (b"/tmp/grave/file.db", true),
+            ];
+
+            for (bytes, should_ok) in cases {
+                let path = PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
+                let res = path_to_cstring(&path);
+
+                match (res, should_ok) {
+                    (Ok(cs), true) => {
+                        let expected = CString::new(*bytes).expect("valid test case must not contain interior NUL");
+                        assert_eq!(cs.as_bytes(), expected.as_bytes(), "mismatch for input: {:?}", bytes);
+                    }
+                    (Err(_), false) => {}
+                    (other, _) => {
+                        panic!("unexpected result for input {:?}: {:?}", bytes, other);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn ok_read_max_iovecs() {
+            let first = read_max_iovecs();
+            let second = read_max_iovecs();
+
+            assert!(first > 0, "IOV_MAX must be positive");
+            assert!(first >= MAX_IOVECS && second >= MAX_IOVECS);
+            assert_eq!(first, second, "value must be cached and stable");
+        }
+
+        #[test]
+        fn ok_last_errno() {
+            unsafe {
+                let _ = libc::close(-1);
+                assert_eq!(last_errno(), libc::EBADF);
+            }
+        }
+
+        #[test]
+        fn ok_err_msg() {
+            unsafe {
+                let msg = err_msg(libc::ENOENT);
+                assert!(!msg.is_empty(), "ENOENT must produce message");
+            }
+        }
     }
 }

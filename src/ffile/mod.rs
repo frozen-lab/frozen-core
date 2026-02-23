@@ -105,22 +105,22 @@ impl FrozenFile {
     }
 
     /// check if [`FrozenFile`] exists on storage device or not
-    pub fn exists(path: &std::path::PathBuf) -> FrozenRes<bool> {
+    pub fn exists(path: &std::path::Path) -> FrozenRes<bool> {
         unsafe { TFile::exists(path) }
     }
 
     /// create a new or open an existing [`FrozenFile`]
-    pub fn new(path: std::path::PathBuf, init_len: usize, mid: u8) -> FrozenRes<Self> {
+    pub fn new(path: &std::path::Path, init_len: usize, mid: u8) -> FrozenRes<Self> {
         MID.store(mid, atomic::Ordering::Relaxed);
 
         let file = unsafe { posix::POSIXFile::new(&path) }?;
-        let curr_len = unsafe { file.length()? };
+        let mut curr_len = unsafe { file.length()? };
 
         // TODO: (in future) improve corruption handling for file
 
         match curr_len {
             0 => unsafe {
-                let _len = file.grow(0, init_len)?;
+                curr_len = file.grow(0, init_len)?;
             },
             _ => {
                 if curr_len < init_len {
@@ -226,9 +226,9 @@ unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
 impl Core {
-    fn new(file: TFile, length: usize, path: std::path::PathBuf) -> Self {
+    fn new(file: TFile, length: usize, path: &std::path::Path) -> Self {
         Self {
-            path,
+            path: path.to_path_buf(),
             length: atomic::AtomicUsize::new(length),
             file: cell::UnsafeCell::new(mem::ManuallyDrop::new(file)),
         }

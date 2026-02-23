@@ -8,7 +8,7 @@ fn main() {
     let path = dir.join("ff_example.bin");
     std::fs::create_dir_all(&dir).expect("create example dir");
 
-    let ff = ffile::FrozenFile::new(path, len, module_id).expect("new FFile");
+    let ff = ffile::FrozenFile::new(&path, len, module_id).expect("new FFile");
     assert!(ff.fd() >= 0);
 
     let fm = fmmap::FrozenMMap::new(ff, fmmap::FMCfg::new(module_id)).expect("mmap");
