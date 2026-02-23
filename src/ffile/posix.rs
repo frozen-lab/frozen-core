@@ -1,16 +1,24 @@
 use super::{new_err, new_err_default, FFId, FFileErrRes};
 use crate::{error::FrozenRes, hints};
-use core::{ffi::CStr, sync::atomic};
 use libc::{
-    access, c_char, c_int, c_uint, c_void, close, fstat, ftruncate, off_t, open, pread, pwrite,
-    size_t, stat, unlink, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, ENOENT, ENOSPC,
-    ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, F_OK, O_CLOEXEC, O_CREAT, O_RDWR, S_IRUSR, S_IWUSR,
+    access, c_char, c_int, c_uint, c_void, close, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite, pwritev,
+    size_t, stat, sysconf, unlink, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT, ENOSPC,
+    ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, F_OK, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR,
+    S_IWUSR, _SC_IOV_MAX,
+};
+use std::{
+    ffi::CStr,
+    sync::{atomic, OnceLock},
 };
 
 const CLOSED_FD: FFId = FFId::MIN;
+static IOV_MAX_CACHE: OnceLock<usize> = OnceLock::new();
 
 /// max allowed retries for `EINTR` errors
 const MAX_RETRIES: usize = 0x0A / 2;
+
+/// max iovecs allowed for single readv/writev calls
+const MAX_IOVECS: usize = 0x200;
 
 /// Custom impl of `std::fs::File` for posix systems
 #[derive(Debug)]
@@ -52,7 +60,7 @@ impl POSIXFile {
     /// and perform `fdatasync()` or `fcntl(F_FULLSYNC)`, which in result provides us the crash safe
     /// durability we need
     pub(super) unsafe fn new(path: &std::path::PathBuf) -> FrozenRes<Self> {
-        let fd = open_raw(path)?;
+        let fd = open_raw(path, prep_flags())?;
         Ok(Self(atomic::AtomicI32::new(fd)))
     }
 
@@ -62,8 +70,8 @@ impl POSIXFile {
     ///
     /// ## Sync Error (`FFileErrRes::Syn`)
     ///
-    /// In POSIX systems, kernal may report delayed write/sync failures when closing, this are
-    /// durability errors, fatel for us
+    /// In POSIX systems, kernel may report delayed write/sync failures when closing, this are
+    /// durability errors, fatal for us
     ///
     /// we can easily tackle this error for each bach of writes by enforcing hard durability
     /// guaranties right after the write ops, and making sure they are completed without errors
@@ -76,23 +84,7 @@ impl POSIXFile {
             return Ok(());
         }
 
-        if close(fd) == 0 {
-            return Ok(());
-        }
-
-        let errno = last_errno();
-        let err_msg = err_msg(errno);
-
-        // NOTE: In POSIX systems, kernal may report delayed io failures on `close`,
-        // this are fatel errors, and can not be retried
-        //
-        // We protect this by enforcing hard durability right after write ops, so the
-        // occurrence of this error is an implementation failure
-        if errno == EIO {
-            return new_err(FFileErrRes::Hcf, err_msg);
-        }
-
-        return new_err(FFileErrRes::Unk, err_msg);
+        close_raw(fd)
     }
 
     /// Unlinks (possibly deletes) the [`POSIXFile`]
@@ -103,7 +95,10 @@ impl POSIXFile {
         self.close()?;
 
         if unlink(cpath.as_ptr()) == 0 {
-            return Ok(());
+            // NOTE: In POSIX systems, `unlink(path)` only updates the entry in memory, and
+            // does not guaranty crash safe durability for the operation, we must perform
+            // `fsync` on the directory to make sure we get crash safe durability
+            return sync_parent_dir(path);
         }
 
         let errno = last_errno();
@@ -116,8 +111,8 @@ impl POSIXFile {
             // lack of permission or read only fs
             EACCES | EPERM | EROFS => return new_err(FFileErrRes::Prm, err_msg),
 
-            // NOTE: In POSIX systems, kernal may report delayed io failures on `unlink`,
-            // this are fatel errors, and can not be retried
+            // NOTE: In POSIX systems, kernel may report delayed io failures on `unlink`,
+            // this are fatal errors, and can not be retried
             //
             // We protect this by enforcing hard durability right after write ops, so the
             // occurrence of this error is an implementation failure
@@ -162,10 +157,8 @@ impl POSIXFile {
         {
             ftruncate_raw(fd, curr_len, len_to_add)?;
 
-            // INFO: we have option to hint the kernel to preallocate the range, so decrease the
+            // INFO: we have option to hint the kernel to preallocate the range, to decrease the
             // latency for future write ops on the newly added range
-            //
-            // NOTE: this must be done after `ftruncate`, otherwise it makes no sense!
             f_preallocate_raw(fd, curr_len, len_to_add)?;
         }
 
@@ -219,26 +212,25 @@ impl POSIXFile {
         fdatasync_raw(self.fd())
     }
 
-    /// Read at given `offset` w/ `pread` syscall from [`POSIXFile`]
+    /// Read a single `iovec` from given `offset` w/ `pread` syscall
     #[inline(always)]
-    pub(super) unsafe fn pread(
-        &self,
-        buf_ptr: *mut u8,
-        offset: usize,
-        len_to_read: usize,
-    ) -> FrozenRes<()> {
+    pub(super) unsafe fn pread(&self, iov: &mut iovec, offset: usize) -> FrozenRes<()> {
+        let fd = self.fd();
         let mut read = 0usize;
-        while read < len_to_read {
+
+        while read < iov.iov_len {
             let res = pread(
-                self.fd(),
-                buf_ptr.add(read) as *mut c_void,
-                (len_to_read - read) as libc::size_t,
-                (offset + read) as i64,
+                fd,
+                (iov.iov_base as *mut u8).add(read) as *mut c_void,
+                (iov.iov_len - read) as size_t,
+                (offset + read) as off_t,
             );
 
             // unexpected EOF
             if res == 0 {
-                return new_err_default(FFileErrRes::Eof);
+                // NOTE: we treat this as `Hcf` error cause, this only occurs when we tried to read
+                // beyound current length of the file, which is result of invalid impl
+                return new_err_default(FFileErrRes::Hcf);
             }
 
             if hints::unlikely(res < 0) {
@@ -249,6 +241,7 @@ impl POSIXFile {
                     // io interrupt
                     EINTR => continue,
 
+                    // permission denied
                     EACCES | EPERM => return new_err(FFileErrRes::Prm, err_msg),
 
                     // invalid fd, invalid fd type, bad pointer, etc.
@@ -264,26 +257,25 @@ impl POSIXFile {
         Ok(())
     }
 
-    /// Write at given `offset` w/ `pwrite` syscall to [`POSIXFile`]
+    /// Write a single `iovec` at given `offset` w/ `pwrite` syscall
     #[inline(always)]
-    pub(super) unsafe fn pwrite(
-        &self,
-        buf_ptr: *const u8,
-        offset: usize,
-        len_to_write: usize,
-    ) -> FrozenRes<()> {
+    pub(super) unsafe fn pwrite(&self, iov: &iovec, offset: usize) -> FrozenRes<()> {
+        let fd = self.fd();
         let mut written = 0usize;
-        while written < len_to_write {
+
+        while written < iov.iov_len {
             let res = pwrite(
-                self.fd(),
-                buf_ptr.add(written) as *const c_void,
-                (len_to_write - written) as size_t,
-                (offset + written) as i64,
+                fd,
+                (iov.iov_base as *mut u8).add(written) as *mut c_void,
+                (iov.iov_len - written) as size_t,
+                (offset + written) as off_t,
             );
 
             // unexpected EOF
             if res == 0 {
-                return new_err_default(FFileErrRes::Eof);
+                // NOTE: we treat this as `Hcf` error cause, this only occurs when we tried to read
+                // beyound current length of the file, which is result of invalid impl
+                return new_err_default(FFileErrRes::Hcf);
             }
 
             if hints::unlikely(res <= 0) {
@@ -294,7 +286,8 @@ impl POSIXFile {
                     // io interrupt
                     EINTR => continue,
 
-                    EACCES | EPERM => return new_err(FFileErrRes::Prm, err_msg),
+                    // permission denied or read-only fs
+                    EACCES | EPERM | EROFS => return new_err(FFileErrRes::Prm, err_msg),
 
                     // invalid fd, invalid fd type, bad pointer, etc.
                     EINVAL | EBADF | EFAULT | ESPIPE => return new_err(FFileErrRes::Hcf, err_msg),
@@ -304,6 +297,162 @@ impl POSIXFile {
             }
 
             written += res as usize;
+        }
+
+        Ok(())
+    }
+
+    /// Read multiple `iovec` objects starting from given `offset` w/ `preadv` syscall
+    ///
+    /// ## NOTES
+    ///
+    /// - All `iovec` objects in given `[iovec]` slice must be of same length
+    /// - The caller must not try to read byound current length of `[POSIXFile]`
+    #[inline(always)]
+    pub(super) unsafe fn preadv(&self, iovecs: &mut [iovec], offset: usize) -> FrozenRes<()> {
+        let fd = self.fd();
+        let max_iovs = read_max_iovecs();
+
+        let iovecs_len = iovecs.len();
+        let iov_size = iovecs[0].iov_len;
+
+        let mut head = 0usize;
+        let mut off = offset as off_t;
+
+        while head < iovecs_len {
+            let remaining_iov = iovecs_len - head;
+            let cnt = remaining_iov.min(max_iovs) as c_int;
+            let ptr = iovecs.as_ptr().add(head);
+
+            let res = preadv(fd, ptr, cnt, off);
+
+            // unexpected EOF
+            if res == 0 {
+                // NOTE: we treat this as `Hcf` error cause, this only occurs when we tried to read
+                // beyound current length of the file, which is result of invalid impl
+                return new_err_default(FFileErrRes::Hcf);
+            }
+
+            if res < 0 {
+                let errno = last_errno();
+                let err_msg = err_msg(errno);
+
+                match errno {
+                    EINTR => continue,
+
+                    // permission denied
+                    EACCES | EPERM => return new_err(FFileErrRes::Prm, err_msg),
+
+                    // invalid fd, bad pointer, illegal seek, etc.
+                    EINVAL | EBADF | EFAULT | ESPIPE | EMSGSIZE => return new_err(FFileErrRes::Hcf, err_msg),
+
+                    _ => return new_err(FFileErrRes::Unk, err_msg),
+                }
+            }
+
+            // NOTE:
+            //
+            // In POSIX systems, preadv syscall may,
+            // - read fewer bytes than requested
+            // - stop in-between iovec's
+            // - stop mid iovec
+            //
+            // even though this behavior is situation and fs dependent (well, according to my short research),
+            // we opt to handle it for correctness across different systems
+
+            off += res as off_t;
+
+            let written = res as usize;
+            let full_pages = written / iov_size;
+            let partial = written % iov_size;
+
+            // fully written pages
+            head += full_pages;
+
+            // partially written page (rare)
+            if partial > 0 {
+                let iov = &mut iovecs[head];
+                iov.iov_base = (iov.iov_base as *mut u8).add(partial) as *mut c_void;
+                iov.iov_len -= partial;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write multiple `iovec` objects starting from given `offset` w/ `writev` syscall
+    ///
+    /// ## NOTES
+    ///
+    /// - All `iovec` objects in given `[iovec]` slice must be of same length
+    /// - The caller must not try to write byound current length of `[POSIXFile]`
+    #[inline(always)]
+    pub(super) unsafe fn pwritev(&self, iovecs: &mut [iovec], offset: usize) -> FrozenRes<()> {
+        let fd = self.fd();
+        let max_iovs = read_max_iovecs();
+
+        let iovecs_len = iovecs.len();
+        let iov_size = iovecs[0].iov_len;
+
+        let mut head = 0usize;
+        let mut off = offset as off_t;
+
+        while head < iovecs_len {
+            let remaining_iov = iovecs_len - head;
+            let cnt = remaining_iov.min(max_iovs) as c_int;
+            let ptr = iovecs.as_ptr().add(head);
+
+            let res = pwritev(fd, ptr, cnt, off);
+
+            // unexpected EOF
+            if res == 0 {
+                // NOTE: we treat this as `Hcf` error cause, this only occurs when we tried to read
+                // beyound current length of the file, which is result of invalid impl
+                return new_err_default(FFileErrRes::Hcf);
+            }
+
+            if res < 0 {
+                let errno = last_errno();
+                let err_msg = err_msg(errno);
+
+                match errno {
+                    EINTR => continue,
+
+                    // permission denied
+                    EACCES | EPERM => return new_err(FFileErrRes::Prm, err_msg),
+
+                    // invalid fd, bad pointer, illegal seek, etc.
+                    EINVAL | EBADF | EFAULT | ESPIPE | EMSGSIZE => return new_err(FFileErrRes::Hcf, err_msg),
+
+                    _ => return new_err(FFileErrRes::Unk, err_msg),
+                }
+            }
+
+            // NOTE:
+            //
+            // In POSIX systems, pwritev syscall may,
+            // - write fewer bytes than requested
+            // - stop in-between iovec's
+            // - stop mid iovec
+            //
+            // even though this behavior is situation and fs dependent (well, according to my short research),
+            // we opt to handle it for correctness across different systems
+
+            off += res as off_t;
+
+            let written = res as usize;
+            let full_pages = written / iov_size;
+            let partial = written % iov_size;
+
+            // fully written pages
+            head += full_pages;
+
+            // partially written page (rare)
+            if partial > 0 {
+                let iov = &mut iovecs[head];
+                iov.iov_base = (iov.iov_base as *mut u8).add(partial) as *mut c_void;
+                iov.iov_len -= partial;
+            }
         }
 
         Ok(())
@@ -321,17 +470,14 @@ impl POSIXFile {
 ///
 /// To remain sane across ownership models, containers, and shared filesystems,
 /// we explicitly retry the `open()` w/o `O_NOATIME` when `EPERM` is encountered
-unsafe fn open_raw(path: &std::path::PathBuf) -> FrozenRes<FFId> {
+unsafe fn open_raw(path: &std::path::PathBuf, flags: c_int) -> FrozenRes<FFId> {
     let cpath = path_to_cstring(path)?;
 
     // write + read permissions
     let perm = (S_IRUSR | S_IWUSR) as c_uint;
 
-    #[cfg(target_os = "macos")]
-    let flags = prep_flags();
-
     #[cfg(target_os = "linux")]
-    let (mut flags, mut tried_noatime) = (prep_flags(), false);
+    let (mut flags, mut tried_noatime) = (flags, false);
 
     loop {
         let fd = if flags & O_CREAT != 0 {
@@ -378,6 +524,31 @@ unsafe fn open_raw(path: &std::path::PathBuf) -> FrozenRes<FFId> {
     }
 }
 
+unsafe fn close_raw(fd: FFId) -> FrozenRes<()> {
+    if close(fd) == 0 {
+        return Ok(());
+    }
+
+    let errno = last_errno();
+    let err_msg = err_msg(errno);
+
+    // POSIX allowes `close(fd)` to return `EINTR` when the fd is already closed
+    if errno == EINTR {
+        return Ok(());
+    }
+
+    // NOTE: In POSIX systems, kernel may report delayed io failures on `close`,
+    // this are fatal errors, and can not be retried
+    //
+    // We protect this by enforcing hard durability right after write ops, so the
+    // occurrence of this error is an implementation failure
+    if errno == EIO {
+        return new_err(FFileErrRes::Hcf, err_msg);
+    }
+
+    return new_err(FFileErrRes::Unk, err_msg);
+}
+
 #[cfg(target_os = "linux")]
 unsafe fn fdatasync_raw(fd: FFId) -> FrozenRes<()> {
     let mut retries = 0; // only for EIO & EINTR errors
@@ -408,7 +579,7 @@ unsafe fn fdatasync_raw(fd: FFId) -> FrozenRes<()> {
             // read-only file (can also be caused by TOCTOU)
             EROFS => return new_err(FFileErrRes::Prm, err_msg),
 
-            // fatel error, i.e. no sync for writes in recent window/batch
+            // fatal error, i.e. no sync for writes in recent window/batch
             //
             // NOTE: this must be handled seperately, cuase, if this error occurs,
             // the storage system must act, mark recent writes as failed or notify users,
@@ -462,7 +633,7 @@ unsafe fn f_fullsync_raw(fd: FFId) -> FrozenRes<()> {
             // read-only file (can also be caused by TOCTOU)
             EROFS => return new_err(FFileErrRes::Prm, err_msg),
 
-            // fatel error, i.e. no sync for writes in recent window/batch
+            // fatal error, i.e. no sync for writes in recent window/batch
             EIO => return new_err(FFileErrRes::Syn, err_msg),
 
             _ => return new_err(FFileErrRes::Unk, err_msg),
@@ -507,7 +678,7 @@ unsafe fn fsync_raw(fd: FFId) -> FrozenRes<()> {
                 // read-only file (can also be caused by TOCTOU)
                 EROFS => return new_err(FFileErrRes::Prm, err_msg),
 
-                // fatel error, i.e. no sync for writes in recent window/batch
+                // fatal error, i.e. no sync for writes in recent window/batch
                 EIO => return new_err(FFileErrRes::Syn, err_msg),
 
                 _ => return new_err(FFileErrRes::Unk, err_msg),
@@ -698,6 +869,28 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
     }
 }
 
+/// perform `fsync` for parent directory of file at given `path`
+///
+/// ## Purpose
+///
+/// In POSIX systems, syscalls like `open(path)`, `close(fd)` and `unlink(path)`, does not provide
+/// crash safe durability, hence after a sudden crash or power loss, the operation may reverse,
+/// resulting in catastrophic consequences
+///
+/// we must `fsync(parent_dir)`, for crash safe durability
+unsafe fn sync_parent_dir(path: &std::path::PathBuf) -> FrozenRes<()> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+
+    let flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
+    let fd = open_raw(&parent.to_path_buf(), flags)?;
+    fsync_raw(fd).inspect(|_| {
+        let _ = close_raw(fd);
+    })
+}
+
 /// preps flags for `open()` syscall
 ///
 /// ## Access Time Updates (O_NOATIME)
@@ -754,4 +947,16 @@ unsafe fn err_msg(errno: i32) -> Vec<u8> {
 
     let cstr = CStr::from_ptr(buf.as_ptr());
     return cstr.to_bytes().to_vec();
+}
+
+/// fetch max allowed `iovecs` per `preadv` & `pwritev` syscalls
+fn read_max_iovecs() -> usize {
+    *IOV_MAX_CACHE.get_or_init(|| unsafe {
+        let res = sysconf(_SC_IOV_MAX);
+        if res <= 0 {
+            MAX_IOVECS
+        } else {
+            res as usize
+        }
+    })
 }

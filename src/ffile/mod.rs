@@ -1,29 +1,4 @@
 //! Custom implementation of `std::fs::File`
-//!
-//! # Example
-//!
-//! ```
-//! use frozen_core::ffile::FrozenFile;
-//! use tempfile::tempdir;
-//!
-//! let dir = tempdir().expect("tmp dir");
-//! let path = dir.path().join("file.bin");
-//!
-//! let file = FrozenFile::new(path.clone(), 0x10, 1).expect("create file");
-//! assert!(file.length() >= 0x10);
-//!
-//! let value: u64 = 0xDEADC0DE;
-//! let ptr = &value as *const u64 as *const u8;
-//!
-//! file.write(ptr, 0, 8).expect("write");
-//! file.sync().expect("sync");
-//!
-//! let mut out: u64 = 0;
-//! let out_ptr = &mut out as *mut u64 as *mut u8;
-//!
-//! file.read(out_ptr, 0, 8).expect("read");
-//! assert_eq!(out, 0xDEADC0DE);
-//! ```
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
@@ -74,11 +49,8 @@ pub enum FFileErrRes {
     /// (262) corrupted file
     Cpt = 0x106,
 
-    /// (263) unexpected eof
-    Eof = 0x107,
-
-    /// (264) unable to grow
-    Grw = 0x108,
+    /// (265) unable to grow
+    Grw = 0x107,
 }
 
 impl FFileErrRes {
@@ -89,7 +61,6 @@ impl FFileErrRes {
             Self::Unk => b"unknown error type",
             Self::Hcf => b"hault and catch fire",
             Self::Grw => b"unable to grow the file",
-            Self::Eof => b"unxpected eof while io op",
             Self::Prm => b"missing write/read permissions",
             Self::Nsp => b"no space left on storage device",
             Self::Cpt => b"file is either invalid or corrupted",
@@ -113,26 +84,6 @@ pub(in crate::ffile) fn new_err_default<R>(res: FFileErrRes) -> FrozenRes<R> {
 }
 
 /// Custom implementation of `std::fs::File`
-///
-/// # Example
-///
-/// ```
-/// use frozen_core::ffile::FrozenFile;
-/// use tempfile::tempdir;
-///
-/// let dir = tempdir().expect("tmp");
-/// let path = dir.path().join("standalone.bin");
-///
-/// let file = FrozenFile::new(path.clone(), 0x20, 7).expect("file");
-///
-/// assert!(FrozenFile::exists(&path).expect("exists"));
-///
-/// file.grow(0x20).expect("grow");
-/// assert!(file.length() >= 0x40);
-///
-/// file.delete().expect("delete");
-/// assert!(!FrozenFile::exists(&path).expect("exists after delete"));
-/// ```
 #[derive(Debug)]
 pub struct FrozenFile(Arc<Core>);
 
@@ -207,18 +158,32 @@ impl FrozenFile {
         unsafe { file.unlink(&self.0.path) }
     }
 
-    /// Read at given `offset` from [`FrozenFile`]
+    /// Read a single `iovec` from a given `offset` w/ `pread` syscall
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn read(&self, buf_ptr: *mut u8, offset: usize, len_to_read: usize) -> FrozenRes<()> {
-        unsafe { self.get_file().pread(buf_ptr, offset, len_to_read) }
+    pub fn read(&self, buf: &mut libc::iovec, offset: usize) -> FrozenRes<()> {
+        unsafe { self.get_file().pread(buf, offset) }
     }
 
-    /// Write at given `offset` into [`FrozenFile`]
+    /// Write a single `iovec` at a given `offset` w/ `pwrite` syscall
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn write(&self, buf_ptr: *const u8, offset: usize, len_to_write: usize) -> FrozenRes<()> {
-        unsafe { self.get_file().pwrite(buf_ptr, offset, len_to_write) }
+    pub fn write(&self, buf: &libc::iovec, offset: usize) -> FrozenRes<()> {
+        unsafe { self.get_file().pwrite(buf, offset) }
+    }
+
+    /// Read multiple `iovec` objects starting from given `offset` w/ `preadv` syscall
+    #[inline(always)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn preadv(&self, iovs: &mut [libc::iovec], offset: usize) -> FrozenRes<()> {
+        unsafe { self.get_file().preadv(iovs, offset) }
+    }
+
+    /// Write multiple `iovec` objects starting from given `offset` w/ `pwritev` syscall
+    #[inline(always)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn pwritev(&self, iovs: &mut [libc::iovec], offset: usize) -> FrozenRes<()> {
+        unsafe { self.get_file().pwritev(iovs, offset) }
     }
 
     #[inline]
