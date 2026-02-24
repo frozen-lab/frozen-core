@@ -79,7 +79,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform:
+        include:
           - os: ubuntu-latest
             arch: x86_64
           - os: ubuntu-22.04
@@ -88,9 +88,6 @@ jobs:
             arch: aarch64
           - os: ubuntu-22.04-arm
             arch: aarch64
-        example:
-          - ff
-          - fm
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v4
@@ -103,11 +100,17 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: rust-${{ runner.os }}-${{ matrix.platform.arch }}-stable
+          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
           cache-on-failure: true
 
-      - name: Run example
-        run: cargo run --release --example ${{ matrix.example }}
+      - name: FrozenFile
+        run: |
+          cargo run --release --example ff r
+          cargo run --release --example ff w
+          
+      - name: FrozenMMap
+        run: |
+          cargo run --release --example fm
 
   macos-tests:
     name: MacOS Tests
@@ -141,16 +144,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform:
+        include:
           - os: macos-15-intel
             arch: x86_64
           - os: macos-14
             arch: aarch64
           - os: macos-latest
             arch: aarch64
-        example:
-          - ff
-          - fm
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v4
@@ -163,8 +163,14 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: rust-${{ runner.os }}-${{ matrix.platform.arch }}-stable
+          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
           cache-on-failure: true
 
-      - name: Run example
-        run: cargo run --release --example ${{ matrix.example }}
+      - name: FrozenFile
+        run: |
+          cargo run --release --example ff r
+          cargo run --release --example ff w
+          
+      - name: FrozenMMap
+        run: |
+          cargo run --release --example fm

@@ -52,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform:
+        include:
           - os: ubuntu-24.04-arm
             arch: aarch64
           - os: macos-15-intel
@@ -61,9 +61,6 @@ jobs:
             arch: x86_64
           - os: macos-latest
             arch: aarch64
-        example:
-          - ff
-          - fm
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v4
@@ -76,11 +73,17 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: rust-${{ runner.os }}-${{ matrix.platform.arch }}-stable
+          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
           cache-on-failure: true
 
-      - name: Run example
-        run: cargo run --release --example ${{ matrix.example }}
+      - name: FrozenFile
+        run: |
+          cargo run --release --example ff r
+          cargo run --release --example ff w
+          
+      - name: FrozenMMap
+        run: |
+          cargo run --release --example fm
   
   release:
     needs: examples
