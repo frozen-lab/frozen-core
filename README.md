@@ -69,7 +69,19 @@ frozen-core = { version = "0.0.6", default-features = false, features = ["fmmap"
 | `aarch64-apple-darwin`                | ✅      |
 | `x86_64-apple-darwin`                 | ✅      |
 
-See following [example](./examples/fm.rs) for more details.
+Read the example below for usage details,
+
+ ```rs
+ use frozen_core::ffile::FrozenFile;
+
+ const MID: u8 = 0;
+
+ let dir = tempfile::tempdir().unwrap();
+ let path = dir.path().join("tmp_frozen_file");
+
+ let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
+ assert_eq!(file.length(), 0x1000);
+```
 
 ## FrozenErr
 

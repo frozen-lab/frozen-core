@@ -7,6 +7,8 @@
   - revised test suites
   - impl of `sync_range` (linux only)
   - impl of vectored write/read ops
+  - impl of exclusive locking to prevent simultaneously running multiple instances
+  - updated example
 
 ## `0.0.6`
 
