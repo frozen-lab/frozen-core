@@ -1,43 +1,48 @@
 //! Custom implementation of `std::fs::File`
 //!
-//! # Example
+//! ## Example
 //!
 //! ```
 //! use frozen_core::ffile::FrozenFile;
-//! use std::path::Path;
-//! use libc::iovec;
 //!
-//! let mid = 0u8;
-//! let path = Path::new("./target/grave.data");
-//! let file = FrozenFile::new(&path, 0x1000, mid).unwrap();
+//! const MID: u8 = 0;
+//!
+//! let dir = tempfile::tempdir().unwrap();
+//! let path = dir.path().join("tmp_frozen_file");
+//! let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
 //!
 //! let data = b"hello grave";
-//! let iov = iovec {
+//! let iov = libc::iovec {
 //!     iov_base: data.as_ptr() as *mut _,
 //!     iov_len: data.len(),
 //! };
 //!
-//! file.write(&iov, 0x80).unwrap();
-//! file.sync().unwrap();
+//! assert!(file.write(&iov, 0x80).is_ok());
+//! assert!(file.sync().is_ok());
 //!
 //! let mut buf = vec![0u8; data.len()];
-//! let mut read_iov = iovec {
+//! let mut read_iov = libc::iovec {
 //!     iov_base: buf.as_mut_ptr() as *mut _,
 //!     iov_len: buf.len(),
 //! };
 //!
-//! file.read(&mut read_iov, 0x80).unwrap();
+//! assert!(file.read(&mut read_iov, 0x80).is_ok());
 //! assert_eq!(&buf, data);
 //!
-//! file.delete().unwrap();
+//! assert!(FrozenFile::new(&path, 0x1000, MID).is_err());
+//!
+//! assert!(file.delete().is_ok());
 //! assert!(!path.exists());
+//!
+//! drop(file);
+//! assert!(FrozenFile::new(&path, 0x1000, MID).is_ok());
 //! ```
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
 
 use crate::error::{FrozenErr, FrozenRes};
-use core::{cell, fmt, mem, sync::atomic};
+use core::{self, sync::atomic};
 use std::sync::Arc;
 
 /// file descriptor for [`FrozenFile`]
@@ -125,6 +130,44 @@ pub(in crate::ffile) fn new_err_default<R>(res: FFileErrRes) -> FrozenRes<R> {
 }
 
 /// Custom implementation of `std::fs::File`
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::ffile::FrozenFile;
+///
+/// const MID: u8 = 0;
+///
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("tmp_frozen_file");
+/// let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
+///
+/// let data = b"hello grave";
+/// let iov = libc::iovec {
+///     iov_base: data.as_ptr() as *mut _,
+///     iov_len: data.len(),
+/// };
+///
+/// assert!(file.write(&iov, 0x80).is_ok());
+/// assert!(file.sync().is_ok());
+///
+/// let mut buf = vec![0u8; data.len()];
+/// let mut read_iov = libc::iovec {
+///     iov_base: buf.as_mut_ptr() as *mut _,
+///     iov_len: buf.len(),
+/// };
+///
+/// assert!(file.read(&mut read_iov, 0x80).is_ok());
+/// assert_eq!(&buf, data);
+///
+/// assert!(FrozenFile::new(&path, 0x1000, MID).is_err());
+///
+/// assert!(file.delete().is_ok());
+/// assert!(!path.exists());
+///
+/// drop(file);
+/// assert!(FrozenFile::new(&path, 0x1000, MID).is_ok());
+/// ```
 #[derive(Debug)]
 pub struct FrozenFile(Arc<Core>);
 
@@ -151,6 +194,20 @@ impl FrozenFile {
     }
 
     /// create a new or open an existing [`FrozenFile`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ffile::FrozenFile;
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_frozen_file");
+    ///
+    /// let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
+    /// assert_eq!(file.length(), 0x1000);
+    ///```
     pub fn new(path: &std::path::Path, init_len: usize, mid: u8) -> FrozenRes<Self> {
         MID.store(mid, atomic::Ordering::Relaxed); // used for err logging
 
@@ -178,6 +235,23 @@ impl FrozenFile {
     }
 
     /// Grow [`FrozenFile`] w/ given `len_to_add`
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ffile::FrozenFile;
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_frozen_file");
+    ///
+    /// let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
+    /// assert_eq!(file.length(), 0x1000);
+    ///
+    /// file.grow(0x1000).unwrap();
+    /// assert_eq!(file.length(), 0x2000);
+    ///```
     pub fn grow(&self, len_to_add: usize) -> FrozenRes<usize> {
         unsafe { self.get_file().grow(self.length(), len_to_add) }.inspect(|new_len| {
             self.0.length.store(*new_len, atomic::Ordering::Release);
@@ -196,6 +270,23 @@ impl FrozenFile {
     }
 
     /// Delete [`FrozenFile`] from filesystem
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ffile::FrozenFile;
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_frozen_file");
+    ///
+    /// let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
+    /// assert!(path.exists());
+    ///
+    /// file.delete().unwrap();
+    /// assert!(!path.exists());
+    ///```
     pub fn delete(&self) -> FrozenRes<()> {
         let file = self.get_file();
 
@@ -238,21 +329,24 @@ impl FrozenFile {
     }
 
     #[inline]
-    fn get_file(&self) -> &mem::ManuallyDrop<TFile> {
+    fn get_file(&self) -> &core::mem::ManuallyDrop<TFile> {
         unsafe { &*self.0.file.get() }
     }
 }
 
 impl Drop for FrozenFile {
     fn drop(&mut self) {
+        // TODO: try not to consume errors here, fail is required to tackle to
+        // when explicit drop is called
+
         // sync if dirty & close
         let _ = self.0.sync();
         let _ = unsafe { self.get_file().close() };
     }
 }
 
-impl fmt::Display for FrozenFile {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl core::fmt::Display for FrozenFile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "FrozenFile {{fd: {}, len: {}, id: {}}}",
@@ -267,7 +361,7 @@ impl fmt::Display for FrozenFile {
 struct Core {
     path: std::path::PathBuf,
     length: atomic::AtomicUsize,
-    file: cell::UnsafeCell<mem::ManuallyDrop<TFile>>,
+    file: core::cell::UnsafeCell<core::mem::ManuallyDrop<TFile>>,
 }
 
 unsafe impl Send for Core {}
@@ -278,7 +372,7 @@ impl Core {
         Self {
             path: path.to_path_buf(),
             length: atomic::AtomicUsize::new(length),
-            file: cell::UnsafeCell::new(mem::ManuallyDrop::new(file)),
+            file: core::cell::UnsafeCell::new(core::mem::ManuallyDrop::new(file)),
         }
     }
 
@@ -308,7 +402,7 @@ mod tests {
         (dir, path)
     }
 
-    mod ff_new {
+    mod ff_lifecycle {
         use super::*;
 
         #[test]
@@ -341,8 +435,106 @@ mod tests {
             let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
             assert_eq!(file.length(), 0x200);
 
-            let res = FrozenFile::new(&path, 0x400, 1);
-            assert!(res.is_err());
+            drop(file);
+
+            let err = FrozenFile::new(&path, 0x400, TEST_MID).unwrap_err();
+            assert!(err.cmp(FFileErrRes::Cpt as u16));
+        }
+
+        #[test]
+        fn ok_exists_true_when_exists() {
+            let (_dir, path) = tmp_path();
+            let _ = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+
+            let exists = FrozenFile::exists(&path).unwrap();
+            assert!(exists);
+        }
+
+        #[test]
+        fn ok_exists_false_when_missing() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+            file.delete().unwrap();
+
+            let exists = FrozenFile::exists(&path).unwrap();
+            assert!(!exists);
+        }
+
+        #[test]
+        fn ok_delete_file() {
+            let (_dir, path) = tmp_path();
+
+            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+            assert!(path.exists());
+
+            file.delete().unwrap();
+            assert!(!path.exists());
+        }
+
+        #[test]
+        fn err_delete_after_delete() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+
+            file.delete().unwrap();
+
+            let err = file.delete().unwrap_err();
+            assert!(err.cmp(FFileErrRes::Inv as u16));
+        }
+
+        #[test]
+        fn ok_drop_persists_without_explicit_sync() {
+            let (_dir, path) = tmp_path();
+
+            {
+                let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+                let data = b"persist";
+                let iov = libc::iovec {
+                    iov_base: data.as_ptr() as *mut _,
+                    iov_len: data.len(),
+                };
+                file.write(&iov, 0).unwrap();
+                drop(file);
+            }
+
+            {
+                let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+                let mut buf = vec![0u8; 7];
+                let mut iov = libc::iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                reopened.read(&mut iov, 0).unwrap();
+                assert_eq!(&buf, b"persist");
+            }
+        }
+    }
+
+    mod ff_lock {
+        use super::*;
+
+        #[test]
+        fn err_new_when_already_open() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+
+            let err = FrozenFile::new(&path, 0x200, TEST_MID).unwrap_err();
+            assert!(err.cmp(FFileErrRes::Lck as u16));
+
+            drop(file);
+        }
+
+        #[test]
+        fn ok_drop_releases_exclusive_lock() {
+            let (_dir, path) = tmp_path();
+
+            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+            assert_eq!(file.length(), 0x200);
+            drop(file);
+
+            let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+            assert_eq!(reopened.length(), 0x200);
         }
     }
 
@@ -359,9 +551,44 @@ mod tests {
             file.grow(0x100).unwrap();
             assert_eq!(file.length(), 0x200);
         }
+
+        #[test]
+        fn ok_grow_sync_cycle() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+
+            for _ in 0..0x0A {
+                file.grow(0x100).unwrap();
+                file.sync().unwrap();
+            }
+        }
     }
 
-    mod ff_read_write {
+    mod ff_sync {
+        use super::*;
+
+        #[test]
+        fn ok_sync_after_sync() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+
+            file.sync().unwrap();
+            file.sync().unwrap();
+            file.sync().unwrap();
+        }
+
+        #[test]
+        fn err_sync_after_delete() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+            file.delete().unwrap();
+
+            let err = file.sync().unwrap_err();
+            assert!(err.cmp(FFileErrRes::Hcf as u16));
+        }
+    }
+
+    mod ff_write_read {
         use super::*;
 
         #[test]
@@ -455,48 +682,130 @@ mod tests {
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
         }
-    }
-
-    mod ff_lifecycle {
-        use super::*;
 
         #[test]
-        fn ok_delete_file() {
+        fn ok_concurrent_grow_and_write() {
             let (_dir, path) = tmp_path();
+            let file = Arc::new(FrozenFile::new(&path, 0x400, TEST_MID).unwrap());
 
-            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
-            assert!(path.exists());
+            let writer = {
+                let f = file.clone();
+                std::thread::spawn(move || {
+                    for i in 0..0x0Ausize {
+                        let data = vec![i as u8; 0x40];
+                        let iov = libc::iovec {
+                            iov_base: data.as_ptr() as *mut _,
+                            iov_len: data.len(),
+                        };
 
-            file.delete().unwrap();
-            assert!(!path.exists());
-        }
+                        f.write(&iov, i * 0x40).unwrap();
+                    }
+                })
+            };
 
-        #[test]
-        fn ok_drop_flushes() {
-            let (_dir, path) = tmp_path();
+            let grower = {
+                let f = file.clone();
+                std::thread::spawn(move || {
+                    f.grow(0x400).unwrap();
+                })
+            };
 
-            {
-                let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-                let data = b"persist";
-                let iov = libc::iovec {
-                    iov_base: data.as_ptr() as *mut _,
-                    iov_len: data.len(),
-                };
-                file.write(&iov, 0).unwrap();
-                drop(file);
-            }
+            writer.join().unwrap();
+            grower.join().unwrap();
 
-            {
-                let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-                let mut buf = vec![0u8; 7];
+            file.sync().unwrap();
+            assert_eq!(file.length(), 0x800);
+
+            for i in 0..0x0Ausize {
+                let mut buf = vec![0u8; 0x40];
                 let mut iov = libc::iovec {
                     iov_base: buf.as_mut_ptr() as *mut _,
                     iov_len: buf.len(),
                 };
 
-                reopened.read(&mut iov, 0).unwrap();
-                assert_eq!(&buf, b"persist");
+                file.read(&mut iov, i * 0x40).unwrap();
+                assert!(buf.iter().all(|b| *b == i as u8));
             }
+        }
+
+        #[test]
+        fn ok_concurrent_sync_and_write() {
+            let (_dir, path) = tmp_path();
+            let file = Arc::new(FrozenFile::new(&path, 0x800, TEST_MID).unwrap());
+
+            let writer = {
+                let f = file.clone();
+                std::thread::spawn(move || {
+                    for i in 0..16usize {
+                        let data = vec![i as u8; 0x40];
+                        let iov = libc::iovec {
+                            iov_base: data.as_ptr() as *mut _,
+                            iov_len: data.len(),
+                        };
+
+                        f.write(&iov, i * 0x40).unwrap();
+                    }
+                })
+            };
+
+            let syncer = {
+                let f = file.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..0x10 {
+                        f.sync().unwrap();
+                    }
+                })
+            };
+
+            writer.join().unwrap();
+            syncer.join().unwrap();
+
+            file.sync().unwrap();
+
+            for i in 0..0x10usize {
+                let mut buf = vec![0u8; 0x40];
+                let mut iov = libc::iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                file.read(&mut iov, i * 0x40).unwrap();
+                assert!(buf.iter().all(|b| *b == i as u8));
+            }
+        }
+
+        #[test]
+        fn ok_write_does_not_chang_length() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+
+            let initial_len = file.length();
+            assert_eq!(initial_len, 0x200);
+
+            let data = [1u8; 0x40];
+            let iov = libc::iovec {
+                iov_base: data.as_ptr() as *mut _,
+                iov_len: data.len(),
+            };
+
+            file.write(&iov, 0x80).unwrap();
+            assert_eq!(file.length(), initial_len);
+        }
+
+        #[test]
+        fn err_read_hcf_for_eof() {
+            let (_dir, path) = tmp_path();
+            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+
+            let mut buf = vec![0u8; 0x20];
+            let mut iov = libc::iovec {
+                iov_base: buf.as_mut_ptr() as *mut _,
+                iov_len: buf.len(),
+            };
+
+            // offset >= length
+            let err = file.read(&mut iov, 0x100).unwrap_err();
+            assert!(err.cmp(FFileErrRes::Hcf as u16));
         }
     }
 }
