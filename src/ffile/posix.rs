@@ -919,8 +919,11 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
             // we simply let go of this and do not elivate any kind of errors
             EOPNOTSUPP | libc::ENOTSUP => return Ok(()),
 
-            // invalid fd or lack of support
-            EBADF | EINVAL => return new_err(FFileErrRes::Hcf, err_msg),
+            // lack of support or weird fs behavior
+            EINVAL => return Ok(()), // same reason as above to not elivate the error
+
+            // invalid fd
+            EBADF => return new_err(FFileErrRes::Hcf, err_msg),
 
             // read-only file system
             EROFS => return new_err(FFileErrRes::Prm, err_msg),
@@ -1484,6 +1487,108 @@ mod tests {
         }
     }
 
+    mod write_read_vectored_load {
+        use super::*;
+
+        #[test]
+        fn ok_single_thread_large_batch() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let count = read_max_iovecs() * 3 + 17; // force multiple internal loops
+                let page = 0x40usize;
+
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, count * page).unwrap();
+
+                let mut buffers: Vec<Vec<u8>> = (0..count).map(|i| vec![(i % 0xFB) as u8; page]).collect();
+                let mut iovs: Vec<iovec> = buffers
+                    .iter_mut()
+                    .map(|b| iovec {
+                        iov_base: b.as_mut_ptr() as *mut _,
+                        iov_len: b.len(),
+                    })
+                    .collect();
+
+                file.pwritev(&mut iovs, 0).unwrap();
+                file.sync().unwrap();
+
+                let mut read_bufs: Vec<Vec<u8>> = (0..count).map(|_| vec![0u8; page]).collect();
+                let mut read_iovs: Vec<iovec> = read_bufs
+                    .iter_mut()
+                    .map(|b| iovec {
+                        iov_base: b.as_mut_ptr() as *mut _,
+                        iov_len: b.len(),
+                    })
+                    .collect();
+
+                file.preadv(&mut read_iovs, 0).unwrap();
+                for i in 0..count {
+                    let expected = (i % 0xFB) as u8;
+                    assert!(read_bufs[i].iter().all(|b| *b == expected));
+                }
+            }
+        }
+
+        #[test]
+        fn ok_multi_thread_large_batch() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let threads = 6usize;
+                let page = 0x40usize;
+
+                let per_thread = read_max_iovecs() * 2 + 0x0B;
+                let total_pages = threads * per_thread;
+
+                let file = std::sync::Arc::new(POSIXFile::new(&path).unwrap());
+                file.grow(0, total_pages * page).unwrap();
+
+                let mut handles = Vec::new();
+                for t in 0..threads {
+                    let f = file.clone();
+
+                    handles.push(std::thread::spawn(move || {
+                        let mut bufs: Vec<Vec<u8>> =
+                            (0..per_thread).map(|i| vec![(t * 0x1F + i) as u8; page]).collect();
+                        let mut iovs: Vec<iovec> = bufs
+                            .iter_mut()
+                            .map(|b| iovec {
+                                iov_base: b.as_mut_ptr() as *mut _,
+                                iov_len: b.len(),
+                            })
+                            .collect();
+
+                        let offset = t * per_thread * page;
+                        f.pwritev(&mut iovs, offset).unwrap();
+                    }));
+                }
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+
+                file.sync().unwrap();
+
+                for t in 0..threads {
+                    for i in 0..per_thread {
+                        let mut buf = vec![0u8; page];
+                        let mut iov = iovec {
+                            iov_base: buf.as_mut_ptr() as *mut _,
+                            iov_len: buf.len(),
+                        };
+
+                        let offset = (t * per_thread + i) * page;
+                        file.pread(&mut iov, offset).unwrap();
+
+                        let expected = (t * 0x1F + i) as u8;
+                        assert!(buf.iter().all(|b| *b == expected));
+                    }
+                }
+            }
+        }
+    }
+
     mod utils {
         use super::*;
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
@@ -1493,8 +1598,8 @@ mod tests {
             let cases = [
                 ("/", "."),
                 ("file.db", "."),
-                ("data/file.db", "data"),
                 ("./a/b/c.log", "./a/b"),
+                ("data/file.db", "data"),
                 ("/var/lib/grave/", "/var/lib"),
                 ("/tmp/grave/file.db", "/tmp/grave"),
             ];
@@ -1556,6 +1661,208 @@ mod tests {
             unsafe {
                 let msg = err_msg(libc::ENOENT);
                 assert!(!msg.is_empty(), "ENOENT must produce message");
+            }
+        }
+    }
+
+    mod file_lifecycle {
+        use super::*;
+
+        #[test]
+        fn err_length_after_closed() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.close().unwrap();
+
+                let err = file.length().unwrap_err();
+                assert!(err.cmp(FFileErrRes::Hcf as u16));
+            }
+        }
+
+        #[test]
+        fn err_pread_after_closed() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x100).unwrap();
+                file.close().unwrap();
+
+                let mut buf = vec![0u8; 8];
+                let mut iov = iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                let err = file.pread(&mut iov, 0).unwrap_err();
+                assert!(err.cmp(FFileErrRes::Hcf as u16));
+            }
+        }
+
+        #[test]
+        fn err_pwrite_after_closed() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x100).unwrap();
+                file.close().unwrap();
+
+                let data = b"dead";
+                let iov = iovec {
+                    iov_base: data.as_ptr() as *mut _,
+                    iov_len: data.len(),
+                };
+
+                let err = file.pwrite(&iov, 0).unwrap_err();
+                assert!(err.cmp(FFileErrRes::Hcf as u16));
+            }
+        }
+
+        #[test]
+        fn err_sync_after_closed() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.close().unwrap();
+
+                let err = file.sync().unwrap_err();
+                assert!(err.cmp(FFileErrRes::Hcf as u16));
+            }
+        }
+
+        #[test]
+        fn err_grow_after_closed() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.close().unwrap();
+
+                let err = file.grow(0, 0x100).unwrap_err();
+                assert!(err.cmp(FFileErrRes::Hcf as u16));
+            }
+        }
+
+        #[test]
+        fn err_double_unlink_after_close() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+
+                file.unlink(&path).unwrap();
+                assert!(!path.exists());
+
+                let err = file.unlink(&path).unwrap_err();
+                assert!(err.cmp(FFileErrRes::Inv as u16));
+            }
+        }
+    }
+
+    mod raw_syscalls {
+        use super::*;
+
+        #[test]
+        fn ok_sync_cycle() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x400).unwrap();
+
+                let data = [7u8; 0x80];
+                let iov = iovec {
+                    iov_base: data.as_ptr() as *mut _,
+                    iov_len: data.len(),
+                };
+
+                file.pwrite(&iov, 0).unwrap();
+                file.sync().unwrap(); // validates fdatasync or f_fullsync path
+
+                let mut buf = vec![0u8; 0x80];
+                let mut riov = iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                file.pread(&mut riov, 0).unwrap();
+                assert_eq!(buf, data);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn ok_sync_range() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x1000).unwrap();
+
+                let data = [5u8; 0x100];
+                let iov = iovec {
+                    iov_base: data.as_ptr() as *mut _,
+                    iov_len: data.len(),
+                };
+
+                file.pwrite(&iov, 0x200).unwrap();
+
+                // best-effort flush hint (must not fail when not supported by fs)
+                file.sync_range(0x200, 0x100).unwrap();
+                file.sync().unwrap();
+
+                let mut buf = vec![0u8; 0x100];
+                let mut riov = iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                file.pread(&mut riov, 0x200).unwrap();
+                assert_eq!(buf, data);
+            }
+        }
+
+        #[test]
+        fn ok_write_read_at_eof_boundary() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.grow(0, 0x200).unwrap();
+
+                let data = [3u8; 0x40];
+                let iov = iovec {
+                    iov_base: data.as_ptr() as *mut _,
+                    iov_len: data.len(),
+                };
+
+                file.pwrite(&iov, 0x200 - 0x40).unwrap();
+
+                let mut buf = vec![0u8; 0x40];
+                let mut riov = iovec {
+                    iov_base: buf.as_mut_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                file.pread(&mut riov, 0x200 - 0x40).unwrap();
+                assert_eq!(buf, data);
+            }
+        }
+
+        #[test]
+        fn ok_multiple_open_close_cycles() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                for _ in 0..0x0A {
+                    let file = POSIXFile::new(&path).unwrap();
+                    file.sync().unwrap();
+                    file.close().unwrap();
+                }
             }
         }
     }
