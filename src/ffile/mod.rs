@@ -327,6 +327,9 @@ mod tests {
             let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
             assert_eq!(file.length(), 0x200);
 
+            // must be dropped to release the exclusive lock
+            drop(file);
+
             let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
             assert_eq!(reopened.length(), 0x200);
         }

@@ -1197,6 +1197,56 @@ mod tests {
         }
     }
 
+    mod file_lock {
+        use super::*;
+
+        #[test]
+        fn ok_flock_acquires_exclusive_lock() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.flock().unwrap(); // must succeed
+
+                file.close().unwrap();
+            }
+        }
+
+        #[test]
+        fn err_flock_when_already_locked() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file1 = POSIXFile::new(&path).unwrap();
+                file1.flock().unwrap();
+
+                let file2 = POSIXFile::new(&path).unwrap();
+                let err = file2.flock().unwrap_err();
+
+                assert!(err.cmp(FFileErrRes::Lck as u16));
+
+                file1.close().unwrap();
+                file2.close().unwrap();
+            }
+        }
+
+        #[test]
+        fn ok_flock_released_after_close() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file1 = POSIXFile::new(&path).unwrap();
+                file1.flock().unwrap();
+                file1.close().unwrap(); // releases lock
+
+                let file2 = POSIXFile::new(&path).unwrap();
+                file2.flock().unwrap(); // must succeed now
+
+                file2.close().unwrap();
+            }
+        }
+    }
+
     mod file_grow {
         use super::*;
 
