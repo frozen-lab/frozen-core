@@ -29,7 +29,7 @@ fn main() -> FrozenRes<()> {
 
 fn write_mode(path: &std::path::Path) -> FrozenRes<()> {
     let file = FrozenFile::new(path, INIT_LEN, MID)?;
-    assert_eq!(file.length(), INIT_LEN);
+    assert_eq!(file.length().unwrap(), INIT_LEN);
 
     let iov = libc::iovec {
         iov_base: DATA.as_ptr() as *mut _,

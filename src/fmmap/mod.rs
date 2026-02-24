@@ -124,7 +124,7 @@ unsafe impl Sync for FrozenMMap {}
 impl FrozenMMap {
     /// Read current length of [`FrozenMMap`]
     #[inline]
-    pub fn length(&self) -> usize {
+    pub fn length(&self) -> FrozenRes<usize> {
         self.0.ffile.length()
     }
 
@@ -132,7 +132,7 @@ impl FrozenMMap {
     pub fn new(file: FrozenFile, cfg: FMCfg) -> FrozenRes<Self> {
         MID.store(cfg.module_id, atomic::Ordering::Relaxed);
 
-        let mmap = unsafe { posix::POSIXMMap::new(file.fd(), file.length()) }?;
+        let mmap = unsafe { posix::POSIXMMap::new(file.fd(), file.length()?) }?;
         let core = sync::Arc::new(Core::new(mmap, cfg.clone(), file));
 
         // INFO: we spawn the thread for background sync
@@ -260,7 +260,7 @@ impl FrozenMMap {
 
         core.ffile.grow(len_to_add)?;
         unsafe {
-            let new_map = posix::POSIXMMap::new(core.ffile.fd(), core.ffile.length())?;
+            let new_map = posix::POSIXMMap::new(core.ffile.fd(), core.ffile.length()?)?;
             *core.mmap.get() = mem::ManuallyDrop::new(new_map);
         };
 
@@ -275,7 +275,7 @@ impl FrozenMMap {
 
     #[inline]
     fn munmap(&self) -> FrozenRes<()> {
-        unsafe { self.get_mmap().unmap(self.length()) }
+        unsafe { self.get_mmap().unmap(self.length()?) }
     }
 
     #[inline]
@@ -360,7 +360,7 @@ impl fmt::Display for FrozenMMap {
         write!(
             f,
             "FrozenMMap{{len: {}, mod_id: {}, fd: {}}}",
-            self.length(),
+            self.length().unwrap_or(0),
             self.0.cfg.module_id,
             self.0.ffile.fd(),
         )
@@ -413,7 +413,7 @@ impl Core {
         #[cfg(target_os = "linux")]
         unsafe {
             let mmap = &*self.mmap.get();
-            return mmap.sync(self.ffile.length());
+            return mmap.sync(self.ffile.length()?);
         }
 
         #[cfg(target_os = "macos")]

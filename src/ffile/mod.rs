@@ -129,6 +129,27 @@ pub(in crate::ffile) fn new_err_default<R>(res: FFileErrRes) -> FrozenRes<R> {
     Err(err)
 }
 
+/// Config for [`FrozenFile`]
+#[derive(Debug, Clone)]
+pub struct FFCfg {
+    /// Path for the file
+    ///
+    /// *NOTE:* The caller must make sure that the parent directory exists
+    pub path: std::path::PathBuf,
+
+    /// Size (in bytes) of a single chunk on fs
+    ///
+    /// A chunk is a smalled fixed size allocation and addressing unit used by
+    /// [`FrozenFile`] for all the write/read ops, which are operated by index
+    /// of the chunk and not the offset of the byte
+    pub chunk_size: usize,
+
+    /// Number of chunks to pre-allocate when [`FrozenFile`] is initialized
+    ///
+    /// Initial file length will be `chunk_size * initial_chunk_amount` (bytes)
+    pub initial_chunk_amount: usize,
+}
+
 /// Custom implementation of `std::fs::File`
 ///
 /// ## Example
@@ -177,8 +198,8 @@ unsafe impl Sync for FrozenFile {}
 impl FrozenFile {
     /// Read current length of [`FrozenFile`]
     #[inline]
-    pub fn length(&self) -> usize {
-        self.0.length.load(atomic::Ordering::Acquire)
+    pub fn length(&self) -> FrozenRes<usize> {
+        unsafe { self.get_file().length() }
     }
 
     /// Get file descriptor for [`FrozenFile`]
@@ -188,7 +209,7 @@ impl FrozenFile {
         self.get_file().fd()
     }
 
-    /// check if [`FrozenFile`] exists on storage device or not
+    /// check if [`FrozenFile`] exists on the fs
     pub fn exists(path: &std::path::Path) -> FrozenRes<bool> {
         unsafe { TFile::exists(path) }
     }
@@ -206,7 +227,7 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
-    /// assert_eq!(file.length(), 0x1000);
+    /// assert_eq!(file.length().unwrap(), 0x1000);
     ///```
     pub fn new(path: &std::path::Path, init_len: usize, mid: u8) -> FrozenRes<Self> {
         MID.store(mid, atomic::Ordering::Relaxed); // used for err logging
@@ -218,19 +239,21 @@ impl FrozenFile {
         // the same file, would correctly fail, while again obtaining the lock
         Self::request_exclusive_lock(&file)?;
 
-        let mut curr_len = unsafe { file.length()? };
+        let curr_len = unsafe { file.length()? };
         match curr_len {
             0 => unsafe {
-                curr_len = file.grow(0, init_len)?;
+                file.grow(0, init_len)?;
             },
             _ => {
                 if curr_len < init_len {
+                    // close the file to avoid resource leaks
+                    let _ = unsafe { file.close() };
                     return new_err_default(FFileErrRes::Cpt);
                 }
             }
         }
 
-        let core = Arc::new(Core::new(file, curr_len.max(init_len), path));
+        let core = Arc::new(Core::new(file, path));
         Ok(Self(core))
     }
 
@@ -247,15 +270,16 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
-    /// assert_eq!(file.length(), 0x1000);
+    /// assert_eq!(file.length().unwrap(), 0x1000);
     ///
     /// file.grow(0x1000).unwrap();
-    /// assert_eq!(file.length(), 0x2000);
+    /// assert_eq!(file.length().unwrap(), 0x2000);
     ///```
-    pub fn grow(&self, len_to_add: usize) -> FrozenRes<usize> {
-        unsafe { self.get_file().grow(self.length(), len_to_add) }.inspect(|new_len| {
-            self.0.length.store(*new_len, atomic::Ordering::Release);
-        })
+    pub fn grow(&self, len_to_add: usize) -> FrozenRes<()> {
+        unsafe {
+            let curr_len = self.length()?;
+            self.get_file().grow(curr_len, len_to_add)
+        }
     }
 
     /// Syncs in-mem data on the storage device
@@ -349,10 +373,9 @@ impl core::fmt::Display for FrozenFile {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "FrozenFile {{fd: {}, len: {}, id: {}}}",
+            "FrozenFile {{fd: {}, len: {}}}",
             self.fd(),
-            self.length(),
-            mid()
+            self.length().unwrap_or(0),
         )
     }
 }
@@ -360,7 +383,6 @@ impl core::fmt::Display for FrozenFile {
 #[derive(Debug)]
 struct Core {
     path: std::path::PathBuf,
-    length: atomic::AtomicUsize,
     file: core::cell::UnsafeCell<core::mem::ManuallyDrop<TFile>>,
 }
 
@@ -368,10 +390,9 @@ unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
 impl Core {
-    fn new(file: TFile, length: usize, path: &std::path::Path) -> Self {
+    fn new(file: TFile, path: &std::path::Path) -> Self {
         Self {
             path: path.to_path_buf(),
-            length: atomic::AtomicUsize::new(length),
             file: core::cell::UnsafeCell::new(core::mem::ManuallyDrop::new(file)),
         }
     }
@@ -411,7 +432,7 @@ mod tests {
             let file = FrozenFile::new(&path, 0x1000, TEST_MID).unwrap();
 
             assert!(path.exists());
-            assert_eq!(file.length(), 0x1000);
+            assert_eq!(file.length().unwrap(), 0x1000);
         }
 
         #[test]
@@ -419,13 +440,13 @@ mod tests {
             let (_dir, path) = tmp_path();
 
             let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-            assert_eq!(file.length(), 0x200);
+            assert_eq!(file.length().unwrap(), 0x200);
 
             // must be dropped to release the exclusive lock
             drop(file);
 
             let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-            assert_eq!(reopened.length(), 0x200);
+            assert_eq!(reopened.length().unwrap(), 0x200);
         }
 
         #[test]
@@ -433,7 +454,7 @@ mod tests {
             let (_dir, path) = tmp_path();
 
             let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-            assert_eq!(file.length(), 0x200);
+            assert_eq!(file.length().unwrap(), 0x200);
 
             drop(file);
 
@@ -530,11 +551,11 @@ mod tests {
             let (_dir, path) = tmp_path();
 
             let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-            assert_eq!(file.length(), 0x200);
+            assert_eq!(file.length().unwrap(), 0x200);
             drop(file);
 
             let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-            assert_eq!(reopened.length(), 0x200);
+            assert_eq!(reopened.length().unwrap(), 0x200);
         }
     }
 
@@ -546,10 +567,10 @@ mod tests {
             let (_dir, path) = tmp_path();
 
             let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
-            assert_eq!(file.length(), 0x100);
+            assert_eq!(file.length().unwrap(), 0x100);
 
             file.grow(0x100).unwrap();
-            assert_eq!(file.length(), 0x200);
+            assert_eq!(file.length().unwrap(), 0x200);
         }
 
         #[test]
@@ -714,7 +735,7 @@ mod tests {
             grower.join().unwrap();
 
             file.sync().unwrap();
-            assert_eq!(file.length(), 0x800);
+            assert_eq!(file.length().unwrap(), 0x800);
 
             for i in 0..0x0Ausize {
                 let mut buf = vec![0u8; 0x40];
@@ -779,7 +800,7 @@ mod tests {
             let (_dir, path) = tmp_path();
             let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
 
-            let initial_len = file.length();
+            let initial_len = file.length().unwrap();
             assert_eq!(initial_len, 0x200);
 
             let data = [1u8; 0x40];
@@ -789,7 +810,7 @@ mod tests {
             };
 
             file.write(&iov, 0x80).unwrap();
-            assert_eq!(file.length(), initial_len);
+            assert_eq!(file.length().unwrap(), initial_len);
         }
 
         #[test]

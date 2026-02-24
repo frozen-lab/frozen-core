@@ -78,8 +78,8 @@ jobs:
 
       - name: FrozenFile
         run: |
-          cargo run --release --example ff r
           cargo run --release --example ff w
+          cargo run --release --example ff r
           
       - name: FrozenMMap
         run: |

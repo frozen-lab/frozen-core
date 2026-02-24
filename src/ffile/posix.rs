@@ -168,26 +168,38 @@ impl POSIXFile {
     }
 
     /// Grow (zero extend) [`POSIXFile`] w/ given `len_to_add`
-    pub(super) unsafe fn grow(&self, curr_len: usize, len_to_add: usize) -> FrozenRes<usize> {
+    ///
+    /// ## Semantics
+    ///
+    /// Here `grow()` is not atomic in all or nothing sense, following scenerios may happen,
+    ///
+    /// - on linux `fallocate` may fail, but `ftruncate` succeeds
+    /// - on mac `ftruncate` succeeds but `f_preallocate` may fail
+    /// - and on both `ftruncate` may also fail
+    ///
+    /// in all these scenerios, either the `st_size` is correctly updated or not updated at all
+    ///
+    /// if either of `fallocate` or `f_preallocate` has failed, not supported by fs, etc. as long as
+    /// `ftruncate` succeeds, our future write ops (pwrite and pwritev) will work fine, this is mainly
+    /// cause `fallocate` and `f_preallocate` are best-effort operations for us to reduce the latency
+    /// for write ops
+    pub(super) unsafe fn grow(&self, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
         let fd = self.fd();
 
-        // NOTE: Not all kernel versions, fs (such as networked fs), support this syscall,
-        // in such cases we must fallback to using `ftruncate`
+        // NOTE: On linux, `fallocate` must be called before the `ftruncate` to handle `ENOSPC`,
+        // when the order is revered, the file length may be updated despite the failure to allocate
+        // space on fs, which may fail all the future write ops
         #[cfg(target_os = "linux")]
-        if fallocate_raw(fd, curr_len, len_to_add)? == false {
-            ftruncate_raw(fd, curr_len, len_to_add)?;
-        }
+        fallocate_raw(fd, curr_len, len_to_add)?;
 
+        ftruncate_raw(fd, curr_len, len_to_add)?;
+
+        // INFO: On mac, we can hint the kernel to allocate disk space for the added `len_to_add`,
+        // to reduce the latency of future write ops (must always be called after `ftruncate` on mac)
         #[cfg(target_os = "macos")]
-        {
-            ftruncate_raw(fd, curr_len, len_to_add)?;
+        f_preallocate_raw(fd, curr_len, len_to_add)?;
 
-            // INFO: we have option to hint the kernel to preallocate the range, to decrease the
-            // latency for future write ops on the newly added range
-            f_preallocate_raw(fd, curr_len, len_to_add)?;
-        }
-
-        self.length()
+        Ok(())
     }
 
     /// Syncs in cache data updates on the storage device
@@ -330,7 +342,7 @@ impl POSIXFile {
                     // io interrupt
                     EINTR => continue,
 
-                    // permission denied or read-only fs
+                    // permission denied or read-only file
                     EACCES | EPERM | EROFS => return new_err(FFileErrRes::Prm, err_msg),
 
                     // invalid fd, invalid fd type, bad pointer, etc.
@@ -780,29 +792,30 @@ unsafe fn sync_file_range_raw(fd: FFId, offset: usize, len: usize) -> FrozenRes<
     }
 }
 
-/// extend the [`POSIXFile`] to `len = curr_len + len_to_add`, reserves disk block for newly added
-/// range, and guarantees reads return zero after file size is extended
+/// disk space preallocations using `fallocate()`
 ///
-/// Returns,
+/// ## Semantics
 ///
-/// - `Ok(true)` if operation is supported and was successful
-/// - `Ok(false)` when operation is simply not supported, must fallback to `ftruncate()`
+/// This syscall does not change the size, nor the file capacity, the use is to attempt to reserve
+/// disk blocks in advance to handle `ENOSPC` errors and to reduce letency for write ops to the [`POSIXFile`]
 ///
 /// ## Support on fs
 ///
-/// Not all kernel versions, fs (such as networked fs), support this syscall, in such cases we must
-/// fallback to using `ftruncate`
+/// Not all kernel versions, fs (such as networked fs), support this syscall, in such cases, we simply
+/// let go, and do not surface any errors, as this operation is mostly used as best-effort, and despite
+/// the failure of `fallocate()`, the later `ftruncate()` would succeed, and the write ops also would
+/// work all well, so we are good ;)
 ///
 /// ## Why do we retry?
 ///
 /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
 /// is guaranteed, so the syscall must be retried
 #[cfg(target_os = "linux")]
-unsafe fn fallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenRes<bool> {
+unsafe fn fallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
         if hints::likely(libc::fallocate(fd, 0, curr_len as off_t, len_to_add as off_t) == 0) {
-            return Ok(true);
+            return Ok(());
         }
 
         let errno = last_errno();
@@ -828,10 +841,10 @@ unsafe fn fallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenR
             // no space available on disk to grow
             ENOSPC => return new_err(FFileErrRes::Nsp, err_msg),
 
-            // NOTE: on many fs `fallocate` may not be supported due to old kernel or fs
-            // limitations, as use of this is only to hint the fs (for perf gains while writes),
-            // we simply let go of this and do not elivate any kind of errors
-            EOPNOTSUPP | libc::ENOSYS => return Ok(false),
+            // NOTE: on many fs `fallocate()` may not be supported due to old kernel or fs
+            // limitations, as use of this is only to hint the fs (for perf gains while
+            // writes), we simply let go of this and do not elivate any kind of errors
+            EOPNOTSUPP | libc::ENOSYS => return Ok(()),
 
             _ => return new_err(FFileErrRes::Unk, err_msg),
         }
@@ -888,6 +901,13 @@ unsafe fn ftruncate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenR
 /// This syscall does not change the size, nor the file capacity, the use is to attempt to reserve
 /// disk blocks in advance to letency during write ops to the [`POSIXFile`]
 ///
+/// ## Support on fs
+///
+/// On many fs, `fcntl(F_PREALLOCATE)` may not be supported due to older kernels, or fs limitations
+/// in such cases, we simply let go, and do not surface any errors, as this operation is mostly used as
+/// best-effort, and despite the failure of `fcntl(F_PREALLOCATE)`, the later `ftruncate()` would succeed,
+/// and the write ops also would work all well, so we are good ;)
+///
 /// ## Contiguous vs Non-contiguous Allocations
 ///
 /// In `F_PREALLOCATE` calls, we get two allocation modes, contiguous and non-contiguous,
@@ -899,6 +919,11 @@ unsafe fn ftruncate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenR
 ///
 /// The preallocations may be revoked by fs due to (intentional) waker semantics, this acts more like a hint
 /// and not a command to the fs, so the perf is not always guaranteed
+///
+/// ## Why do we retry?
+///
+/// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
+/// is guaranteed, so the syscall must be retried
 #[cfg(target_os = "macos")]
 unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
     let mut retries = 0; // only for EINTR errors
@@ -945,8 +970,8 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
             }
 
             // NOTE: on many fs `fcntl(F_PREALLOCATE)` may not be supported due to old kernel
-            // or fs limitations, as use of this is only to hint the fs (for perf gains while writes),
-            // we simply let go of this and do not elivate any kind of errors
+            // or fs limitations, as use of this is only to hint the fs (for perf gains while
+            // writes), we simply let go of this and do not elivate any kind of errors
             EOPNOTSUPP | libc::ENOTSUP => return Ok(()),
 
             // lack of support or weird fs behavior
@@ -955,7 +980,7 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
             // invalid fd
             EBADF => return new_err(FFileErrRes::Hcf, err_msg),
 
-            // read-only file system
+            // read-only fs
             EROFS => return new_err(FFileErrRes::Prm, err_msg),
 
             _ => return new_err(FFileErrRes::Unk, err_msg),
@@ -1260,7 +1285,8 @@ mod tests {
                 let initial = file.length().unwrap();
                 assert_eq!(initial, 0);
 
-                let new_len = file.grow(0, 0x1000).unwrap();
+                file.grow(0, 0x1000).unwrap();
+                let new_len = file.length().unwrap();
                 assert_eq!(new_len, 0x1000);
 
                 let actual = file.length().unwrap();

@@ -6,8 +6,9 @@ use libc::{
     PROT_WRITE,
 };
 
+/// max allowed retries for `EINTR` errors
 #[cfg(target_os = "linux")]
-const MAX_RETRIES: usize = 6; // max allowed retries for `EINTR` errors
+const MAX_RETRIES: usize = 0x0A / 2;
 
 /// Raw implementation of Posix (linux & macos) `memmap` for [`FrozenMMap`]
 #[derive(Debug)]
