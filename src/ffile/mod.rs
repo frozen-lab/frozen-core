@@ -84,6 +84,12 @@ pub enum FFileErrRes {
 
     /// (265) unable to grow
     Grw = 0x107,
+
+    /// (266) unable to lock
+    Lck = 0x108,
+
+    /// (267) locks exhausted (mainly on nfs)
+    Lex = 0x109,
 }
 
 impl FFileErrRes {
@@ -98,6 +104,8 @@ impl FFileErrRes {
             Self::Nsp => b"no space left on storage device",
             Self::Cpt => b"file is either invalid or corrupted",
             Self::Syn => b"failed to sync/flush data to storage device",
+            Self::Lex => b"failed to obtain lock, as no more locks available",
+            Self::Lck => b"failed to obtain exclusive lock, file may already be open",
         }
     }
 }
@@ -147,8 +155,13 @@ impl FrozenFile {
         MID.store(mid, atomic::Ordering::Relaxed); // used for err logging
 
         let file = unsafe { posix::POSIXFile::new(&path) }?;
-        let mut curr_len = unsafe { file.length()? };
 
+        // INFO: right after open is successful, we must obtain an exclusive lock on the
+        // entire file, hence when another instance of [`FrozenFile`], when trying to access
+        // the same file, would correctly fail, while again obtaining the lock
+        Self::request_exclusive_lock(&file)?;
+
+        let mut curr_len = unsafe { file.length()? };
         match curr_len {
             0 => unsafe {
                 curr_len = file.grow(0, init_len)?;
@@ -218,6 +231,10 @@ impl FrozenFile {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn pwritev(&self, iovs: &mut [libc::iovec], offset: usize) -> FrozenRes<()> {
         unsafe { self.get_file().pwritev(iovs, offset) }
+    }
+
+    fn request_exclusive_lock(file: &TFile) -> FrozenRes<()> {
+        unsafe { file.flock() }
     }
 
     #[inline]

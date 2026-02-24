@@ -1,10 +1,10 @@
 use super::{new_err, new_err_default, FFId, FFileErrRes};
 use crate::{error::FrozenRes, hints};
 use libc::{
-    access, c_char, c_int, c_uint, c_void, close, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite, pwritev,
-    size_t, stat, sysconf, unlink, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT, ENOSPC,
-    ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, F_OK, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR,
-    S_IWUSR, _SC_IOV_MAX,
+    access, c_char, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite,
+    pwritev, size_t, stat, sysconf, unlink, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT,
+    ENOLCK, ENOSPC, ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX, LOCK_NB, O_CLOEXEC, O_CREAT,
+    O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, _SC_IOV_MAX,
 };
 use std::{
     ffi::CStr,
@@ -38,7 +38,7 @@ impl POSIXFile {
     ///
     /// ## How it works
     ///
-    /// By using `access(2)` syscall w/ `F_OK`, we check whether the calling process
+    /// By using `access(path)` syscall w/ `F_OK`, we check whether the calling process
     /// can resolve the given `path` in underlying fs
     pub(super) unsafe fn exists(path: &std::path::Path) -> FrozenRes<bool> {
         let cpath = path_to_cstring(path)?;
@@ -62,6 +62,31 @@ impl POSIXFile {
     pub(super) unsafe fn new(path: &std::path::Path) -> FrozenRes<Self> {
         let fd = open_raw(path, prep_flags())?;
         Ok(Self(atomic::AtomicI32::new(fd)))
+    }
+
+    /// Acquire an exclusive advisory lock on [`POSIXFile`]
+    ///
+    /// ## Purpose
+    ///
+    /// We must ensure that only a single [`POSIXFile`] instance, across all processes, can operate on
+    /// the underlying file, at a given time
+    ///
+    /// So, we acquire an exclusive lock, for the entire file, after open, so if another process tries,
+    /// it could hault or choose not to exists anymore, to avoid multiple open handles across the same
+    /// underlying file
+    ///
+    /// ## Advisory Semantics
+    ///
+    /// We use `flock(fd)`, which provides advisory locking only, the kernel does not prevent
+    /// other processes from calling `open()`, but any cooperating process attempting
+    /// to acquire the same exclusive lock will fail with `EWOULDBLOCK` i.e. [`FFileErrRes::Lck`]
+    ///
+    /// ## Why do we retry?
+    ///
+    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
+    /// is guaranteed, so the syscall must be retried
+    pub(super) unsafe fn flock(&self) -> FrozenRes<()> {
+        flock_raw(self.fd())
     }
 
     /// Close [`POSIXFile`] to give up allocated resources
@@ -214,13 +239,18 @@ impl POSIXFile {
 
     /// Initiates writeback (best-effort) of dirty pages in the specified range
     ///
-    /// ## Why
+    /// ## Purpose
     ///
     /// In our case, `sync_range` is used as a prompt for the kernel to start flushing dirty pages in the
     /// specified range, which result in reduced latency for `fdatasync` and `fcntl(F_FULLSYNC)` syscalls
     ///
     /// This syscall, by itself, does not guarantee any kind of durability, and must always be paired with
     /// strong sync calls like `fdatasync()` and `fcntl(F_FULLSYNC)`
+    ///
+    /// ## Why do we retry?
+    ///
+    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
+    /// is guaranteed, so the syscall must be retried
     #[cfg(target_os = "linux")]
     pub(super) unsafe fn sync_range(&self, offset: usize, len: usize) -> FrozenRes<()> {
         sync_file_range_raw(self.fd(), offset, len)
@@ -927,6 +957,43 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
 
             // read-only file system
             EROFS => return new_err(FFileErrRes::Prm, err_msg),
+
+            _ => return new_err(FFileErrRes::Unk, err_msg),
+        }
+    }
+}
+
+unsafe fn flock_raw(fd: FFId) -> FrozenRes<()> {
+    let mut retries = 0; // only for EINTR errors
+    loop {
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+            return Ok(());
+        }
+
+        let errno = last_errno();
+        let err_msg = err_msg(errno);
+
+        match errno {
+            // another process already holds the lock
+            EWOULDBLOCK => {
+                return new_err(FFileErrRes::Lck, err_msg);
+            }
+
+            // IO interrupt
+            EINTR => {
+                if retries < MAX_RETRIES {
+                    retries += 1;
+                    continue;
+                }
+
+                return new_err(FFileErrRes::Lck, err_msg);
+            }
+
+            // invalid fd or lack of support
+            EBADF | EINVAL => return new_err(FFileErrRes::Hcf, err_msg),
+
+            // os or fs, out of locks, i.e. lock exhaustion, may happen only on nfs
+            ENOLCK => return new_err(FFileErrRes::Lex, err_msg),
 
             _ => return new_err(FFileErrRes::Unk, err_msg),
         }
