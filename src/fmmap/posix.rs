@@ -1,19 +1,21 @@
 use super::{new_err, FMMapErrRes};
-use crate::error::FrozenRes;
+use crate::{error::FrozenRes, hints};
 use core::{ffi::CStr, ptr, sync::atomic};
 use libc::{
-    c_char, c_void, mmap, munmap, off_t, size_t, EACCES, EBADF, EINVAL, ENOMEM, MAP_FAILED, MAP_SHARED, PROT_READ,
-    PROT_WRITE,
+    c_char, c_void, mmap, msync, munmap, off_t, size_t, EACCES, EBADF, EBUSY, EINTR, EINVAL, EIO, ENOMEM, EOVERFLOW,
+    MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
 };
 
 /// max allowed retries for `EINTR` errors
 #[cfg(target_os = "linux")]
 const MAX_RETRIES: usize = 0x0A / 2;
 
+type TPtr = *mut c_void;
+
 /// Raw implementation of Posix (linux & macos) `memmap` for [`FrozenMMap`]
 #[derive(Debug)]
 pub(super) struct POSIXMMap {
-    ptr: *mut c_void,
+    ptr: TPtr,
     unmapped: atomic::AtomicBool,
 }
 
@@ -21,42 +23,18 @@ unsafe impl Send for POSIXMMap {}
 unsafe impl Sync for POSIXMMap {}
 
 impl POSIXMMap {
-    /// Create a new [`POSIXMMap`] instance for given `fd` w/ read & write permissions
+    /// Create a new [`POSIXMMap`] w/ given `fd` and `length`
     pub(super) unsafe fn new(fd: i32, length: size_t) -> FrozenRes<Self> {
-        let ptr = mmap(
-            ptr::null_mut(),
-            length,
-            PROT_WRITE | PROT_READ,
-            MAP_SHARED,
-            fd,
-            0 as off_t,
-        );
-
-        if ptr == MAP_FAILED {
-            let errno = last_errno();
-            let err_msg = err_msg(errno);
-
-            // invalid fd, invalid fd type, invalid length, etc.
-            if errno == EINVAL || errno == EBADF || errno == EACCES {
-                return new_err(FMMapErrRes::Hcf, err_msg);
-            }
-
-            // no more memory space available
-            if errno == ENOMEM {
-                return new_err(FMMapErrRes::Nmm, err_msg);
-            }
-
-            // unknown (unsupported, etc.)
-            return new_err(FMMapErrRes::Unk, err_msg);
-        }
-
+        let ptr = mmap_raw(fd, length)?;
         return Ok(Self {
             ptr,
             unmapped: atomic::AtomicBool::new(false),
         });
     }
 
-    /// Unmap (free/drop) the mmaped instance of [`POSIXMMap`]
+    /// Close [`POSIXMMap`] to give up allocated resources
+    ///
+    /// This function is idempotent, hence it prevents unmap-on-unmap errors
     pub(super) unsafe fn unmap(&self, length: usize) -> FrozenRes<()> {
         // NOTE: To avoid another thread/process from executing munmap, we mark unmapped before even
         // trying to unmap, this kind of wroks like mutex, as we reassign to false on failure
@@ -68,68 +46,24 @@ impl POSIXMMap {
             return Ok(());
         }
 
-        if munmap(self.ptr, length) != 0 {
-            let errno = last_errno();
-            let err_msg = err_msg(errno);
-
-            // invalid or unaligned pointer
-            if errno == EINVAL || errno == ENOMEM {
-                return new_err(FMMapErrRes::Hcf, err_msg);
-            }
-
-            // unknown (fallback)
-            return new_err(FMMapErrRes::Unk, err_msg);
-        }
-
-        Ok(())
+        mumap_raw(self.ptr, length)
     }
 
-    /// Syncs in-mem data on the storage device
-    #[cfg(target_os = "linux")]
+    /// Syncs in cache data updates on the storage device
+    ///
+    /// ## Durability
+    ///
+    /// In POSIX systems `msync(MS_SYNC)`, does not provide crash safe durability, this syscall is used
+    /// as a best-effort operation, to explicitly push dirty mmaped pages into fs writeback
+    ///
+    /// For strong durability, use of [`FrozenFile::sync`] is required, right after calling [`FrozenMMap::sync`]
+    ///
+    /// ## Why do we retry?
+    ///
+    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
+    /// is guaranteed, so the syscall must be retried
     pub(super) unsafe fn sync(&self, length: usize) -> FrozenRes<()> {
-        // only for EIO and EBUSY errors
-        let mut retries = 0;
-
-        loop {
-            let res = libc::msync(self.ptr, length, libc::MS_SYNC);
-            if crate::hints::unlikely(res != 0) {
-                let errno = last_errno();
-                let err_msg = err_msg(errno);
-
-                // IO interrupt (must retry)
-                if errno == libc::EINTR {
-                    continue;
-                }
-
-                // no-more memory available
-                if errno == ENOMEM {
-                    return new_err(FMMapErrRes::Nmm, err_msg);
-                }
-
-                // invalid fd or lack of support for sync
-                if errno == EINVAL {
-                    return new_err(FMMapErrRes::Hcf, err_msg);
-                }
-
-                // locked file or fatel error, i.e. unable to sync
-                //
-                // NOTE: this is handled seperately, as if this error occurs, we must
-                // notify users that the sync failed, hence the data is not persisted
-                if errno == libc::EIO || errno == libc::EBUSY {
-                    if retries < MAX_RETRIES {
-                        retries += 1;
-                        continue;
-                    }
-
-                    // retries exhausted and durability is broken in the current window
-                    return new_err(FMMapErrRes::Syn, err_msg);
-                }
-
-                return new_err(FMMapErrRes::Unk, err_msg);
-            }
-
-            return Ok(());
-        }
+        msync_raw(self.ptr, length)
     }
 
     /// Get an immutable typed pointer to `T` at given `offset`
@@ -142,6 +76,93 @@ impl POSIXMMap {
     #[inline]
     pub(super) unsafe fn get_mut<T>(&self, offset: usize) -> *mut T {
         self.ptr.add(offset) as *mut T
+    }
+}
+
+/// create a new memory mapping on given `fd` or given `length`
+///
+/// ## Caveats of `mmap` on POSIX
+///
+/// In POSIX systems, when calling `mmap()`, the provided offset must be multiple of page size,
+/// i.e. `sysconf(_SC_PAGESIZE)`, otherwise an `EINVAL` error is thrown
+///
+/// For our usecase, we always map an entire file, hence this is never an issue for us
+unsafe fn mmap_raw(fd: i32, length: size_t) -> FrozenRes<TPtr> {
+    let ptr = mmap(
+        ptr::null_mut(),
+        length,
+        PROT_WRITE | PROT_READ,
+        MAP_SHARED,
+        fd,
+        0 as off_t,
+    );
+
+    if ptr == MAP_FAILED {
+        let errno = last_errno();
+        let err_msg = err_msg(errno);
+
+        match errno {
+            // invalid fd, invalid fd type, invalid length, etc.
+            EINVAL | EBADF | EACCES | EOVERFLOW => return new_err(FMMapErrRes::Hcf, err_msg),
+
+            // no more memory available
+            ENOMEM => return new_err(FMMapErrRes::Nmm, err_msg),
+
+            _ => return new_err(FMMapErrRes::Unk, err_msg),
+        };
+    }
+
+    Ok(ptr)
+}
+
+unsafe fn mumap_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
+    if munmap(ptr, length) == 0 {
+        return Ok(());
+    }
+
+    let errno = last_errno();
+    let err_msg = err_msg(errno);
+
+    match errno {
+        // invalid/unaligned ptr or address range is not mapped
+        EINVAL | ENOMEM => new_err(FMMapErrRes::Hcf, err_msg),
+
+        _ => new_err(FMMapErrRes::Unk, err_msg),
+    }
+}
+
+unsafe fn msync_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
+    let mut retries = 0; // only for EINTR errors
+    loop {
+        let res = msync(ptr, length, MS_SYNC);
+        if hints::likely(res == 0) {
+            return Ok(());
+        }
+
+        let errno = last_errno();
+        let err_msg = err_msg(errno);
+
+        match errno {
+            // IO interrupt, locked file or fatel error
+            EINTR | EBUSY | EIO => {
+                if retries < MAX_RETRIES {
+                    retries += 1;
+                    continue;
+                }
+
+                // NOTE: sync error indicates that retries exhausted and durability is broken
+                // in the current/last window/batch
+                return new_err(FMMapErrRes::Syn, err_msg);
+            }
+
+            // invalid fd or lack of support for sync
+            EINVAL => return new_err(FMMapErrRes::Hcf, err_msg),
+
+            // no-more memory available
+            ENOMEM => return new_err(FMMapErrRes::Nmm, err_msg),
+
+            _ => return new_err(FMMapErrRes::Unk, err_msg),
+        }
     }
 }
 

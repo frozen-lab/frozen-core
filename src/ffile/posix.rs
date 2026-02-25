@@ -34,7 +34,7 @@ impl POSIXFile {
         self.0.load(atomic::Ordering::Acquire)
     }
 
-    /// check if [`POSIXFile`] exists on storage device or not
+    /// Check if [`POSIXFile`] exists on storage device or not
     ///
     /// ## How it works
     ///
@@ -45,7 +45,7 @@ impl POSIXFile {
         Ok(access(cpath.as_ptr(), F_OK) == 0)
     }
 
-    /// create a new or open an existing [`POSIXFile`]
+    /// Create a new or open an existing [`POSIXFile`]
     ///
     /// ## Crash safe durability
     ///
