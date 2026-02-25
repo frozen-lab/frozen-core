@@ -9,6 +9,7 @@
   - impl of vectored write/read ops
   - impl of exclusive locking to prevent simultaneously running multiple instances
   - updated example
+  - impl of `FFCfg`
 
 ## `0.0.6`
 

@@ -3,21 +3,28 @@
 //! ## Example
 //!
 //! ```
-//! use frozen_core::ffile::FrozenFile;
-//!
-//! const MID: u8 = 0;
+//! use frozen_core::ffile::{FrozenFile, FFCfg};
 //!
 //! let dir = tempfile::tempdir().unwrap();
 //! let path = dir.path().join("tmp_frozen_file");
-//! let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
 //!
-//! let data = b"hello grave";
+//! let cfg = FFCfg {
+//!     mid: 0x00,
+//!     chunk_size: 0x10,
+//!     path: path.to_path_buf(),
+//!     initial_chunk_amount: 0x0A,
+//! };
+//!
+//! let file = FrozenFile::new(cfg.clone()).unwrap();
+//! assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
+//!
+//! let data = vec![1u8; 0x10];
 //! let iov = libc::iovec {
 //!     iov_base: data.as_ptr() as *mut _,
 //!     iov_len: data.len(),
 //! };
 //!
-//! assert!(file.write(&iov, 0x80).is_ok());
+//! assert!(file.write(&iov, 0).is_ok());
 //! assert!(file.sync().is_ok());
 //!
 //! let mut buf = vec![0u8; data.len()];
@@ -26,16 +33,16 @@
 //!     iov_len: buf.len(),
 //! };
 //!
-//! assert!(file.read(&mut read_iov, 0x80).is_ok());
-//! assert_eq!(&buf, data);
+//! assert!(file.read(&mut read_iov, 0).is_ok());
+//! assert_eq!(buf, data);
 //!
-//! assert!(FrozenFile::new(&path, 0x1000, MID).is_err());
+//! assert!(FrozenFile::new(cfg.clone()).is_err());
 //!
 //! assert!(file.delete().is_ok());
 //! assert!(!path.exists());
 //!
 //! drop(file);
-//! assert!(FrozenFile::new(&path, 0x1000, MID).is_ok());
+//! assert!(FrozenFile::new(cfg).is_ok());
 //! ```
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -43,7 +50,6 @@ mod posix;
 
 use crate::error::{FrozenErr, FrozenRes};
 use core::{self, sync::atomic};
-use std::sync::Arc;
 
 /// file descriptor for [`FrozenFile`]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -132,6 +138,9 @@ pub(in crate::ffile) fn new_err_default<R>(res: FFileErrRes) -> FrozenRes<R> {
 /// Config for [`FrozenFile`]
 #[derive(Debug, Clone)]
 pub struct FFCfg {
+    /// Module id used for error logging
+    pub mid: u8,
+
     /// Path for the file
     ///
     /// *NOTE:* The caller must make sure that the parent directory exists
@@ -155,21 +164,28 @@ pub struct FFCfg {
 /// ## Example
 ///
 /// ```
-/// use frozen_core::ffile::FrozenFile;
-///
-/// const MID: u8 = 0;
+/// use frozen_core::ffile::{FrozenFile, FFCfg};
 ///
 /// let dir = tempfile::tempdir().unwrap();
 /// let path = dir.path().join("tmp_frozen_file");
-/// let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
 ///
-/// let data = b"hello grave";
+/// let cfg = FFCfg {
+///     mid: 0x00,
+///     chunk_size: 0x10,
+///     path: path.to_path_buf(),
+///     initial_chunk_amount: 0x0A,
+/// };
+///
+/// let file = FrozenFile::new(cfg.clone()).unwrap();
+/// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
+///
+/// let data = vec![1u8; 0x10];
 /// let iov = libc::iovec {
 ///     iov_base: data.as_ptr() as *mut _,
 ///     iov_len: data.len(),
 /// };
 ///
-/// assert!(file.write(&iov, 0x80).is_ok());
+/// assert!(file.write(&iov, 0).is_ok());
 /// assert!(file.sync().is_ok());
 ///
 /// let mut buf = vec![0u8; data.len()];
@@ -178,19 +194,22 @@ pub struct FFCfg {
 ///     iov_len: buf.len(),
 /// };
 ///
-/// assert!(file.read(&mut read_iov, 0x80).is_ok());
-/// assert_eq!(&buf, data);
+/// assert!(file.read(&mut read_iov, 0).is_ok());
+/// assert_eq!(buf, data);
 ///
-/// assert!(FrozenFile::new(&path, 0x1000, MID).is_err());
+/// assert!(FrozenFile::new(cfg.clone()).is_err());
 ///
 /// assert!(file.delete().is_ok());
 /// assert!(!path.exists());
 ///
 /// drop(file);
-/// assert!(FrozenFile::new(&path, 0x1000, MID).is_ok());
+/// assert!(FrozenFile::new(cfg).is_ok());
 /// ```
 #[derive(Debug)]
-pub struct FrozenFile(Arc<Core>);
+pub struct FrozenFile {
+    cfg: FFCfg,
+    file: core::cell::UnsafeCell<core::mem::ManuallyDrop<TFile>>,
+}
 
 unsafe impl Send for FrozenFile {}
 unsafe impl Sync for FrozenFile {}
@@ -210,87 +229,124 @@ impl FrozenFile {
     }
 
     /// check if [`FrozenFile`] exists on the fs
-    pub fn exists(path: &std::path::Path) -> FrozenRes<bool> {
-        unsafe { TFile::exists(path) }
+    pub fn exists(&self) -> FrozenRes<bool> {
+        unsafe { TFile::exists(&self.cfg.path) }
     }
 
     /// create a new or open an existing [`FrozenFile`]
     ///
+    /// ## [`FFCfg`]
+    ///
+    /// All configs for [`FrozenFile`] are stored in [`FFCfg`]
+    ///
+    /// ## Important
+    ///
+    /// The `cfg` must not change any of its properties for the entire life of [`FrozenFile`],
+    /// one must use config stores like [`Rta`](https://crates.io/crates/rta) to store config
+    ///
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::FrozenFile;
-    ///
-    /// const MID: u8 = 0;
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
-    /// assert_eq!(file.length().unwrap(), 0x1000);
+    /// let cfg = FFCfg {
+    ///     mid: 0x00,
+    ///     chunk_size: 0x10,
+    ///     path: path.to_path_buf(),
+    ///     initial_chunk_amount: 0x0A,
+    /// };
+    ///
+    /// let file = FrozenFile::new(cfg).unwrap();
+    /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
     ///```
-    pub fn new(path: &std::path::Path, init_len: usize, mid: u8) -> FrozenRes<Self> {
-        MID.store(mid, atomic::Ordering::Relaxed); // used for err logging
+    pub fn new(cfg: FFCfg) -> FrozenRes<Self> {
+        let raw_file = unsafe { posix::POSIXFile::new(&cfg.path) }?;
+        let slf = Self {
+            cfg: cfg.clone(),
+            file: core::cell::UnsafeCell::new(core::mem::ManuallyDrop::new(raw_file)),
+        };
 
-        let file = unsafe { posix::POSIXFile::new(&path) }?;
+        let file = slf.get_file();
 
         // INFO: right after open is successful, we must obtain an exclusive lock on the
         // entire file, hence when another instance of [`FrozenFile`], when trying to access
         // the same file, would correctly fail, while again obtaining the lock
-        Self::request_exclusive_lock(&file)?;
+        unsafe { file.flock() }?;
 
-        let curr_len = unsafe { file.length()? };
+        // NOTE: we only set it once, as once after an exclusive lock for the entire file is
+        // acquired, hence it'll be only set once per instance and is only used for error logging
+        MID.store(cfg.mid, atomic::Ordering::Relaxed);
+
+        let curr_len = slf.length()?;
+        let init_len = cfg.chunk_size * cfg.initial_chunk_amount;
+
         match curr_len {
-            0 => unsafe {
-                file.grow(0, init_len)?;
-            },
+            0 => slf.grow(cfg.initial_chunk_amount)?,
             _ => {
-                if curr_len < init_len {
-                    // close the file to avoid resource leaks
+                // NOTE: we can treat this invariants as errors only because, our system guarantees,
+                // whenever file size is updated, i.e. has grown, it'll always be a multiple of `chunk_size`,
+                // and will have minimum of `chunk_size * initial_chunk_amount` (bytes) as the length, although
+                // it only holds true when any of params in `cfg` are never updated after the file is created
+                if (curr_len < init_len) || (curr_len % cfg.chunk_size != 0) {
+                    // INFO:
+                    // - close the file to avoid resource leaks
+                    // - we supress the close error, as we are already in an errored state
                     let _ = unsafe { file.close() };
                     return new_err_default(FFileErrRes::Cpt);
                 }
             }
         }
 
-        let core = Arc::new(Core::new(file, path));
-        Ok(Self(core))
+        Ok(slf)
     }
 
-    /// Grow [`FrozenFile`] w/ given `len_to_add`
+    /// Grow file size of [`FrozenFile`] by given `count` of chunks
     ///
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::FrozenFile;
-    ///
-    /// const MID: u8 = 0;
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
-    /// assert_eq!(file.length().unwrap(), 0x1000);
+    /// let cfg = FFCfg {
+    ///     mid: 0x00,
+    ///     chunk_size: 0x10,
+    ///     path: path.to_path_buf(),
+    ///     initial_chunk_amount: 0x0A,
+    /// };
     ///
-    /// file.grow(0x1000).unwrap();
-    /// assert_eq!(file.length().unwrap(), 0x2000);
-    ///```
-    pub fn grow(&self, len_to_add: usize) -> FrozenRes<()> {
-        unsafe {
-            let curr_len = self.length()?;
-            self.get_file().grow(curr_len, len_to_add)
-        }
+    /// let file = FrozenFile::new(cfg).unwrap();
+    /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
+    ///
+    /// file.grow(0x20).unwrap();
+    /// assert_eq!(file.length().unwrap(), 0x10 * (0x0A + 0x20));
+    ///```    
+    pub fn grow(&self, count: usize) -> FrozenRes<()> {
+        let curr_len = self.length()?;
+        let len_to_add = self.cfg.chunk_size * count;
+
+        unsafe { self.get_file().grow(curr_len, len_to_add) }
     }
 
     /// Syncs in-mem data on the storage device
     pub fn sync(&self) -> FrozenRes<()> {
-        self.0.sync()
+        let file = self.get_file();
+        unsafe { file.sync() }
     }
 
     /// Initiates writeback (best-effort) of dirty pages in the specified range
     #[cfg(any(target_os = "linux"))]
-    pub fn sync_range(&self, offset: usize, len: usize) -> FrozenRes<()> {
-        self.0.sync_range(offset, len)
+    pub fn sync_range(&self, index: usize, count: usize) -> FrozenRes<()> {
+        let offset = self.cfg.chunk_size * index;
+        let len_to_sync = self.cfg.chunk_size * count;
+        let file = self.get_file();
+
+        unsafe { file.sync_range(offset, len_to_sync) }
     }
 
     /// Delete [`FrozenFile`] from filesystem
@@ -298,63 +354,84 @@ impl FrozenFile {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::FrozenFile;
-    ///
-    /// const MID: u8 = 0;
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
-    /// assert!(path.exists());
+    /// let cfg = FFCfg {
+    ///     mid: 0x00,
+    ///     chunk_size: 0x10,
+    ///     path: path.to_path_buf(),
+    ///     initial_chunk_amount: 0x0A,
+    /// };
+    ///
+    /// let file = FrozenFile::new(cfg).unwrap();
+    /// assert!(file.exists().unwrap());
     ///
     /// file.delete().unwrap();
-    /// assert!(!path.exists());
+    /// assert!(!file.exists().unwrap());
     ///```
     pub fn delete(&self) -> FrozenRes<()> {
         let file = self.get_file();
-
-        // NOTE: sanity check is invalid here, cause we are deleting the file, hence we don't
-        // actually care if the state is sane or not ;)
-
-        unsafe { file.unlink(&self.0.path) }
+        unsafe { file.unlink(&self.cfg.path) }
     }
 
-    /// Read a single `iovec` from a given `offset` w/ `pread` syscall
+    /// Read a single `iovec` chunk at given `index` w/ `pread` syscall
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn read(&self, buf: &mut libc::iovec, offset: usize) -> FrozenRes<()> {
-        unsafe { self.get_file().pread(buf, offset) }
+    pub fn read(&self, buf: &mut libc::iovec, index: usize) -> FrozenRes<()> {
+        // sanity check
+        debug_assert_eq!(buf.iov_len, self.cfg.chunk_size);
+
+        let offset = self.cfg.chunk_size * index;
+        let file = self.get_file();
+
+        unsafe { file.pread(buf, offset) }
     }
 
-    /// Write a single `iovec` at a given `offset` w/ `pwrite` syscall
+    /// Write a single `iovec` chunk at given `index` w/ `pwrite` syscall
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn write(&self, buf: &libc::iovec, offset: usize) -> FrozenRes<()> {
-        unsafe { self.get_file().pwrite(buf, offset) }
+    pub fn write(&self, buf: &libc::iovec, index: usize) -> FrozenRes<()> {
+        // sanity check
+        debug_assert_eq!(buf.iov_len, self.cfg.chunk_size);
+
+        let offset = self.cfg.chunk_size * index;
+        let file = self.get_file();
+
+        unsafe { file.pwrite(buf, offset) }
     }
 
-    /// Read multiple `iovec` objects starting from given `offset` w/ `preadv` syscall
+    /// Read multiple `iovec` chunks starting from given `index` till `iovs.len()` w/ `preadv` syscall
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn preadv(&self, iovs: &mut [libc::iovec], offset: usize) -> FrozenRes<()> {
-        unsafe { self.get_file().preadv(iovs, offset) }
+    pub fn preadv(&self, iovs: &mut [libc::iovec], index: usize) -> FrozenRes<()> {
+        // sanity check
+        debug_assert!(iovs.iter().all(|i| i.iov_len == self.cfg.chunk_size));
+
+        let offset = self.cfg.chunk_size * index;
+        let file = self.get_file();
+
+        unsafe { file.preadv(iovs, offset) }
     }
 
-    /// Write multiple `iovec` objects starting from given `offset` w/ `pwritev` syscall
+    /// Write multiple `iovec` chunks starting from given `index` till `iovs.len()` w/ `pwritev` syscall
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn pwritev(&self, iovs: &mut [libc::iovec], offset: usize) -> FrozenRes<()> {
-        unsafe { self.get_file().pwritev(iovs, offset) }
-    }
+    pub fn pwritev(&self, iovs: &mut [libc::iovec], index: usize) -> FrozenRes<()> {
+        // sanity check
+        debug_assert!(iovs.iter().all(|i| i.iov_len == self.cfg.chunk_size));
 
-    fn request_exclusive_lock(file: &TFile) -> FrozenRes<()> {
-        unsafe { file.flock() }
+        let offset = self.cfg.chunk_size * index;
+        let file = self.get_file();
+
+        unsafe { file.pwritev(iovs, offset) }
     }
 
     #[inline]
     fn get_file(&self) -> &core::mem::ManuallyDrop<TFile> {
-        unsafe { &*self.0.file.get() }
+        unsafe { &*self.file.get() }
     }
 }
 
@@ -364,7 +441,7 @@ impl Drop for FrozenFile {
         // when explicit drop is called
 
         // sync if dirty & close
-        let _ = self.0.sync();
+        let _ = self.sync();
         let _ = unsafe { self.get_file().close() };
     }
 }
@@ -380,47 +457,26 @@ impl core::fmt::Display for FrozenFile {
     }
 }
 
-#[derive(Debug)]
-struct Core {
-    path: std::path::PathBuf,
-    file: core::cell::UnsafeCell<core::mem::ManuallyDrop<TFile>>,
-}
-
-unsafe impl Send for Core {}
-unsafe impl Sync for Core {}
-
-impl Core {
-    fn new(file: TFile, path: &std::path::Path) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            file: core::cell::UnsafeCell::new(core::mem::ManuallyDrop::new(file)),
-        }
-    }
-
-    #[inline]
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn sync(&self) -> FrozenRes<()> {
-        unsafe { (&*self.file.get()).sync() }
-    }
-
-    #[inline]
-    #[cfg(any(target_os = "linux"))]
-    fn sync_range(&self, offset: usize, len: usize) -> FrozenRes<()> {
-        unsafe { (&*self.file.get()).sync_range(offset, len) }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::TEST_MID;
-    use std::path::PathBuf;
+    use std::sync::Arc;
 
-    fn tmp_path() -> (tempfile::TempDir, PathBuf) {
+    const CHUNK_SIZE: usize = 0x10;
+    const INIT_CHUNKS: usize = 0x0A;
+
+    fn tmp_path() -> (tempfile::TempDir, FFCfg) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tmp_frozen_file");
+        let path = dir.path().join("tmp_ff_file");
+        let cfg = FFCfg {
+            path: path,
+            mid: TEST_MID,
+            chunk_size: CHUNK_SIZE,
+            initial_chunk_amount: INIT_CHUNKS,
+        };
 
-        (dir, path)
+        (dir, cfg)
     }
 
     mod ff_lifecycle {
@@ -428,75 +484,80 @@ mod tests {
 
         #[test]
         fn ok_new_with_init_len() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x1000, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
 
-            assert!(path.exists());
-            assert_eq!(file.length().unwrap(), 0x1000);
+            let exists = file.exists().unwrap();
+            assert!(exists);
+
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
         }
 
         #[test]
         fn ok_new_existing() {
-            let (_dir, path) = tmp_path();
+            let (_dir, cfg) = tmp_path();
 
-            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-            assert_eq!(file.length().unwrap(), 0x200);
+            let file = FrozenFile::new(cfg.clone()).unwrap();
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
 
             // must be dropped to release the exclusive lock
             drop(file);
 
-            let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-            assert_eq!(reopened.length().unwrap(), 0x200);
+            let reopened = FrozenFile::new(cfg.clone()).unwrap();
+            assert_eq!(reopened.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
         }
 
         #[test]
         fn err_new_when_file_smaller_than_init_len() {
-            let (_dir, path) = tmp_path();
+            let (_dir, mut cfg) = tmp_path();
 
-            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-            assert_eq!(file.length().unwrap(), 0x200);
-
+            let file = FrozenFile::new(cfg.clone()).unwrap();
             drop(file);
 
-            let err = FrozenFile::new(&path, 0x400, TEST_MID).unwrap_err();
+            // updated cfg
+            cfg.chunk_size = cfg.chunk_size * 2;
+
+            let err = FrozenFile::new(cfg).unwrap_err();
             assert!(err.cmp(FFileErrRes::Cpt as u16));
         }
 
         #[test]
         fn ok_exists_true_when_exists() {
-            let (_dir, path) = tmp_path();
-            let _ = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
 
-            let exists = FrozenFile::exists(&path).unwrap();
+            let exists = file.exists().unwrap();
             assert!(exists);
         }
 
         #[test]
         fn ok_exists_false_when_missing() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
             file.delete().unwrap();
 
-            let exists = FrozenFile::exists(&path).unwrap();
+            let exists = file.exists().unwrap();
             assert!(!exists);
         }
 
         #[test]
         fn ok_delete_file() {
-            let (_dir, path) = tmp_path();
+            let (_dir, cfg) = tmp_path();
 
-            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
-            assert!(path.exists());
+            let file = FrozenFile::new(cfg).unwrap();
+            let exists = file.exists().unwrap();
+            assert!(exists);
 
             file.delete().unwrap();
-            assert!(!path.exists());
+            let exists = file.exists().unwrap();
+            assert!(!exists);
         }
 
         #[test]
         fn err_delete_after_delete() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
 
+            let file = FrozenFile::new(cfg).unwrap();
             file.delete().unwrap();
 
             let err = file.delete().unwrap_err();
@@ -505,11 +566,11 @@ mod tests {
 
         #[test]
         fn ok_drop_persists_without_explicit_sync() {
-            let (_dir, path) = tmp_path();
+            let data = [0x0Bu8; CHUNK_SIZE];
+            let (_dir, cfg) = tmp_path();
 
             {
-                let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-                let data = b"persist";
+                let file = FrozenFile::new(cfg.clone()).unwrap();
                 let iov = libc::iovec {
                     iov_base: data.as_ptr() as *mut _,
                     iov_len: data.len(),
@@ -519,15 +580,15 @@ mod tests {
             }
 
             {
-                let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-                let mut buf = vec![0u8; 7];
+                let reopened = FrozenFile::new(cfg).unwrap();
+                let mut buf = [0u8; CHUNK_SIZE];
                 let mut iov = libc::iovec {
                     iov_base: buf.as_mut_ptr() as *mut _,
                     iov_len: buf.len(),
                 };
 
                 reopened.read(&mut iov, 0).unwrap();
-                assert_eq!(&buf, b"persist");
+                assert_eq!(buf, data);
             }
         }
     }
@@ -537,10 +598,10 @@ mod tests {
 
         #[test]
         fn err_new_when_already_open() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg.clone()).unwrap();
 
-            let err = FrozenFile::new(&path, 0x200, TEST_MID).unwrap_err();
+            let err = FrozenFile::new(cfg).unwrap_err();
             assert!(err.cmp(FFileErrRes::Lck as u16));
 
             drop(file);
@@ -548,14 +609,12 @@ mod tests {
 
         #[test]
         fn ok_drop_releases_exclusive_lock() {
-            let (_dir, path) = tmp_path();
+            let (_dir, cfg) = tmp_path();
 
-            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-            assert_eq!(file.length().unwrap(), 0x200);
+            let file = FrozenFile::new(cfg.clone()).unwrap();
             drop(file);
 
-            let reopened = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-            assert_eq!(reopened.length().unwrap(), 0x200);
+            let _ = FrozenFile::new(cfg).expect("must not fail after drop");
         }
     }
 
@@ -564,19 +623,19 @@ mod tests {
 
         #[test]
         fn ok_grow_updates_length() {
-            let (_dir, path) = tmp_path();
+            let (_dir, cfg) = tmp_path();
 
-            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
-            assert_eq!(file.length().unwrap(), 0x100);
+            let file = FrozenFile::new(cfg).unwrap();
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
 
-            file.grow(0x100).unwrap();
-            assert_eq!(file.length().unwrap(), 0x200);
+            file.grow(0x20).unwrap();
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + 0x20));
         }
 
         #[test]
         fn ok_grow_sync_cycle() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
 
             for _ in 0..0x0A {
                 file.grow(0x100).unwrap();
@@ -590,8 +649,8 @@ mod tests {
 
         #[test]
         fn ok_sync_after_sync() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
 
             file.sync().unwrap();
             file.sync().unwrap();
@@ -600,8 +659,8 @@ mod tests {
 
         #[test]
         fn err_sync_after_delete() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
             file.delete().unwrap();
 
             let err = file.sync().unwrap_err();
@@ -614,34 +673,34 @@ mod tests {
 
         #[test]
         fn ok_single_write_read_cycle() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x400, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
 
-            let data = b"grave";
+            let data = [0x0Bu8; CHUNK_SIZE];
             let iov = libc::iovec {
                 iov_base: data.as_ptr() as *mut _,
                 iov_len: data.len(),
             };
 
-            file.write(&iov, 0x80).unwrap();
+            file.write(&iov, 4).unwrap();
             file.sync().unwrap();
 
-            let mut buf = vec![0u8; data.len()];
+            let mut buf = [0u8; CHUNK_SIZE];
             let mut read_iov = libc::iovec {
                 iov_base: buf.as_mut_ptr() as *mut _,
                 iov_len: buf.len(),
             };
 
-            file.read(&mut read_iov, 0x80).unwrap();
-            assert_eq!(&buf, data);
+            file.read(&mut read_iov, 4).unwrap();
+            assert_eq!(buf, data);
         }
 
         #[test]
         fn ok_vectored_write_read_cycle() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x400, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
 
-            let mut bufs = [vec![1u8; 0x40], vec![2u8; 0x40]];
+            let mut bufs = [[1u8; CHUNK_SIZE], [2u8; CHUNK_SIZE]];
             let mut iovs: Vec<libc::iovec> = bufs
                 .iter_mut()
                 .map(|b| libc::iovec {
@@ -653,7 +712,7 @@ mod tests {
             file.pwritev(&mut iovs, 0).unwrap();
             file.sync().unwrap();
 
-            let mut read_bufs = [vec![0u8; 0x40], vec![0u8; 0x40]];
+            let mut read_bufs = [[0u8; CHUNK_SIZE], [0u8; CHUNK_SIZE]];
             let mut read_iovs: Vec<libc::iovec> = read_bufs
                 .iter_mut()
                 .map(|b| libc::iovec {
@@ -669,20 +728,21 @@ mod tests {
 
         #[test]
         fn ok_write_concurrent_non_overlapping() {
-            let (_dir, path) = tmp_path();
-            let file = Arc::new(FrozenFile::new(&path, 0x1000, TEST_MID).unwrap());
+            let (_dir, mut cfg) = tmp_path();
+            cfg.initial_chunk_amount = 0x100;
+            let file = Arc::new(FrozenFile::new(cfg).unwrap());
 
             let mut handles = vec![];
             for i in 0..0x0A {
                 let f = file.clone();
                 handles.push(std::thread::spawn(move || {
-                    let data = vec![i as u8; 0x80];
+                    let data = [i as u8; CHUNK_SIZE];
                     let iov = libc::iovec {
                         iov_base: data.as_ptr() as *mut _,
                         iov_len: data.len(),
                     };
 
-                    f.write(&iov, i * 0x80).unwrap();
+                    f.write(&iov, i).unwrap();
                 }));
             }
 
@@ -693,41 +753,42 @@ mod tests {
             file.sync().unwrap();
 
             for i in 0..0x0A {
-                let mut buf = vec![0u8; 0x80];
+                let mut buf = [0u8; CHUNK_SIZE];
                 let mut iov = libc::iovec {
                     iov_base: buf.as_mut_ptr() as *mut _,
                     iov_len: buf.len(),
                 };
 
-                file.read(&mut iov, i * 0x80).unwrap();
+                file.read(&mut iov, i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
         }
 
         #[test]
         fn ok_concurrent_grow_and_write() {
-            let (_dir, path) = tmp_path();
-            let file = Arc::new(FrozenFile::new(&path, 0x400, TEST_MID).unwrap());
+            let (_dir, cfg) = tmp_path();
+            let file = Arc::new(FrozenFile::new(cfg).unwrap());
 
             let writer = {
                 let f = file.clone();
                 std::thread::spawn(move || {
-                    for i in 0..0x0Ausize {
-                        let data = vec![i as u8; 0x40];
+                    for i in 0..INIT_CHUNKS {
+                        let data = [i as u8; CHUNK_SIZE];
                         let iov = libc::iovec {
                             iov_base: data.as_ptr() as *mut _,
                             iov_len: data.len(),
                         };
 
-                        f.write(&iov, i * 0x40).unwrap();
+                        f.write(&iov, i).unwrap();
                     }
                 })
             };
 
+            let chunks_to_grow = 0x20;
             let grower = {
                 let f = file.clone();
                 std::thread::spawn(move || {
-                    f.grow(0x400).unwrap();
+                    f.grow(chunks_to_grow).unwrap();
                 })
             };
 
@@ -735,36 +796,36 @@ mod tests {
             grower.join().unwrap();
 
             file.sync().unwrap();
-            assert_eq!(file.length().unwrap(), 0x800);
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + chunks_to_grow));
 
-            for i in 0..0x0Ausize {
-                let mut buf = vec![0u8; 0x40];
+            for i in 0..INIT_CHUNKS {
+                let mut buf = [0u8; CHUNK_SIZE];
                 let mut iov = libc::iovec {
                     iov_base: buf.as_mut_ptr() as *mut _,
                     iov_len: buf.len(),
                 };
 
-                file.read(&mut iov, i * 0x40).unwrap();
+                file.read(&mut iov, i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
         }
 
         #[test]
         fn ok_concurrent_sync_and_write() {
-            let (_dir, path) = tmp_path();
-            let file = Arc::new(FrozenFile::new(&path, 0x800, TEST_MID).unwrap());
+            let (_dir, cfg) = tmp_path();
+            let file = Arc::new(FrozenFile::new(cfg).unwrap());
 
             let writer = {
                 let f = file.clone();
                 std::thread::spawn(move || {
-                    for i in 0..16usize {
-                        let data = vec![i as u8; 0x40];
+                    for i in 0..INIT_CHUNKS {
+                        let data = [i as u8; CHUNK_SIZE];
                         let iov = libc::iovec {
                             iov_base: data.as_ptr() as *mut _,
                             iov_len: data.len(),
                         };
 
-                        f.write(&iov, i * 0x40).unwrap();
+                        f.write(&iov, i).unwrap();
                     }
                 })
             };
@@ -772,7 +833,7 @@ mod tests {
             let syncer = {
                 let f = file.clone();
                 std::thread::spawn(move || {
-                    for _ in 0..0x10 {
+                    for _ in 0..0x0A {
                         f.sync().unwrap();
                     }
                 })
@@ -783,48 +844,30 @@ mod tests {
 
             file.sync().unwrap();
 
-            for i in 0..0x10usize {
-                let mut buf = vec![0u8; 0x40];
+            for i in 0..INIT_CHUNKS {
+                let mut buf = [0; CHUNK_SIZE];
                 let mut iov = libc::iovec {
                     iov_base: buf.as_mut_ptr() as *mut _,
                     iov_len: buf.len(),
                 };
 
-                file.read(&mut iov, i * 0x40).unwrap();
+                file.read(&mut iov, i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
         }
 
         #[test]
-        fn ok_write_does_not_chang_length() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x200, TEST_MID).unwrap();
-
-            let initial_len = file.length().unwrap();
-            assert_eq!(initial_len, 0x200);
-
-            let data = [1u8; 0x40];
-            let iov = libc::iovec {
-                iov_base: data.as_ptr() as *mut _,
-                iov_len: data.len(),
-            };
-
-            file.write(&iov, 0x80).unwrap();
-            assert_eq!(file.length().unwrap(), initial_len);
-        }
-
-        #[test]
         fn err_read_hcf_for_eof() {
-            let (_dir, path) = tmp_path();
-            let file = FrozenFile::new(&path, 0x100, TEST_MID).unwrap();
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
 
-            let mut buf = vec![0u8; 0x20];
+            let mut buf = [0; CHUNK_SIZE];
             let mut iov = libc::iovec {
                 iov_base: buf.as_mut_ptr() as *mut _,
                 iov_len: buf.len(),
             };
 
-            // offset >= length
+            // index > curr_chunks
             let err = file.read(&mut iov, 0x100).unwrap_err();
             assert!(err.cmp(FFileErrRes::Hcf as u16));
         }

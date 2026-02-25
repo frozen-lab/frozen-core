@@ -71,16 +71,21 @@ frozen-core = { version = "0.0.6", default-features = false, features = ["fmmap"
 
 Read the example below for usage details,
 
- ```rs
- use frozen_core::ffile::FrozenFile;
+```rs
+use frozen_core::ffile::{FrozenFile, FFCfg};
 
- const MID: u8 = 0;
+let dir = tempfile::tempdir().unwrap();
+let path = dir.path().join("tmp_frozen_file");
 
- let dir = tempfile::tempdir().unwrap();
- let path = dir.path().join("tmp_frozen_file");
+let cfg = FFCfg {
+    mid: 0x00,
+    chunk_size: 0x10,
+    path: path.to_path_buf(),
+    initial_chunk_amount: 0x0A,
+};
 
- let file = FrozenFile::new(&path, 0x1000, MID).unwrap();
- assert_eq!(file.length(), 0x1000);
+let file = FrozenFile::new(cfg).unwrap();
+assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
 ```
 
 ## FrozenErr
