@@ -1,4 +1,4 @@
-name: Tests
+name: Unit Tests
 
 on:
   workflow_dispatch:
@@ -9,7 +9,6 @@ on:
 
 jobs:
   lints:
-    name: Lints
     env:
       RUSTFLAGS: "-D warnings"
     strategy:
@@ -45,9 +44,10 @@ jobs:
       - name: Cargo check (examples)
         run: cargo check --examples
   
-  linux-tests:
-    name: Linux Tests
+  linux:
     needs: lints
+    env:
+      RUSTFLAGS: "-D warnings"    
     strategy:
       fail-fast: false
       matrix:
@@ -71,50 +71,19 @@ jobs:
           key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
       - run: cargo test --release -- --nocapture
 
-  linux-examples:
-    name: Linux Examples
-    needs:
-      - lints
-      - linux-tests
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            arch: x86_64
-          - os: ubuntu-22.04
-            arch: x86_64
-          - os: ubuntu-24.04-arm
-            arch: aarch64
-          - os: ubuntu-22.04-arm
-            arch: aarch64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
-          cache-on-failure: true
-
-      - name: FrozenFile
+      - name: Example (FF)
         run: |
           cargo run --release --example ff w
           cargo run --release --example ff r
           
-      - name: FrozenMMap
+      - name: Example (FM)
         run: |
           cargo run --release --example fm
 
-  macos-tests:
-    name: MacOS Tests
+  macos:
     needs: lints
+    env:
+      RUSTFLAGS: "-D warnings"    
     strategy:
       fail-fast: false
       matrix:
@@ -136,41 +105,11 @@ jobs:
           key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
       - run: cargo test --release -- --nocapture
 
-  macos-examples:
-    name: MacOS Examples
-    needs:
-      - lints
-      - macos-tests
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            arch: x86_64
-          - os: macos-14
-            arch: aarch64
-          - os: macos-latest
-            arch: aarch64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
-          cache-on-failure: true
-
-      - name: FrozenFile
+      - name: Example (FF)
         run: |
           cargo run --release --example ff w
           cargo run --release --example ff r
           
-      - name: FrozenMMap
+      - name: Example (FM)
         run: |
           cargo run --release --example fm
