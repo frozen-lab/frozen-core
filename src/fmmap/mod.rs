@@ -89,19 +89,21 @@ pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(res: FMMapErrRes, erro
 #[derive(Debug)]
 pub struct FrozenMMap<T>
 where
-    T: Clone + Sized + Send + Sync,
+    T: Sized + Send + Sync,
 {
     core: sync::Arc<Core>,
     _type: core::marker::PhantomData<T>,
 }
 
-unsafe impl<T> Send for FrozenMMap<T> where T: Clone + Sized + Send + Sync {}
-unsafe impl<T> Sync for FrozenMMap<T> where T: Clone + Sized + Send + Sync {}
+unsafe impl<T> Send for FrozenMMap<T> where T: Sized + Send + Sync {}
+unsafe impl<T> Sync for FrozenMMap<T> where T: Sized + Send + Sync {}
 
 impl<T> FrozenMMap<T>
 where
-    T: Clone + Sized + Send + Sync,
+    T: Sized + Send + Sync,
 {
+    const SLOT_SIZE: usize = std::mem::size_of::<Slot<T>>();
+
     /// Read current length of [`FrozenMMap`]
     #[inline]
     pub fn length(&self) -> usize {
@@ -159,50 +161,46 @@ where
 
     /// Get's a read only typed pointer for `T`
     #[inline]
-    pub fn read<R>(&self, offset: usize, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
-        let guard = self.core.acquire_guard()?;
-        let ptr = unsafe { self.get_mmap().get(offset) };
-        let res = unsafe { f(&*ptr) };
+    pub fn read<R>(&self, index: usize, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
+        let offset = Self::SLOT_SIZE * index;
+        let _guard = self.core.grow_lock.read().unwrap();
 
-        drop(guard);
+        let slot = unsafe { &*self.get_mmap().get::<T>(offset) };
+
+        slot.lock();
+        let res = unsafe { f(slot.get()) };
+        slot.unlock();
+
         Ok(res)
     }
 
     /// Get's a mutable typed pointer for `T`
     #[inline]
-    pub fn write<R>(&self, offset: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
-        let guard = self.core.acquire_guard()?;
-        let mut val = unsafe { self.get_mmap().get_mut::<T>(offset).read() };
-        let res = f(&mut val);
+    pub fn write<R>(&self, index: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
+        let offset = Self::SLOT_SIZE * index;
+        let _guard = self.core.grow_lock.read().unwrap();
+
+        let slot = unsafe { &*self.get_mmap().get::<T>(offset) };
+
+        slot.lock();
+        let res = unsafe { f(slot.get_mut()) };
+        slot.unlock();
 
         let epoch = self.core.write_epoch.fetch_add(1, atomic::Ordering::AcqRel) + 1;
         self.core.dirty.store(true, atomic::Ordering::Release);
 
-        drop(guard);
         Ok((res, epoch))
     }
 
-    /// grow [`FrozenMMap`] by given `len_to_add`, by growing underlying [`FrozenFile`]
-    /// and re-mapping on the grown region
-    pub fn grow(&self, len_to_add: usize) -> FrozenRes<()> {
+    /// Grow [`FrozenMMap`] by given `count` of `T`
+    ///
+    /// We first grow underlying [`FrozenFile`] and then re-mmap including the grown region
+    pub fn grow(&self, count: usize) -> FrozenRes<()> {
         let core = &self.core;
-
-        // WARN: we must always acquire the mutext before starting grow
-        let mut guard = match core.lock.lock() {
-            Ok(g) => g,
-            Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
-        };
+        let len_to_add = count * Self::SLOT_SIZE;
 
         // pause all ops
         core.growing.store(true, atomic::Ordering::Release);
-
-        // we must wait until all [`ActiveGuard`] instances are dropped
-        while core.active.load(atomic::Ordering::Acquire) != 0 {
-            guard = match core.shutdown_cv.wait(guard) {
-                Ok(g) => g,
-                Err(e) => return new_err(FMMapErrRes::Txe, e.to_string().as_bytes().to_vec()),
-            };
-        }
 
         // swap dirty flag and manual sync to avoid any kind of data loss before unmap
         if core.dirty.swap(false, atomic::Ordering::AcqRel) {
@@ -228,7 +226,6 @@ where
         core.growing.store(false, atomic::Ordering::Release);
 
         core.shutdown_cv.notify_all();
-        drop(guard);
 
         Ok(())
     }
@@ -247,7 +244,7 @@ where
 
 impl<T> Drop for FrozenMMap<T>
 where
-    T: Clone + Sized + Send + Sync,
+    T: Sized + Send + Sync,
 {
     fn drop(&mut self) {
         // close flusher thread
@@ -256,18 +253,6 @@ where
         // sync if dirty
         if self.core.dirty.swap(false, atomic::Ordering::AcqRel) {
             let _ = self.core.sync();
-        }
-
-        let mut guard = match self.core.lock.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-
-        while self.core.active.load(atomic::Ordering::Acquire) != 0 {
-            guard = match self.core.shutdown_cv.wait(guard) {
-                Ok(g) => g,
-                Err(_) => return,
-            }
         }
 
         // free up the boxed error (if any)
@@ -284,7 +269,7 @@ where
 
 impl<T> fmt::Display for FrozenMMap<T>
 where
-    T: Clone + Sized + Send + Sync,
+    T: Sized + Send + Sync,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "FrozenMMap{{fd: {}, len: {}}}", self.core.ffile.fd(), self.length())
@@ -297,10 +282,10 @@ struct Core {
     ffile: FrozenFile,
     lock: sync::Mutex<()>,
     dirty: atomic::AtomicBool,
-    active: atomic::AtomicU64,
     durable_cv: sync::Condvar,
     shutdown_cv: sync::Condvar,
     growing: atomic::AtomicBool,
+    grow_lock: sync::RwLock<()>,
     durable_lock: sync::Mutex<()>,
     write_epoch: atomic::AtomicU64,
     flush_duration: time::Duration,
@@ -321,8 +306,8 @@ impl Core {
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
             durable_cv: sync::Condvar::new(),
+            grow_lock: sync::RwLock::new(()),
             shutdown_cv: sync::Condvar::new(),
-            active: atomic::AtomicU64::new(0),
             durable_lock: sync::Mutex::new(()),
             dirty: atomic::AtomicBool::new(false),
             write_epoch: atomic::AtomicU64::new(0),
@@ -376,41 +361,6 @@ impl Core {
                 drop(Box::from_raw(old));
             }
         }
-    }
-
-    #[inline]
-    fn acquire_guard(&self) -> FrozenRes<ActiveGuard<'_>> {
-        // NOTE: this is fast path and will hold true in most of the calls, as `grow` is rare
-        if hints::likely(!self.growing.load(atomic::Ordering::Acquire)) {
-            self.active.fetch_add(1, atomic::Ordering::AcqRel);
-
-            // NOTE: we recheck after increment to tackle close races
-            if hints::likely(!self.growing.load(atomic::Ordering::Acquire)) {
-                return Ok(ActiveGuard { core: self });
-            }
-
-            // must track back as grow started between check and increment
-            self.active.fetch_sub(1, atomic::Ordering::Release);
-        }
-
-        // INFO: this is the slow path, and here we wait on `shutdown_cv` till grow is completed
-
-        let mut guard = match self.lock.lock() {
-            Ok(g) => g,
-            Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
-        };
-
-        while self.growing.load(atomic::Ordering::Acquire) {
-            guard = match self.shutdown_cv.wait(guard) {
-                Ok(g) => g,
-                Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
-            };
-        }
-
-        self.active.fetch_add(1, atomic::Ordering::AcqRel);
-        drop(guard);
-
-        Ok(ActiveGuard { core: self })
     }
 
     fn spawn_tx(core: sync::Arc<Self>) -> FrozenRes<()> {
@@ -525,18 +475,56 @@ impl Core {
     }
 }
 
-#[derive(Debug)]
-struct ActiveGuard<'a> {
-    core: &'a Core,
+#[repr(C, align(0x40))]
+pub(in crate::fmmap) struct Slot<T>
+where
+    T: Sized + Send + Sync,
+{
+    lock: atomic::AtomicU8,
+    value: cell::UnsafeCell<T>,
 }
 
-impl Drop for ActiveGuard<'_> {
-    fn drop(&mut self) {
-        if self.core.active.fetch_sub(1, atomic::Ordering::Release) == 1 {
-            // last user
-            if let Ok(_g) = self.core.lock.lock() {
-                self.core.shutdown_cv.notify_one();
+impl<T> Slot<T>
+where
+    T: Sized + Send + Sync,
+{
+    const MAX_SPINS: usize = 0x10;
+
+    #[inline]
+    fn lock(&self) {
+        let mut spins = 0;
+
+        loop {
+            if self
+                .lock
+                .compare_exchange_weak(0, 1, atomic::Ordering::Acquire, atomic::Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
             }
+
+            if hints::likely(spins < Self::MAX_SPINS) {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+
+            spins += 1;
         }
+    }
+
+    #[inline]
+    fn unlock(&self) {
+        self.lock.store(0, atomic::Ordering::Release);
+    }
+
+    #[inline]
+    unsafe fn get(&self) -> &T {
+        &*self.value.get()
+    }
+
+    #[inline]
+    unsafe fn get_mut(&self) -> &mut T {
+        &mut *self.value.get()
     }
 }

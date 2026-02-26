@@ -1,4 +1,4 @@
-use super::{new_err, FMMapErrRes};
+use super::{new_err, FMMapErrRes, Slot};
 use crate::{error::FrozenRes, hints};
 use core::{ffi::CStr, ptr, sync::atomic};
 use libc::{
@@ -65,14 +65,20 @@ impl POSIXMMap {
 
     /// Get an immutable typed pointer to `T` at given `offset`
     #[inline]
-    pub(super) unsafe fn get<T>(&self, offset: usize) -> *const T {
-        self.ptr.add(offset) as *const T
+    pub(super) unsafe fn get<T>(&self, offset: usize) -> *const Slot<T>
+    where
+        T: Sized + Send + Sync,
+    {
+        self.ptr.add(offset) as *const Slot<T>
     }
 
     /// Get a mutable (read/write) typed pointer to `T` at given `offset`
     #[inline]
-    pub(super) unsafe fn get_mut<T>(&self, offset: usize) -> *mut T {
-        self.ptr.add(offset) as *mut T
+    pub(super) unsafe fn get_mut<T>(&self, offset: usize) -> *mut Slot<T>
+    where
+        T: Sized + Send + Sync,
+    {
+        self.ptr.add(offset) as *mut Slot<T>
     }
 }
 
