@@ -5,7 +5,7 @@ mod posix;
 
 use crate::{
     error::{FrozenErr, FrozenRes},
-    ffile::FrozenFile,
+    ffile::{FFCfg, FrozenFile},
     hints,
 };
 use std::{
@@ -20,19 +20,11 @@ type TEpoch = u64;
 /// Domain Id for [`FrozenMMap`] is **18**
 const ERRDOMAIN: u8 = 0x12;
 
-/// default flush duration for [`FMCfg`]
-const FLUSH_DURATION: time::Duration = time::Duration::from_millis(250);
-
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 type TMap = posix::POSIXMMap;
 
 /// module id used for [`FrozenErr`]
-static MID: atomic::AtomicU8 = atomic::AtomicU8::new(0);
-
-#[inline]
-pub(in crate::fmmap) fn mid() -> u8 {
-    MID.load(atomic::Ordering::Relaxed)
-}
+static mut MODULE_ID: u8 = 0;
 
 /// Error codes for [`FrozenFile`]
 #[repr(u16)]
@@ -77,91 +69,86 @@ impl FMMapErrRes {
 #[inline]
 pub(in crate::fmmap) fn new_err<R>(res: FMMapErrRes, message: Vec<u8>) -> FrozenRes<R> {
     let detail = res.default_message();
-    let err = FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, message);
+    let err = FrozenErr::new(unsafe { MODULE_ID }, ERRDOMAIN, res as u16, detail, message);
     Err(err)
 }
 
-/// Config for [`FrozenMMap`]
-#[derive(Debug, Clone)]
-pub struct FMCfg {
-    /// module id for [`FrozenMMap`]
-    ///
-    /// This id is used for error codes
-    ///
-    /// ## Why
-    ///
-    /// It enables for easier identification of error boundries when multiple [`FrozenMMap`]
-    /// modules are present in the codebase
-    pub module_id: u8,
-
-    /// time interval for sync to flush dirty pages
-    pub flush_duration: time::Duration,
-}
-
-impl FMCfg {
-    /// Create a new instance of [`FMCfg`] w/ specified `module_id`
-    pub const fn new(module_id: u8) -> Self {
-        Self {
-            module_id,
-            flush_duration: FLUSH_DURATION,
-        }
-    }
-
-    /// Set the interval for sync in [`FrozenMMap`]
-    pub const fn flush_duration(mut self, interval: time::Duration) -> Self {
-        self.flush_duration = interval;
-        self
-    }
+#[inline]
+pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(res: FMMapErrRes, error: E) -> FrozenErr {
+    let detail = res.default_message();
+    FrozenErr::new(
+        unsafe { MODULE_ID },
+        ERRDOMAIN,
+        res as u16,
+        detail,
+        error.to_string().as_bytes().to_vec(),
+    )
 }
 
 /// Custom implementation of MemMap
 #[derive(Debug)]
-pub struct FrozenMMap(sync::Arc<Core>);
+pub struct FrozenMMap<T>
+where
+    T: Clone + Sized + Send + Sync,
+{
+    core: sync::Arc<Core>,
+    _type: core::marker::PhantomData<T>,
+}
 
-unsafe impl Send for FrozenMMap {}
-unsafe impl Sync for FrozenMMap {}
+unsafe impl<T> Send for FrozenMMap<T> where T: Clone + Sized + Send + Sync {}
+unsafe impl<T> Sync for FrozenMMap<T> where T: Clone + Sized + Send + Sync {}
 
-impl FrozenMMap {
+impl<T> FrozenMMap<T>
+where
+    T: Clone + Sized + Send + Sync,
+{
     /// Read current length of [`FrozenMMap`]
     #[inline]
-    pub fn length(&self) -> FrozenRes<usize> {
-        self.0.ffile.length()
+    pub fn length(&self) -> usize {
+        self.core.curr_length()
     }
 
-    /// Create a new [`FrozenMMap`] for given `fd` w/ read & write permissions
-    pub fn new(file: FrozenFile, cfg: FMCfg) -> FrozenRes<Self> {
-        MID.store(cfg.module_id, atomic::Ordering::Relaxed);
+    /// Create a new [`FrozenMMap`] for given `fd` w/ read/write perm
+    pub fn new(cfg: FFCfg, flush_duration: time::Duration) -> FrozenRes<Self> {
+        // NOTE: we only set it once, as once after an exclusive lock for the entire file is
+        // acquired, hence it'll be only set once per instance and is only used for error logging
+        unsafe { MODULE_ID = cfg.mid };
 
-        let mmap = unsafe { posix::POSIXMMap::new(file.fd(), file.length()?) }?;
-        let core = sync::Arc::new(Core::new(mmap, cfg.clone(), file));
+        let file = FrozenFile::new(cfg)?;
+        let curr_length = file.length()?;
+
+        let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
+        let core = sync::Arc::new(Core::new(mmap, file, flush_duration, curr_length));
 
         // INFO: we spawn the thread for background sync
         Core::spawn_tx(core.clone())?;
-
-        Ok(Self(core))
+        Ok(Self {
+            core,
+            _type: core::marker::PhantomData,
+        })
     }
 
     /// Returns the [`FrozenErr`] representing the last error occurred in [`FrozenMMap`]
     #[inline]
-    pub fn last_error(&self) -> Option<&FrozenErr> {
-        self.0.get_sync_error()
+    pub fn last_error(&self) -> Option<FrozenErr> {
+        self.core.get_sync_error()
     }
 
     /// Wait for durability for the given write `epoch`
     ///
     /// This functions blocks until epoch becomes durable
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
-        if self.0.durable_epoch.load(atomic::Ordering::Acquire) >= epoch {
+        if self.core.durable_epoch.load(atomic::Ordering::Acquire) >= epoch {
             return Ok(());
         }
 
-        let mut guard = match self.0.durable_lock.lock() {
+        let mut guard = match self.core.durable_lock.lock() {
             Ok(g) => g,
             Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
         };
 
-        while self.0.durable_epoch.load(atomic::Ordering::Acquire) < epoch {
-            guard = match self.0.durable_cv.wait(guard) {
+        while self.core.durable_epoch.load(atomic::Ordering::Acquire) < epoch {
+            guard = match self.core.durable_cv.wait(guard) {
                 Ok(g) => g,
                 Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
             }
@@ -172,9 +159,8 @@ impl FrozenMMap {
 
     /// Get's a read only typed pointer for `T`
     #[inline]
-    pub fn with_read<T, R>(&self, offset: usize, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
-        let guard = self.acquire_guard()?;
-
+    pub fn read<R>(&self, offset: usize, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
+        let guard = self.core.acquire_guard()?;
         let ptr = unsafe { self.get_mmap().get(offset) };
         let res = unsafe { f(&*ptr) };
 
@@ -184,52 +170,22 @@ impl FrozenMMap {
 
     /// Get's a mutable typed pointer for `T`
     #[inline]
-    pub fn with_write<T, R>(&self, offset: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
-        let guard = self.acquire_guard()?;
+    pub fn write<R>(&self, offset: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
+        let guard = self.core.acquire_guard()?;
+        let mut val = unsafe { self.get_mmap().get_mut::<T>(offset).read() };
+        let res = f(&mut val);
 
-        let ptr = unsafe { self.get_mmap().get_mut(offset) };
-        let res = unsafe { f(&mut *ptr) };
-        let epoch = self.0.write_epoch.fetch_add(1, atomic::Ordering::AcqRel) + 1;
-
-        self.0.dirty.store(true, atomic::Ordering::Release);
+        let epoch = self.core.write_epoch.fetch_add(1, atomic::Ordering::AcqRel) + 1;
+        self.core.dirty.store(true, atomic::Ordering::Release);
 
         drop(guard);
         Ok((res, epoch))
     }
 
-    /// Get a [`FMReader`] object for `T` at given `offset`
-    ///
-    /// **NOTE**: `offset` must be 8 bytes aligned
-    #[inline]
-    pub fn reader<T>(&self, offset: usize) -> FrozenRes<FMReader<'_, T>> {
-        let guard = self.acquire_guard()?;
-        let reader = FMReader {
-            ptr: unsafe { self.get_mmap().get(offset) },
-            _guard: guard,
-        };
-
-        Ok(reader)
-    }
-
-    /// Get a [`FMWriter`] object for `T` at given `offset`
-    ///
-    /// **NOTE**: `offset` must be 8 bytes aligned
-    #[inline]
-    pub fn writer<'a, T>(&'a self, offset: usize) -> FrozenRes<FMWriter<'a, T>> {
-        let guard = self.acquire_guard()?;
-        let writer = FMWriter {
-            map: self,
-            ptr: unsafe { self.get_mmap().get_mut(offset) },
-            _guard: guard,
-        };
-
-        Ok(writer)
-    }
-
     /// grow [`FrozenMMap`] by given `len_to_add`, by growing underlying [`FrozenFile`]
     /// and re-mapping on the grown region
     pub fn grow(&self, len_to_add: usize) -> FrozenRes<()> {
-        let core = &self.0;
+        let core = &self.core;
 
         // WARN: we must always acquire the mutext before starting grow
         let mut guard = match core.lock.lock() {
@@ -259,8 +215,12 @@ impl FrozenMMap {
         }
 
         core.ffile.grow(len_to_add)?;
+
+        let new_len = core.ffile.length()?;
+        core.curr_length.store(new_len, atomic::Ordering::Release);
+
         unsafe {
-            let new_map = posix::POSIXMMap::new(core.ffile.fd(), core.ffile.length()?)?;
+            let new_map = TMap::new(core.ffile.fd(), new_len)?;
             *core.mmap.get() = mem::ManuallyDrop::new(new_map);
         };
 
@@ -275,76 +235,43 @@ impl FrozenMMap {
 
     #[inline]
     fn munmap(&self) -> FrozenRes<()> {
-        unsafe { self.get_mmap().unmap(self.length()?) }
+        let length = self.length();
+        unsafe { self.get_mmap().unmap(length) }
     }
 
     #[inline]
     fn get_mmap(&self) -> &mem::ManuallyDrop<TMap> {
-        unsafe { &*self.0.mmap.get() }
-    }
-
-    #[inline]
-    fn acquire_guard(&self) -> FrozenRes<ActiveGuard<'_>> {
-        let core = &self.0;
-
-        // NOTE: this is fast path and will hold true in most of the calls, as `grow` is rare
-        if hints::likely(!core.growing.load(atomic::Ordering::Acquire)) {
-            core.active.fetch_add(1, atomic::Ordering::AcqRel);
-
-            // NOTE: we recheck after increment to tackle close races
-            if hints::likely(!core.growing.load(atomic::Ordering::Acquire)) {
-                return Ok(ActiveGuard { core });
-            }
-
-            // must track back as grow started between check and increment
-            core.active.fetch_sub(1, atomic::Ordering::Release);
-        }
-
-        // INFO: this is the slow path, and here we wait on `shutdown_cv` till grow is completed
-
-        let mut guard = match core.lock.lock() {
-            Ok(g) => g,
-            Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
-        };
-
-        while core.growing.load(atomic::Ordering::Acquire) {
-            guard = match core.shutdown_cv.wait(guard) {
-                Ok(g) => g,
-                Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
-            };
-        }
-
-        core.active.fetch_add(1, atomic::Ordering::AcqRel);
-        drop(guard);
-
-        Ok(ActiveGuard { core })
+        unsafe { &*self.core.mmap.get() }
     }
 }
 
-impl Drop for FrozenMMap {
+impl<T> Drop for FrozenMMap<T>
+where
+    T: Clone + Sized + Send + Sync,
+{
     fn drop(&mut self) {
         // close flusher thread
-        self.0.cv.notify_one();
+        self.core.cv.notify_one();
 
         // sync if dirty
-        if self.0.dirty.swap(false, atomic::Ordering::AcqRel) {
-            let _ = self.0.sync();
+        if self.core.dirty.swap(false, atomic::Ordering::AcqRel) {
+            let _ = self.core.sync();
         }
 
-        let mut guard = match self.0.lock.lock() {
+        let mut guard = match self.core.lock.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
 
-        while self.0.active.load(atomic::Ordering::Acquire) != 0 {
-            guard = match self.0.shutdown_cv.wait(guard) {
+        while self.core.active.load(atomic::Ordering::Acquire) != 0 {
+            guard = match self.core.shutdown_cv.wait(guard) {
                 Ok(g) => g,
                 Err(_) => return,
             }
         }
 
         // free up the boxed error (if any)
-        let ptr = self.0.error.load(atomic::Ordering::Acquire);
+        let ptr = self.core.error.load(atomic::Ordering::Acquire);
         if !ptr.is_null() {
             unsafe {
                 drop(Box::from_raw(ptr));
@@ -355,21 +282,17 @@ impl Drop for FrozenMMap {
     }
 }
 
-impl fmt::Display for FrozenMMap {
+impl<T> fmt::Display for FrozenMMap<T>
+where
+    T: Clone + Sized + Send + Sync,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "FrozenMMap{{len: {}, mod_id: {}, fd: {}}}",
-            self.length().unwrap_or(0),
-            self.0.cfg.module_id,
-            self.0.ffile.fd(),
-        )
+        write!(f, "FrozenMMap{{fd: {}, len: {}}}", self.core.ffile.fd(), self.length())
     }
 }
 
 #[derive(Debug)]
 struct Core {
-    cfg: FMCfg,
     cv: sync::Condvar,
     ffile: FrozenFile,
     lock: sync::Mutex<()>,
@@ -380,7 +303,9 @@ struct Core {
     growing: atomic::AtomicBool,
     durable_lock: sync::Mutex<()>,
     write_epoch: atomic::AtomicU64,
+    flush_duration: time::Duration,
     durable_epoch: atomic::AtomicU64,
+    curr_length: atomic::AtomicUsize,
     error: atomic::AtomicPtr<FrozenErr>,
     mmap: cell::UnsafeCell<mem::ManuallyDrop<TMap>>,
 }
@@ -389,10 +314,10 @@ unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
 impl Core {
-    fn new(mmap: TMap, cfg: FMCfg, ffile: FrozenFile) -> Self {
+    fn new(mmap: TMap, ffile: FrozenFile, flush_duration: time::Duration, curr_length: usize) -> Self {
         Self {
-            cfg,
             ffile,
+            flush_duration,
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
             durable_cv: sync::Condvar::new(),
@@ -403,21 +328,21 @@ impl Core {
             write_epoch: atomic::AtomicU64::new(0),
             growing: atomic::AtomicBool::new(false),
             durable_epoch: atomic::AtomicU64::new(0),
+            curr_length: atomic::AtomicUsize::new(curr_length),
             error: atomic::AtomicPtr::new(std::ptr::null_mut()),
             mmap: cell::UnsafeCell::new(mem::ManuallyDrop::new(mmap)),
         }
     }
 
     #[inline]
-    fn sync(&self) -> FrozenRes<()> {
-        #[cfg(target_os = "linux")]
-        unsafe {
-            let mmap = &*self.mmap.get();
-            return mmap.sync(self.ffile.length()?);
-        }
+    fn curr_length(&self) -> usize {
+        self.curr_length.load(atomic::Ordering::Acquire)
+    }
 
-        #[cfg(target_os = "macos")]
-        return self.ffile.sync();
+    #[inline]
+    fn sync(&self) -> FrozenRes<()> {
+        unsafe { (*self.mmap.get()).sync(self.curr_length()) }?;
+        self.ffile.sync()
     }
 
     #[inline]
@@ -434,14 +359,13 @@ impl Core {
     }
 
     #[inline]
-    fn get_sync_error(&self) -> Option<&FrozenErr> {
+    fn get_sync_error(&self) -> Option<FrozenErr> {
         let ptr = self.error.load(atomic::Ordering::Acquire);
-
         if hints::likely(ptr.is_null()) {
             return None;
         }
 
-        Some(unsafe { &*ptr })
+        Some(unsafe { (*ptr).clone() })
     }
 
     #[inline]
@@ -452,6 +376,41 @@ impl Core {
                 drop(Box::from_raw(old));
             }
         }
+    }
+
+    #[inline]
+    fn acquire_guard(&self) -> FrozenRes<ActiveGuard<'_>> {
+        // NOTE: this is fast path and will hold true in most of the calls, as `grow` is rare
+        if hints::likely(!self.growing.load(atomic::Ordering::Acquire)) {
+            self.active.fetch_add(1, atomic::Ordering::AcqRel);
+
+            // NOTE: we recheck after increment to tackle close races
+            if hints::likely(!self.growing.load(atomic::Ordering::Acquire)) {
+                return Ok(ActiveGuard { core: self });
+            }
+
+            // must track back as grow started between check and increment
+            self.active.fetch_sub(1, atomic::Ordering::Release);
+        }
+
+        // INFO: this is the slow path, and here we wait on `shutdown_cv` till grow is completed
+
+        let mut guard = match self.lock.lock() {
+            Ok(g) => g,
+            Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
+        };
+
+        while self.growing.load(atomic::Ordering::Acquire) {
+            guard = match self.shutdown_cv.wait(guard) {
+                Ok(g) => g,
+                Err(e) => return new_err(FMMapErrRes::Lpn, e.to_string().as_bytes().to_vec()),
+            };
+        }
+
+        self.active.fetch_add(1, atomic::Ordering::AcqRel);
+        drop(guard);
+
+        Ok(ActiveGuard { core: self })
     }
 
     fn spawn_tx(core: sync::Arc<Self>) -> FrozenRes<()> {
@@ -486,14 +445,16 @@ impl Core {
             }
             Err(error) => {
                 if let Err(err) = init.send(new_err(FMMapErrRes::Unk, error.to_string().as_bytes().to_vec())) {
-                    let res = FMMapErrRes::Lpn;
-                    let detail = res.default_message();
-
-                    let mut err_msg = err.to_string().as_bytes().to_vec();
-                    err_msg.extend_from_slice(b"Flush thread died before init could be completed for FrozenMMap");
-
-                    let err = FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, err_msg);
-                    core.set_sync_error(err);
+                    let mut message = err.to_string().as_bytes().to_vec();
+                    message.extend_from_slice(b"Flush thread died before init could be completed for FrozenMMap");
+                    let error = FrozenErr::new(
+                        unsafe { MODULE_ID },
+                        ERRDOMAIN,
+                        FMMapErrRes::Lpn as u16,
+                        FMMapErrRes::Lpn.default_message(),
+                        message,
+                    );
+                    core.set_sync_error(error);
                 }
                 return;
             }
@@ -504,14 +465,10 @@ impl Core {
 
         // sync loop w/ non-busy waiting
         loop {
-            guard = match core.cv.wait_timeout(guard, core.cfg.flush_duration) {
+            guard = match core.cv.wait_timeout(guard, core.flush_duration) {
                 Ok((g, _)) => g,
                 Err(e) => {
-                    let res = FMMapErrRes::Txe;
-                    let detail = res.default_message();
-
-                    let err = FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, e.to_string().as_bytes().to_vec());
-                    core.set_sync_error(err);
+                    core.set_sync_error(new_err_raw(FMMapErrRes::Txe, e));
                     return;
                 }
             };
@@ -521,12 +478,7 @@ impl Core {
                 guard = match core.shutdown_cv.wait(guard) {
                     Ok(g) => g,
                     Err(e) => {
-                        let res = FMMapErrRes::Txe;
-                        let detail = res.default_message();
-
-                        let err =
-                            FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, e.to_string().as_bytes().to_vec());
-                        core.set_sync_error(err);
+                        core.set_sync_error(new_err_raw(FMMapErrRes::Txe, e));
                         return;
                     }
                 };
@@ -550,17 +502,7 @@ impl Core {
                         let _g = match core.durable_lock.lock() {
                             Ok(g) => g,
                             Err(e) => {
-                                let res = FMMapErrRes::Lpn;
-                                let detail = res.default_message();
-
-                                let err = FrozenErr::new(
-                                    mid(),
-                                    ERRDOMAIN,
-                                    res as u16,
-                                    detail,
-                                    e.to_string().as_bytes().to_vec(),
-                                );
-                                core.set_sync_error(err);
+                                core.set_sync_error(new_err_raw(FMMapErrRes::Lpn, e));
                                 return;
                             }
                         };
@@ -574,12 +516,7 @@ impl Core {
                 guard = match core.lock.lock() {
                     Ok(g) => g,
                     Err(e) => {
-                        let res = FMMapErrRes::Lpn;
-                        let detail = res.default_message();
-
-                        let err =
-                            FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, e.to_string().as_bytes().to_vec());
-                        core.set_sync_error(err);
+                        core.set_sync_error(new_err_raw(FMMapErrRes::Lpn, e));
                         return;
                     }
                 };
@@ -601,60 +538,5 @@ impl Drop for ActiveGuard<'_> {
                 self.core.shutdown_cv.notify_one();
             }
         }
-    }
-}
-
-/// Reader object for [`FrozenMMap`]
-#[derive(Debug)]
-pub struct FMReader<'a, T> {
-    ptr: *const T,
-    _guard: ActiveGuard<'a>,
-}
-
-impl<'a, T> FMReader<'a, T> {
-    /// Get's an immutable (read only) typed pointer for `T`
-    #[inline]
-    pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        unsafe { f(&*self.ptr) }
-    }
-}
-
-/// Writer object for [`FrozenMMap`]
-#[derive(Debug)]
-pub struct FMWriter<'a, T> {
-    ptr: *mut T,
-    map: &'a FrozenMMap,
-    _guard: ActiveGuard<'a>,
-}
-
-impl<'a, T> FMWriter<'a, T> {
-    /// Get's a mutable (read & write) typed pointer for `T`
-    #[inline]
-    pub fn write<R>(&self, f: impl FnOnce(&mut T) -> R) -> (R, TEpoch) {
-        let res = unsafe { f(&mut *self.ptr) };
-        let epoch = self.map.0.write_epoch.fetch_add(1, atomic::Ordering::AcqRel) + 1;
-
-        self.map.0.dirty.store(true, atomic::Ordering::Release);
-
-        (res, epoch)
-    }
-
-    /// Get's a mutable (read & write) typed pointer for `T`
-    ///
-    /// ## NOTE
-    ///
-    /// This function notifies sync thread for sync operation right after `f()` is computed,
-    /// skipping the `[FMCfg::flush_duration]`
-    ///
-    /// Only use this for instant flush, overuse may strain the available resources
-    #[inline]
-    pub fn write_instant<R>(&self, f: impl FnOnce(&mut T) -> R) -> (R, TEpoch) {
-        let res = unsafe { f(&mut *self.ptr) };
-        let epoch = self.map.0.write_epoch.fetch_add(1, atomic::Ordering::AcqRel) + 1;
-
-        self.map.0.dirty.store(true, atomic::Ordering::Release);
-        self.map.0.cv.notify_one();
-
-        (res, epoch)
     }
 }

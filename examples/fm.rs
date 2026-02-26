@@ -1,4 +1,4 @@
-use frozen_core::{ffile, fmmap};
+use frozen_core::ffile;
 
 fn main() {
     let module_id = 0u8;
@@ -19,14 +19,14 @@ fn main() {
     let ff = ffile::FrozenFile::new(cfg).expect("new FFile");
     assert!(ff.fd() >= 0);
 
-    let fm = fmmap::FrozenMMap::new(ff, fmmap::FMCfg::new(module_id)).expect("mmap");
-    let (_, epoch) = fm.with_write::<u64, _>(0, |v| *v = 0xDEADC0DE).unwrap();
+    // let fm = fmmap::FrozenMMap::new(ff, fmmap::FMCfg::new(module_id)).expect("mmap");
+    // let (_, epoch) = fm.with_write::<u64, _>(0, |v| *v = 0xDEADC0DE).unwrap();
 
-    match fm.wait_for_durability(epoch) {
-        Ok(_) => {
-            let value = fm.with_read::<u64, u64>(0, |v| *v).unwrap();
-            assert_eq!(value, 0xDEADC0DE);
-        }
-        Err(e) => panic!("{e}"),
-    }
+    // match fm.wait_for_durability(epoch) {
+    //     Ok(_) => {
+    //         let value = fm.with_read::<u64, u64>(0, |v| *v).unwrap();
+    //         assert_eq!(value, 0xDEADC0DE);
+    //     }
+    //     Err(e) => panic!("{e}"),
+    // }
 }

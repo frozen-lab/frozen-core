@@ -62,12 +62,7 @@ type TFile = posix::POSIXFile;
 const ERRDOMAIN: u8 = 0x11;
 
 /// module id used for [`FrozenErr`]
-static MID: atomic::AtomicU8 = atomic::AtomicU8::new(0);
-
-#[inline]
-pub(in crate::ffile) fn mid() -> u8 {
-    MID.load(atomic::Ordering::Relaxed)
-}
+static mut MODULE_ID: u8 = 0;
 
 /// Error codes for [`FrozenFile`]
 #[repr(u16)]
@@ -124,14 +119,20 @@ impl FFileErrRes {
 #[inline]
 pub(in crate::ffile) fn new_err<R>(res: FFileErrRes, message: Vec<u8>) -> FrozenRes<R> {
     let detail = res.default_message();
-    let err = FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, message);
+    let err = FrozenErr::new(unsafe { MODULE_ID }, ERRDOMAIN, res as u16, detail, message);
     Err(err)
 }
 
 #[inline]
 pub(in crate::ffile) fn new_err_default<R>(res: FFileErrRes) -> FrozenRes<R> {
     let detail = res.default_message();
-    let err = FrozenErr::new(mid(), ERRDOMAIN, res as u16, detail, Vec::with_capacity(0));
+    let err = FrozenErr::new(
+        unsafe { MODULE_ID },
+        ERRDOMAIN,
+        res as u16,
+        detail,
+        Vec::with_capacity(0),
+    );
     Err(err)
 }
 
@@ -278,7 +279,7 @@ impl FrozenFile {
 
         // NOTE: we only set it once, as once after an exclusive lock for the entire file is
         // acquired, hence it'll be only set once per instance and is only used for error logging
-        MID.store(cfg.mid, atomic::Ordering::Relaxed);
+        unsafe { MODULE_ID = cfg.mid };
 
         let curr_len = slf.length()?;
         let init_len = cfg.chunk_size * cfg.initial_chunk_amount;

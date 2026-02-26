@@ -6,11 +6,10 @@ use libc::{
     MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
 };
 
-/// max allowed retries for `EINTR` errors
-#[cfg(target_os = "linux")]
-const MAX_RETRIES: usize = 0x0A / 2;
-
 type TPtr = *mut c_void;
+
+/// max allowed retries for `EINTR` errors
+const MAX_RETRIES: usize = 0x0A / 2;
 
 /// Raw implementation of Posix (linux & macos) `memmap` for [`FrozenMMap`]
 #[derive(Debug)]
@@ -36,8 +35,6 @@ impl POSIXMMap {
     ///
     /// This function is idempotent, hence it prevents unmap-on-unmap errors
     pub(super) unsafe fn unmap(&self, length: usize) -> FrozenRes<()> {
-        // NOTE: To avoid another thread/process from executing munmap, we mark unmapped before even
-        // trying to unmap, this kind of wroks like mutex, as we reassign to false on failure
         if self
             .unmapped
             .compare_exchange(false, true, atomic::Ordering::AcqRel, atomic::Ordering::Acquire)
