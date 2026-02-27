@@ -1,8 +1,8 @@
 use super::{new_err, new_err_default, FFId, FFileErrRes};
 use crate::{error::FrozenRes, hints};
 use libc::{
-    access, c_char, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite,
-    pwritev, size_t, stat, sysconf, unlink, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT,
+    access, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite, pwritev,
+    size_t, stat, strerror, sysconf, unlink, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT,
     ENOLCK, ENOSPC, ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX, LOCK_NB, O_CLOEXEC, O_CREAT,
     O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, _SC_IOV_MAX,
 };
@@ -15,12 +15,12 @@ const CLOSED_FD: FFId = FFId::MIN;
 static IOV_MAX_CACHE: OnceLock<usize> = OnceLock::new();
 
 /// max allowed retries for `EINTR` errors
-const MAX_RETRIES: usize = 0x0A / 2;
+const MAX_RETRIES: usize = 0x0A;
 
 /// max iovecs allowed for single readv/writev calls
 const MAX_IOVECS: usize = 0x200;
 
-/// Custom impl of `std::fs::File` for posix systems
+/// Custom impl of `std::fs::File` for POSIX systems
 #[derive(Debug)]
 pub(super) struct POSIXFile(atomic::AtomicI32);
 
@@ -617,18 +617,6 @@ unsafe fn fdatasync_raw(fd: FFId) -> FrozenRes<()> {
         let err_msg = err_msg(errno);
 
         match errno {
-            // IO interrupt (must retry)
-            EINTR => {
-                if retries < MAX_RETRIES {
-                    retries += 1;
-                    continue;
-                }
-
-                // NOTE: sync error indicates that retries exhausted and durability is broken
-                // in the current/last window/batch
-                return new_err(FFileErrRes::Syn, err_msg);
-            }
-
             // invalid fd or lack of support for sync
             EINVAL | EBADF => return new_err(FFileErrRes::Hcf, err_msg),
 
@@ -636,11 +624,14 @@ unsafe fn fdatasync_raw(fd: FFId) -> FrozenRes<()> {
             EROFS => return new_err(FFileErrRes::Prm, err_msg),
 
             // fatal error, i.e. no sync for writes in recent window/batch
+            EIO => return new_err(FFileErrRes::Syn, err_msg),
+
+            // IO interrupt or fatal error, i.e. no sync for writes in recent window/batch
             //
             // NOTE: this must be handled seperately, cuase, if this error occurs,
             // the storage system must act, mark recent writes as failed or notify users,
             // etc. to keep the system robust and fault tolerent!
-            EIO => {
+            EINTR => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;
@@ -1097,15 +1088,12 @@ fn last_errno() -> i32 {
 
 #[inline]
 unsafe fn err_msg(errno: i32) -> Vec<u8> {
-    const BUF_LEN: usize = 0x100;
-    let mut buf = [c_char::default(); BUF_LEN];
-
-    if libc::strerror_r(errno, buf.as_mut_ptr(), BUF_LEN) != 0 {
+    let ptr = strerror(errno);
+    if ptr.is_null() {
         return Vec::new();
     }
 
-    let cstr = CStr::from_ptr(buf.as_ptr());
-    return cstr.to_bytes().to_vec();
+    CStr::from_ptr(ptr).to_bytes().to_vec()
 }
 
 /// fetch max allowed `iovecs` per `preadv` & `pwritev` syscalls

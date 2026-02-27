@@ -49,7 +49,6 @@
 mod posix;
 
 use crate::error::{FrozenErr, FrozenRes};
-use core::{self, sync::atomic};
 
 /// file descriptor for [`FrozenFile`]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -229,12 +228,12 @@ impl FrozenFile {
         self.get_file().fd()
     }
 
-    /// check if [`FrozenFile`] exists on the fs
+    /// Check if [`FrozenFile`] exists on the fs
     pub fn exists(&self) -> FrozenRes<bool> {
         unsafe { TFile::exists(&self.cfg.path) }
     }
 
-    /// create a new or open an existing [`FrozenFile`]
+    /// Create a new or open an existing [`FrozenFile`]
     ///
     /// ## [`FFCfg`]
     ///
@@ -244,6 +243,12 @@ impl FrozenFile {
     ///
     /// The `cfg` must not change any of its properties for the entire life of [`FrozenFile`],
     /// one must use config stores like [`Rta`](https://crates.io/crates/rta) to store config
+    ///
+    /// ## Multiple Instances
+    ///
+    /// We acquire an exclusive lock for the entire file, this protects against operating with
+    /// multiple simultenious instance of [`FrozenFile`], when trying to call [`FrozenFile::new`]
+    /// when already called, [`FFileErrRes::Lck`] error will be thrown
     ///
     /// ## Example
     ///
@@ -277,7 +282,7 @@ impl FrozenFile {
         // the same file, would correctly fail, while again obtaining the lock
         unsafe { file.flock() }?;
 
-        // NOTE: we only set it once, as once after an exclusive lock for the entire file is
+        // NOTE: we only set it the module_id once, right after an exclusive lock for the entire file is
         // acquired, hence it'll be only set once per instance and is only used for error logging
         unsafe { MODULE_ID = cfg.mid };
 

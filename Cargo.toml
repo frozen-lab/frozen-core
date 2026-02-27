@@ -12,7 +12,7 @@ description = "Custom implementations and core utilities for frozen codebases"
 error = []
 hints = []
 ffile = ["libc", "error", "hints"]
-fmmap = ["libc", "error", "hints"]
+fmmap = ["libc", "error", "hints", "ffile"]
 default = ["error", "hints", "ffile", "fmmap"]
 
 [target.'cfg(unix)'.dependencies]

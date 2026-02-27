@@ -1,4 +1,4 @@
-//! Custom implementation of `memmap`
+//! Custom implementation of `mmap`
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
@@ -26,7 +26,7 @@ type TMap = posix::POSIXMMap;
 /// module id used for [`FrozenErr`]
 static mut MODULE_ID: u8 = 0;
 
-/// Error codes for [`FrozenFile`]
+/// Error codes for [`FrozenMMap`]
 #[repr(u16)]
 pub enum FMMapErrRes {
     /// (512) internal fuck up (hault and catch fire)
@@ -85,13 +85,14 @@ pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(res: FMMapErrRes, erro
     )
 }
 
-/// Custom implementation of MemMap
+/// Custom implementation of `mmap`
 #[derive(Debug)]
 pub struct FrozenMMap<T>
 where
     T: Sized + Send + Sync,
 {
     core: sync::Arc<Core>,
+    tx: Option<thread::JoinHandle<()>>,
     _type: core::marker::PhantomData<T>,
 }
 
@@ -110,23 +111,46 @@ where
         self.core.curr_length()
     }
 
-    /// Create a new [`FrozenMMap`] for given `fd` w/ read/write perm
+    /// Create a new [`FrozenMMap`] instance w/ given [`FFCfg`]
+    ///
+    /// ## [`FFCfg`]
+    ///
+    /// All configs for [`FrozenFile`] are stored in [`FFCfg`]
+    ///
+    /// ## Working
+    ///
+    /// We first create a new [`FrozenFile`] if note already, then map the entire file using `mmap(2)`,
+    /// the entire file must read/write `T`, which also should stay constant for the entire lifetime of file
+    ///
+    /// ## Important
+    ///
+    /// The `cfg` must not change any of its properties for the entire life of [`FrozenFile`],
+    /// which is used under the hood, one must use config stores like [`Rta`](https://crates.io/crates/rta)
+    /// to store config
+    ///
+    /// ## Multiple Instances
+    ///
+    /// We acquire an exclusive lock for the entire file, this protects against operating with
+    /// multiple simultenious instance of [`FrozenFile`], when trying to call [`FrozenFile::new`]
+    /// when already called, [`FFileErrRes::Lck`] error will be thrown
     pub fn new(cfg: FFCfg, flush_duration: time::Duration) -> FrozenRes<Self> {
-        // NOTE: we only set it once, as once after an exclusive lock for the entire file is
-        // acquired, hence it'll be only set once per instance and is only used for error logging
-        unsafe { MODULE_ID = cfg.mid };
-
+        let mid = cfg.mid;
         let file = FrozenFile::new(cfg)?;
         let curr_length = file.length()?;
+
+        // NOTE: we only set it the module_id once, right after an exclusive lock for the entire file is
+        // acquired, hence it'll be only set once per instance and is only used for error logging
+        unsafe { MODULE_ID = mid };
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
         let core = sync::Arc::new(Core::new(mmap, file, flush_duration, curr_length));
 
         // INFO: we spawn the thread for background sync
-        Core::spawn_tx(core.clone())?;
+        let tx = Core::spawn_tx(core.clone())?;
 
         Ok(Self {
             core,
+            tx: Some(tx),
             _type: core::marker::PhantomData,
         })
     }
@@ -170,10 +194,8 @@ where
         let _guard = self.core.acquire_io_lock()?;
 
         let slot = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
-
-        slot.lock();
+        let _oi_guard = slot.lock();
         let res = unsafe { f(slot.get()) };
-        slot.unlock();
 
         Ok(res)
     }
@@ -185,10 +207,8 @@ where
         let _guard = self.core.acquire_io_lock()?;
 
         let slot = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
-
-        slot.lock();
+        let _oi_guard = slot.lock();
         let res = unsafe { f(slot.get_mut()) };
-        slot.unlock();
 
         let epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
         self.core.dirty.store(true, atomic::Ordering::Release);
@@ -256,6 +276,10 @@ where
         // close flusher thread
         self.core.closed.store(true, atomic::Ordering::Release);
         self.core.cv.notify_one();
+
+        if let Some(handle) = self.tx.take() {
+            handle.join().expect("flush thread panicked during FrozenMMap::drop");
+        }
 
         // sync if dirty
         if self.core.dirty.swap(false, atomic::Ordering::AcqRel) {
@@ -376,12 +400,12 @@ impl Core {
         self.io_lock.write().map_err(|e| new_err_raw(FMMapErrRes::Lpn, e))
     }
 
-    fn spawn_tx(core: sync::Arc<Self>) -> FrozenRes<()> {
+    fn spawn_tx(core: sync::Arc<Self>) -> FrozenRes<thread::JoinHandle<()>> {
         match thread::Builder::new()
             .name("fm-flush-tx".into())
             .spawn(move || Self::tx_thread(core))
         {
-            Ok(_) => Ok(()),
+            Ok(tx) => Ok(tx),
             Err(error) => {
                 let mut error = error.to_string().as_bytes().to_vec();
                 error.extend_from_slice(b"Failed to spawn flush thread for FrozenMMap");
@@ -499,16 +523,15 @@ where
     const MAX_SPINS: usize = 0x10;
 
     #[inline]
-    fn lock(&self) {
+    fn lock(&self) -> OIGuard<'_, T> {
         let mut spins = 0;
-
         loop {
             if self
                 .lock
                 .compare_exchange_weak(0, 1, atomic::Ordering::Acquire, atomic::Ordering::Relaxed)
                 .is_ok()
             {
-                return;
+                return OIGuard { oi: self };
             }
 
             if hints::likely(spins < Self::MAX_SPINS) {
@@ -522,11 +545,6 @@ where
     }
 
     #[inline]
-    fn unlock(&self) {
-        self.lock.store(0, atomic::Ordering::Release);
-    }
-
-    #[inline]
     unsafe fn get(&self) -> &T {
         &*self.value.get()
     }
@@ -534,5 +552,21 @@ where
     #[inline]
     unsafe fn get_mut(&self) -> &mut T {
         &mut *self.value.get()
+    }
+}
+
+struct OIGuard<'a, T>
+where
+    T: Sized + Send + Sync,
+{
+    oi: &'a ObjectInterface<T>,
+}
+
+impl<'a, T> Drop for OIGuard<'a, T>
+where
+    T: Sized + Send + Sync,
+{
+    fn drop(&mut self) {
+        self.oi.lock.store(0, atomic::Ordering::Release);
     }
 }

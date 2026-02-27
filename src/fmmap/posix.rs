@@ -2,16 +2,16 @@ use super::{new_err, FMMapErrRes, ObjectInterface};
 use crate::{error::FrozenRes, hints};
 use core::{ffi::CStr, ptr};
 use libc::{
-    c_char, c_void, mmap, msync, munmap, off_t, size_t, EACCES, EBADF, EBUSY, EINTR, EINVAL, EIO, ENOMEM, EOVERFLOW,
+    c_void, mmap, msync, munmap, off_t, size_t, strerror, EACCES, EBADF, EBUSY, EINTR, EINVAL, EIO, ENOMEM, EOVERFLOW,
     MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
 };
 
 type TPtr = *mut c_void;
 
 /// max allowed retries for `EINTR` errors
-const MAX_RETRIES: usize = 0x0A / 2;
+const MAX_RETRIES: usize = 0x0A;
 
-/// Raw implementation of Posix (linux & macos) `memmap` for [`FrozenMMap`]
+/// Custom impl of `mmap(2)` for POSIX systems
 #[derive(Debug)]
 pub(super) struct POSIXMMap(TPtr);
 
@@ -26,10 +26,8 @@ impl POSIXMMap {
     }
 
     /// Close [`POSIXMMap`] to give up allocated resources
-    ///
-    /// This function is idempotent, hence it prevents unmap-on-unmap errors
     pub(super) unsafe fn unmap(&self, length: usize) -> FrozenRes<()> {
-        mumap_raw(self.0, length)
+        munmap_raw(self.0, length)
     }
 
     /// Syncs in cache data updates on the storage device
@@ -50,6 +48,8 @@ impl POSIXMMap {
     }
 
     /// Get a mutable (read/write) typed pointer to `T` at given `offset`
+    ///
+    /// Given `offset` must be aligned w/ `std::mem::size_of::<ObjectInterface<T>>()`
     #[inline]
     pub(super) unsafe fn as_ptr<T>(&self, offset: usize) -> *mut ObjectInterface<T>
     where
@@ -95,7 +95,7 @@ unsafe fn mmap_raw(fd: i32, length: size_t) -> FrozenRes<TPtr> {
     Ok(ptr)
 }
 
-unsafe fn mumap_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
+unsafe fn munmap_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
     if munmap(ptr, length) == 0 {
         return Ok(());
     }
@@ -124,7 +124,7 @@ unsafe fn msync_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
 
         match errno {
             // IO interrupt, locked file or fatel error
-            EINTR | EBUSY | EIO => {
+            EINTR | EBUSY => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;
@@ -134,6 +134,9 @@ unsafe fn msync_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
                 // in the current/last window/batch
                 return new_err(FMMapErrRes::Syn, err_msg);
             }
+
+            // fatal error, i.e. no sync for writes in recent window/batch
+            EIO => return new_err(FMMapErrRes::Syn, err_msg),
 
             // invalid fd or lack of support for sync
             EINVAL => return new_err(FMMapErrRes::Hcf, err_msg),
@@ -161,13 +164,10 @@ fn last_errno() -> i32 {
 
 #[inline]
 unsafe fn err_msg(errno: i32) -> Vec<u8> {
-    const BUF_LEN: usize = 0x100;
-    let mut buf = [c_char::default(); BUF_LEN];
-
-    if libc::strerror_r(errno, buf.as_mut_ptr(), BUF_LEN) != 0 {
+    let ptr = strerror(errno);
+    if ptr.is_null() {
         return Vec::new();
     }
 
-    let cstr = CStr::from_ptr(buf.as_ptr());
-    return cstr.to_bytes().to_vec();
+    CStr::from_ptr(ptr).to_bytes().to_vec()
 }
