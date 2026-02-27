@@ -155,16 +155,12 @@ where
         })
     }
 
-    /// Returns the [`FrozenErr`] representing the last error occurred in [`FrozenMMap`]
-    #[inline]
-    pub fn last_error(&self) -> Option<FrozenErr> {
-        self.core.get_sync_error()
-    }
-
-    /// Wait for durability for the given write `epoch`
-    ///
-    /// This functions blocks until epoch becomes durable
+    /// Waits (blocks) until given `epoch` becomes durable
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
+        if let Some(sync_err) = self.core.get_sync_error() {
+            return Err(sync_err);
+        }
+
         let durable_epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
         if durable_epoch == 0 || durable_epoch > epoch {
             return Ok(());
@@ -176,6 +172,10 @@ where
         };
 
         loop {
+            if let Some(sync_err) = self.core.get_sync_error() {
+                return Err(sync_err);
+            }
+
             if self.core.durable_epoch.load(atomic::Ordering::Acquire) > epoch {
                 return Ok(());
             }
@@ -187,7 +187,7 @@ where
         }
     }
 
-    /// Get's a read only typed pointer for `T`
+    /// Read a `T` at given `index` via callback (`f`)
     #[inline]
     pub fn read<R>(&self, index: usize, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
         let offset = Self::SLOT_SIZE * index;
@@ -200,7 +200,7 @@ where
         Ok(res)
     }
 
-    /// Get's a mutable typed pointer for `T`
+    /// Write/update a `T` at given `index` via callback (`f`)
     #[inline]
     pub fn write<R>(&self, index: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
         let offset = Self::SLOT_SIZE * index;
@@ -218,7 +218,20 @@ where
 
     /// Grow [`FrozenMMap`] by given `count` of `T`
     ///
-    /// We first grow underlying [`FrozenFile`] and then re-mmap including the grown region
+    /// ## Working
+    ///
+    /// When `grow` is called, all read, write, and (background) sync ops are paused till completion,
+    /// growth is done in following steps:
+    ///
+    /// - acquire an exclusive `io_lock` (all other ops are paused)
+    /// - if any batch is pending for sync,
+    ///   - swap the flag
+    ///   - call sync manually
+    ///   - incr epoch and update cv
+    /// - `munmap(2)` current mapping
+    /// - grow underlying [`FrozenFile`] by requested `count` via [`FrozenFile::grow`]
+    /// - `mmap(2)` entire file again
+    /// - free the lock and unpause all ops
     pub fn grow(&self, count: usize) -> FrozenRes<()> {
         let core = &self.core;
         let len_to_add = count * Self::SLOT_SIZE;
@@ -229,6 +242,10 @@ where
         // swap dirty flag and manual sync to avoid any kind of data loss before unmap
         if core.dirty.swap(false, atomic::Ordering::AcqRel) {
             core.sync()?;
+            core.incr_epoch();
+
+            let _g = core.durable_lock.lock().map_err(|e| new_err_raw(FMMapErrRes::Lpn, e))?;
+            core.durable_cv.notify_all();
         }
 
         unsafe {
@@ -400,6 +417,11 @@ impl Core {
         self.io_lock.write().map_err(|e| new_err_raw(FMMapErrRes::Lpn, e))
     }
 
+    #[inline]
+    fn incr_epoch(&self) {
+        self.durable_epoch.fetch_add(1, atomic::Ordering::Release);
+    }
+
     fn spawn_tx(core: sync::Arc<Self>) -> FrozenRes<thread::JoinHandle<()>> {
         match thread::Builder::new()
             .name("fm-flush-tx".into())
@@ -479,7 +501,7 @@ impl Core {
 
             match core.sync() {
                 Ok(_) => {
-                    core.durable_epoch.fetch_add(1, atomic::Ordering::Release);
+                    core.incr_epoch();
 
                     let _g = match core.durable_lock.lock() {
                         Ok(g) => g,
