@@ -1,6 +1,6 @@
-use super::{new_err, FMMapErrRes, Slot};
+use super::{new_err, FMMapErrRes, ObjectInterface};
 use crate::{error::FrozenRes, hints};
-use core::{ffi::CStr, ptr, sync::atomic};
+use core::{ffi::CStr, ptr};
 use libc::{
     c_char, c_void, mmap, msync, munmap, off_t, size_t, EACCES, EBADF, EBUSY, EINTR, EINVAL, EIO, ENOMEM, EOVERFLOW,
     MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
@@ -13,10 +13,7 @@ const MAX_RETRIES: usize = 0x0A / 2;
 
 /// Raw implementation of Posix (linux & macos) `memmap` for [`FrozenMMap`]
 #[derive(Debug)]
-pub(super) struct POSIXMMap {
-    ptr: TPtr,
-    unmapped: atomic::AtomicBool,
-}
+pub(super) struct POSIXMMap(TPtr);
 
 unsafe impl Send for POSIXMMap {}
 unsafe impl Sync for POSIXMMap {}
@@ -25,25 +22,14 @@ impl POSIXMMap {
     /// Create a new [`POSIXMMap`] w/ given `fd` and `length`
     pub(super) unsafe fn new(fd: i32, length: size_t) -> FrozenRes<Self> {
         let ptr = mmap_raw(fd, length)?;
-        return Ok(Self {
-            ptr,
-            unmapped: atomic::AtomicBool::new(false),
-        });
+        Ok(Self(ptr))
     }
 
     /// Close [`POSIXMMap`] to give up allocated resources
     ///
     /// This function is idempotent, hence it prevents unmap-on-unmap errors
     pub(super) unsafe fn unmap(&self, length: usize) -> FrozenRes<()> {
-        if self
-            .unmapped
-            .compare_exchange(false, true, atomic::Ordering::AcqRel, atomic::Ordering::Acquire)
-            .is_err()
-        {
-            return Ok(());
-        }
-
-        mumap_raw(self.ptr, length)
+        mumap_raw(self.0, length)
     }
 
     /// Syncs in cache data updates on the storage device
@@ -60,25 +46,16 @@ impl POSIXMMap {
     /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
     /// is guaranteed, so the syscall must be retried
     pub(super) unsafe fn sync(&self, length: usize) -> FrozenRes<()> {
-        msync_raw(self.ptr, length)
-    }
-
-    /// Get an immutable typed pointer to `T` at given `offset`
-    #[inline]
-    pub(super) unsafe fn get<T>(&self, offset: usize) -> *const Slot<T>
-    where
-        T: Sized + Send + Sync,
-    {
-        self.ptr.add(offset) as *const Slot<T>
+        msync_raw(self.0, length)
     }
 
     /// Get a mutable (read/write) typed pointer to `T` at given `offset`
     #[inline]
-    pub(super) unsafe fn get_mut<T>(&self, offset: usize) -> *mut Slot<T>
+    pub(super) unsafe fn as_ptr<T>(&self, offset: usize) -> *mut ObjectInterface<T>
     where
         T: Sized + Send + Sync,
     {
-        self.ptr.add(offset) as *mut Slot<T>
+        self.0.add(offset) as *mut ObjectInterface<T>
     }
 }
 
