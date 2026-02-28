@@ -181,7 +181,7 @@ unsafe fn err_msg(errno: i32) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::{
         error::TEST_MID,
@@ -197,8 +197,8 @@ mod test {
         let path = dir.path().join("tmp_map");
 
         let cfg = FFCfg {
-            mid: TEST_MID,
             path,
+            mid: TEST_MID,
             chunk_size: CHUNK,
             initial_chunk_amount: INIT_CHUNKS,
         };

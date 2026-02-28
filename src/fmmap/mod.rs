@@ -105,7 +105,7 @@ where
 {
     const SLOT_SIZE: usize = std::mem::size_of::<ObjectInterface<T>>();
 
-    /// Read current length of [`FrozenMMap`]
+    /// Read current length of [`FrozenMMap`], which is also the current length of underlying [`FrozenFile`]
     #[inline]
     pub fn length(&self) -> usize {
         self.core.curr_length()
@@ -155,7 +155,16 @@ where
         })
     }
 
-    /// Waits (blocks) until given `epoch` becomes durable
+    /// Blocks until given `epoch` becomes durable
+    ///
+    /// ## Batching
+    ///
+    /// With respect to `flush_duration`, all write ops are batched before sync, which is executed by flusher tx
+    /// working in background, while each write is assigned w/ current durable epoch, and all writes which
+    /// observe the exact same epoch, belong to the same durability window, and are all sync'ed together
+    ///
+    /// When a background sync succeeds, the internal durable epoch is incremented, indicating that all writes
+    /// that observed the previous epoch are now durable on disk
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
         if let Some(sync_err) = self.core.get_sync_error() {
             return Err(sync_err);
@@ -326,17 +335,17 @@ where
     T: Sized + Send + Sync,
 {
     fn drop(&mut self) {
-        // INFO: we must acquire an exclusive lock, to prevent dropping while sync,
-        // growing or any read/write ops
-        let _io_lock = self.core.acquire_exclusive_io_lock();
-
         // safeguard aginst `delete()` or drop-on-drop (if somehow its possible)
-        let not_unmapped = self.core.closed.swap(true, atomic::Ordering::Release);
+        let not_unmapped = !self.core.closed.swap(true, atomic::Ordering::Release);
         self.core.cv.notify_one(); // notify flusher tx to shut
 
         if let Some(handle) = self.tx.take() {
             let _ = handle.join();
         }
+
+        // INFO: we must acquire an exclusive lock, to prevent dropping while sync,
+        // growing or any read/write ops
+        let _io_lock = self.core.acquire_exclusive_io_lock();
 
         // sync if dirty
         if not_unmapped && self.core.dirty.swap(false, atomic::Ordering::AcqRel) {
@@ -421,7 +430,7 @@ impl Core {
         let boxed = Box::into_raw(Box::new(err));
         let old = self.error.swap(boxed, atomic::Ordering::AcqRel);
 
-        // NOTE: we must free the old error if any to avoid leaks
+        // NOTE: we must free the old error, if any, to avoid mem leaks
         if !old.is_null() {
             unsafe {
                 drop(Box::from_raw(old));
@@ -635,5 +644,121 @@ where
 {
     fn drop(&mut self) {
         self.oi.lock.store(0, atomic::Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::TEST_MID;
+    use crate::ffile::FFileErrRes;
+
+    const CHUNK: usize = 0x10;
+    const INIT_CHUNKS: usize = 0x0A;
+    const LENGTH: usize = CHUNK * INIT_CHUNKS;
+
+    // NOTE: we keep this small on purpose, so we won't have to wait at all in tests
+    const FLUSH_DURATION: time::Duration = time::Duration::from_micros(10);
+
+    fn new_tmp() -> (tempfile::TempDir, FFCfg) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tmp_map");
+
+        let cfg = FFCfg {
+            path,
+            mid: TEST_MID,
+            chunk_size: CHUNK,
+            initial_chunk_amount: INIT_CHUNKS,
+        };
+
+        (dir, cfg)
+    }
+
+    mod fm_lifecycle {
+        use super::*;
+
+        #[test]
+        fn ok_new() {
+            let (_dir, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u8>::new(cfg, FLUSH_DURATION).unwrap();
+
+            assert_eq!(mmap.core.flush_duration, FLUSH_DURATION);
+            assert!(!mmap.core.dirty.load(atomic::Ordering::Acquire));
+            assert!(!mmap.core.closed.load(atomic::Ordering::Acquire));
+            assert_eq!(mmap.core.durable_epoch.load(atomic::Ordering::Acquire), 0);
+            assert_eq!(mmap.core.curr_length.load(atomic::Ordering::Acquire), LENGTH);
+
+            // satisfies the bg thread was spawned correctly
+            assert!(mmap.core.error.load(atomic::Ordering::Acquire).is_null());
+
+            // satisfies wait on epoch works
+            assert!(mmap.wait_for_durability(0).is_ok());
+        }
+
+        #[test]
+        fn ok_new_existing() {
+            let (_dir, cfg) = new_tmp();
+
+            // create new + close
+            let mmap1 = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+            drop(mmap1);
+
+            // open existing
+            let mmap2 = FrozenMMap::<u8>::new(cfg, FLUSH_DURATION).unwrap();
+            drop(mmap2);
+        }
+
+        #[test]
+        fn err_new_when_change_in_cfg() {
+            let (_dir, mut cfg) = new_tmp();
+
+            // create new + close
+            let mmap1 = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+            drop(mmap1);
+
+            // update cfg + opne existing
+            cfg.chunk_size = CHUNK * 2;
+            let err = FrozenMMap::<u8>::new(cfg, FLUSH_DURATION).unwrap_err();
+            assert!(err.cmp(FFileErrRes::Cpt as u16));
+        }
+
+        #[test]
+        fn ok_delete() {
+            let (_dir, cfg) = new_tmp();
+            let mut mmap = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+
+            mmap.delete().unwrap();
+            assert!(!mmap.core.ffile.exists().unwrap());
+        }
+
+        #[test]
+        fn err_delete_after_delete() {
+            let (_dir, cfg) = new_tmp();
+            let mut mmap = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+
+            mmap.delete().unwrap();
+            assert!(!mmap.core.ffile.exists().unwrap());
+
+            let err = mmap.delete().unwrap_err();
+            assert!(err.cmp(FFileErrRes::Inv as u16));
+        }
+
+        #[test]
+        fn ok_drop_persists_when_dropped_before_bg_flush() {
+            let (_dir, cfg) = new_tmp();
+            const VAL: u8 = 0x0A;
+
+            {
+                let mmap = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+                mmap.write(0, |byte| *byte = VAL).unwrap();
+                drop(mmap);
+            }
+
+            {
+                let mmap = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+                let val = mmap.read(0, |byte| *byte).unwrap();
+                assert_eq!(val, VAL);
+            }
+        }
     }
 }

@@ -86,7 +86,7 @@ impl core::fmt::Display for FrozenErr {
         );
 
         #[cfg(not(test))]
-        write!(f, "[0x{:08x}] ({detail}) {errmsg}", self.error_id())
+        write!(f, "[{}] ({detail}) {errmsg}", self.error_id())
     }
 }
 
