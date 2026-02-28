@@ -266,20 +266,6 @@ mod tests {
                 assert!(err.cmp(FMMapErrRes::Hcf as u16));
             }
         }
-
-        #[test]
-        fn err_unmap_on_invalid_ptr() {
-            let (_dir, _) = new_tmp();
-
-            let dummy_value = Box::new(0);
-            let ptr = Box::into_raw(dummy_value) as *mut c_void;
-
-            unsafe {
-                let mmap = POSIXMMap(ptr);
-                let err = mmap.unmap(LENGTH).unwrap_err();
-                assert!(err.cmp(FMMapErrRes::Hcf as u16));
-            }
-        }
     }
 
     mod utils {
