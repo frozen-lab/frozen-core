@@ -443,8 +443,11 @@ impl FrozenFile {
 
 impl Drop for FrozenFile {
     fn drop(&mut self) {
-        // TODO: try not to consume errors here, fail is required to tackle to
-        // when explicit drop is called
+        // guard for when delete is called (or drop on drop if its somehow possible)
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.fd() == posix::CLOSED_FD {
+            return;
+        }
 
         // sync if dirty & close
         let _ = self.sync();

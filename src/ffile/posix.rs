@@ -11,8 +11,10 @@ use std::{
     sync::{atomic, OnceLock},
 };
 
-const CLOSED_FD: FFId = FFId::MIN;
 static IOV_MAX_CACHE: OnceLock<usize> = OnceLock::new();
+
+/// placeholder value for when current fd is closed
+pub(in crate::ffile) const CLOSED_FD: FFId = FFId::MIN;
 
 /// max allowed retries for `EINTR` errors
 const MAX_RETRIES: usize = 0x0A;
@@ -1300,6 +1302,37 @@ mod tests {
 
                 file.pread(&mut iov, 0).unwrap();
                 assert!(buf.iter().all(|b| *b == 0));
+
+                file.close().unwrap();
+            }
+        }
+    }
+
+    mod fil_sync {
+        use super::*;
+
+        #[test]
+        fn ok_sync() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                file.sync().unwrap();
+                file.close().unwrap();
+            }
+        }
+
+        #[test]
+        fn ok_sync_after_sync() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+
+                file.sync().unwrap();
+                file.sync().unwrap();
+                file.sync().unwrap();
+                file.sync().unwrap();
 
                 file.close().unwrap();
             }
