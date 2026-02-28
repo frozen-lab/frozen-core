@@ -1,6 +1,6 @@
 //! Implementation of branch preditor hints
 
-/// empty function used as a placeholder to influence branch prediction
+/// Empty function used as a placeholder to influence branch prediction
 #[cold]
 #[inline]
 const fn cold_fn() {}
