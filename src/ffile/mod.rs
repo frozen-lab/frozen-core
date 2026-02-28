@@ -355,7 +355,7 @@ impl FrozenFile {
         unsafe { file.sync_range(offset, len_to_sync) }
     }
 
-    /// Delete [`FrozenFile`] from filesystem
+    /// Delete [`FrozenFile`] from fs
     ///
     /// ## Example
     ///

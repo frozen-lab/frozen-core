@@ -248,9 +248,10 @@ where
             core.durable_cv.notify_all();
         }
 
+        // unmap the current mmap and clear unsafeCell
         unsafe {
-            let mmap = &mut *core.mmap.get();
-            mem::ManuallyDrop::drop(mmap);
+            self.munmap()?;
+            mem::ManuallyDrop::drop(&mut *core.mmap.get());
         }
 
         core.ffile.grow(len_to_add)?;
@@ -264,6 +265,48 @@ where
         };
 
         Ok(())
+    }
+
+    /// Delete the underlying [`FrozenFile`] used for [`FrozenMMap`] from fs
+    ///
+    /// ## Working
+    ///
+    /// When `delete` is called, all read, write, and (background) sync ops are paused (indefinitely),
+    /// whule deletion is done with following steps:
+    ///
+    /// - acquire an exclusive `io_lock` (all other ops are paused indefinitely)
+    /// - if any batch is pending for sync,
+    ///   - swap the flag
+    ///   - call sync manually
+    ///   - incr epoch and update cv
+    /// - brodcast closing so flusher tx could wrap up
+    /// - `munmap(2)` current mapping
+    /// - call delete on [`FrozenFile`]
+    pub fn delete(&mut self) -> FrozenRes<()> {
+        let core = &self.core;
+
+        // pause all read, write and bg sync ops while growing
+        let _lock = core.acquire_exclusive_io_lock()?;
+
+        // swap dirty flag and manual sync to avoid any kind of data loss before unmap
+        if core.dirty.swap(false, atomic::Ordering::AcqRel) {
+            core.sync()?;
+            core.incr_epoch();
+
+            let _g = core.durable_lock.lock().map_err(|e| new_err_raw(FMMapErrRes::Lpn, e))?;
+            core.durable_cv.notify_all();
+        }
+
+        // NOTE: we must broadcast that the close is happening to allow flusher tx to wrap up
+        core.closed.store(true, atomic::Ordering::Release);
+        core.cv.notify_one();
+
+        if let Some(handle) = self.tx.take() {
+            let _ = handle.join();
+        }
+
+        self.munmap()?;
+        core.ffile.delete()
     }
 
     #[inline]
@@ -287,16 +330,16 @@ where
         // growing or any read/write ops
         let _io_lock = self.core.acquire_exclusive_io_lock();
 
-        // close flusher thread
-        self.core.closed.store(true, atomic::Ordering::Release);
-        self.core.cv.notify_one();
+        // safeguard aginst `delete()` or drop-on-drop (if somehow its possible)
+        let not_unmapped = self.core.closed.swap(true, atomic::Ordering::Release);
+        self.core.cv.notify_one(); // notify flusher tx to shut
 
         if let Some(handle) = self.tx.take() {
             let _ = handle.join();
         }
 
         // sync if dirty
-        if self.core.dirty.swap(false, atomic::Ordering::AcqRel) {
+        if not_unmapped && self.core.dirty.swap(false, atomic::Ordering::AcqRel) {
             let _ = self.core.sync();
         }
 
@@ -308,7 +351,9 @@ where
             }
         }
 
-        let _ = self.munmap();
+        if not_unmapped {
+            let _ = self.munmap();
+        }
     }
 }
 
@@ -461,6 +506,9 @@ impl Core {
                     return;
                 }
             };
+
+            // NOTE: we must read values of close and dirty brodcast before acquire exclusive lock,
+            // if done otherwise, we impose serious deadlock sort of situation for the the flusher tx
 
             // we must close the thread when [`FrozenMMap`] is closed
             if hints::unlikely(core.closed.load(atomic::Ordering::Acquire)) {
