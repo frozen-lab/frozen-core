@@ -49,12 +49,16 @@ pub enum FMMapErrRes {
 
     /// (518) perm error (read or write)
     Prm = 0x208,
+
+    /// (519) invalid cfg
+    Cfg = 0x209,
 }
 
 impl FMMapErrRes {
     #[inline]
     fn default_message(&self) -> &'static [u8] {
         match self {
+            Self::Cfg => b"invalid cfg",
             Self::Lpn => b"lock poisoned",
             Self::Unk => b"unknown error type",
             Self::Nmm => b"no more memory left",
@@ -85,6 +89,28 @@ pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(res: FMMapErrRes, erro
     )
 }
 
+/// Config for [`FrozenMMap`]
+#[derive(Debug, Clone)]
+pub struct FMCfg {
+    /// Module id used for error logging
+    pub mid: u8,
+
+    /// Path for the underlying file
+    ///
+    /// *NOTE:* The caller must make sure that the parent directory exists
+    pub path: std::path::PathBuf,
+
+    /// Number of slots to pre-allocate when [`FrozenMMap`] is initialized
+    ///
+    /// Each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`], where initial file length will
+    /// be `chunk_size * initial_count` (bytes)
+    pub initial_count: usize,
+
+    /// Time interval used by flusher tx, to batch write ops into a durable window and sync them
+    /// together, where all write ops in certain time interval falls into a single durable window
+    pub flush_duration: time::Duration,
+}
+
 /// Custom implementation of `mmap(2)`
 #[derive(Debug)]
 pub struct FrozenMMap<T>
@@ -103,7 +129,8 @@ impl<T> FrozenMMap<T>
 where
     T: Sized + Send + Sync,
 {
-    const SLOT_SIZE: usize = std::mem::size_of::<ObjectInterface<T>>();
+    /// Memory space required for each slot of [`T`] in [`FrozenMMap`]
+    pub const SLOT_SIZE: usize = std::mem::size_of::<ObjectInterface<T>>();
 
     /// Read current length of [`FrozenMMap`], which is also the current length of underlying [`FrozenFile`]
     #[inline]
@@ -111,11 +138,11 @@ where
         self.core.curr_length()
     }
 
-    /// Create a new [`FrozenMMap`] instance w/ given [`FFCfg`]
+    /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`]
     ///
-    /// ## [`FFCfg`]
+    /// ## [`FMCfg`]
     ///
-    /// All configs for [`FrozenFile`] are stored in [`FFCfg`]
+    /// All configs for [`FrozenMMap`] are stored in [`FMCfg`]
     ///
     /// ## Working
     ///
@@ -133,17 +160,23 @@ where
     /// We acquire an exclusive lock for the entire file, this protects against operating with
     /// multiple simultenious instance of [`FrozenFile`], when trying to call [`FrozenFile::new`]
     /// when already called, [`FFileErrRes::Lck`] error will be thrown
-    pub fn new(cfg: FFCfg, flush_duration: time::Duration) -> FrozenRes<Self> {
-        let mid = cfg.mid;
-        let file = FrozenFile::new(cfg)?;
+    pub fn new(cfg: FMCfg) -> FrozenRes<Self> {
+        let ff_cfg = FFCfg {
+            mid: cfg.mid,
+            path: cfg.path,
+            chunk_size: Self::SLOT_SIZE,
+            initial_chunk_amount: cfg.initial_count,
+        };
+
+        let file = FrozenFile::new(ff_cfg)?;
         let curr_length = file.length()?;
 
         // NOTE: we only set it the module_id once, right after an exclusive lock for the entire file is
         // acquired, hence it'll be only set once per instance and is only used for error logging
-        unsafe { MODULE_ID = mid };
+        unsafe { MODULE_ID = cfg.mid };
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
-        let core = sync::Arc::new(Core::new(mmap, file, flush_duration, curr_length));
+        let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length));
 
         // INFO: we spawn the thread for background sync
         let tx = Core::spawn_tx(core.clone())?;
@@ -225,7 +258,7 @@ where
         Ok((res, epoch))
     }
 
-    /// Grow [`FrozenMMap`] by given `count` of `T`
+    /// Grow [`FrozenMMap`] by given `slot_count` of `T`, where each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`]
     ///
     /// ## Working
     ///
@@ -243,7 +276,6 @@ where
     /// - free the lock and unpause all ops
     pub fn grow(&self, count: usize) -> FrozenRes<()> {
         let core = &self.core;
-        let len_to_add = count * Self::SLOT_SIZE;
 
         // pause all read, write and bg sync ops while growing
         let _lock = self.core.acquire_exclusive_io_lock()?;
@@ -263,7 +295,7 @@ where
             mem::ManuallyDrop::drop(&mut *core.mmap.get());
         }
 
-        core.ffile.grow(len_to_add)?;
+        core.ffile.grow(count)?;
 
         let new_len = core.ffile.length()?;
         core.curr_length.store(new_len, atomic::Ordering::Release);
@@ -653,22 +685,20 @@ mod tests {
     use crate::error::TEST_MID;
     use crate::ffile::FFileErrRes;
 
-    const CHUNK: usize = 0x10;
-    const INIT_CHUNKS: usize = 0x0A;
-    const LENGTH: usize = CHUNK * INIT_CHUNKS;
+    const INIT_SLOTS: usize = 0x0A;
 
     // NOTE: we keep this small on purpose, so we won't have to wait at all in tests
     const FLUSH_DURATION: time::Duration = time::Duration::from_micros(10);
 
-    fn new_tmp() -> (tempfile::TempDir, FFCfg) {
+    fn new_tmp() -> (tempfile::TempDir, FMCfg) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
-        let cfg = FFCfg {
+        let cfg = FMCfg {
             path,
             mid: TEST_MID,
-            chunk_size: CHUNK,
-            initial_chunk_amount: INIT_CHUNKS,
+            initial_count: INIT_SLOTS,
+            flush_duration: FLUSH_DURATION,
         };
 
         (dir, cfg)
@@ -680,13 +710,16 @@ mod tests {
         #[test]
         fn ok_new() {
             let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u8>::new(cfg, FLUSH_DURATION).unwrap();
+            let mmap = FrozenMMap::<u8>::new(cfg).unwrap();
 
             assert_eq!(mmap.core.flush_duration, FLUSH_DURATION);
             assert!(!mmap.core.dirty.load(atomic::Ordering::Acquire));
             assert!(!mmap.core.closed.load(atomic::Ordering::Acquire));
             assert_eq!(mmap.core.durable_epoch.load(atomic::Ordering::Acquire), 0);
-            assert_eq!(mmap.core.curr_length.load(atomic::Ordering::Acquire), LENGTH);
+            assert_eq!(
+                mmap.core.curr_length.load(atomic::Ordering::Acquire),
+                INIT_SLOTS * FrozenMMap::<u8>::SLOT_SIZE
+            );
 
             // satisfies the bg thread was spawned correctly
             assert!(mmap.core.error.load(atomic::Ordering::Acquire).is_null());
@@ -700,11 +733,11 @@ mod tests {
             let (_dir, cfg) = new_tmp();
 
             // create new + close
-            let mmap1 = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+            let mmap1 = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
             drop(mmap1);
 
             // open existing
-            let mmap2 = FrozenMMap::<u8>::new(cfg, FLUSH_DURATION).unwrap();
+            let mmap2 = FrozenMMap::<u8>::new(cfg).unwrap();
             drop(mmap2);
         }
 
@@ -713,19 +746,19 @@ mod tests {
             let (_dir, mut cfg) = new_tmp();
 
             // create new + close
-            let mmap1 = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+            let mmap1 = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
             drop(mmap1);
 
             // update cfg + opne existing
-            cfg.chunk_size = CHUNK * 2;
-            let err = FrozenMMap::<u8>::new(cfg, FLUSH_DURATION).unwrap_err();
+            cfg.initial_count = INIT_SLOTS * 2;
+            let err = FrozenMMap::<u8>::new(cfg).unwrap_err();
             assert!(err.cmp(FFileErrRes::Cpt as u16));
         }
 
         #[test]
         fn ok_delete() {
             let (_dir, cfg) = new_tmp();
-            let mut mmap = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+            let mut mmap = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
 
             mmap.delete().unwrap();
             assert!(!mmap.core.ffile.exists().unwrap());
@@ -734,7 +767,7 @@ mod tests {
         #[test]
         fn err_delete_after_delete() {
             let (_dir, cfg) = new_tmp();
-            let mut mmap = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+            let mut mmap = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
 
             mmap.delete().unwrap();
             assert!(!mmap.core.ffile.exists().unwrap());
@@ -749,16 +782,45 @@ mod tests {
             const VAL: u8 = 0x0A;
 
             {
-                let mmap = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+                let mmap = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
                 mmap.write(0, |byte| *byte = VAL).unwrap();
                 drop(mmap);
             }
 
             {
-                let mmap = FrozenMMap::<u8>::new(cfg.clone(), FLUSH_DURATION).unwrap();
+                let mmap = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
                 let val = mmap.read(0, |byte| *byte).unwrap();
                 assert_eq!(val, VAL);
             }
+        }
+    }
+
+    mod ff_grow {
+        use super::*;
+
+        #[test]
+        fn ok_grow_updates_length() {
+            let (_dir, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u8>::new(cfg).unwrap();
+            assert_eq!(mmap.length(), INIT_SLOTS * FrozenMMap::<u8>::SLOT_SIZE);
+
+            mmap.grow(0x0A).unwrap();
+            assert_eq!(mmap.length(), (INIT_SLOTS + 0x0A) * FrozenMMap::<u8>::SLOT_SIZE);
+        }
+
+        #[test]
+        fn ok_grow_sync_cycle() {
+            let (_dir, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u8>::new(cfg).unwrap();
+
+            for _ in 0..0x0A {
+                mmap.grow(0x100).unwrap();
+            }
+
+            assert_eq!(
+                mmap.length(),
+                (INIT_SLOTS + (0x0A * 0x100)) * FrozenMMap::<u8>::SLOT_SIZE
+            );
         }
     }
 }
