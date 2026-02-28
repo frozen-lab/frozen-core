@@ -285,17 +285,14 @@ where
     fn drop(&mut self) {
         // INFO: we must acquire an exclusive lock, to prevent dropping while sync,
         // growing or any read/write ops
-        let _io_lock = self
-            .core
-            .acquire_exclusive_io_lock()
-            .expect("io_lock poisoned during FrozenMMap::drop");
+        let _io_lock = self.core.acquire_exclusive_io_lock();
 
         // close flusher thread
         self.core.closed.store(true, atomic::Ordering::Release);
         self.core.cv.notify_one();
 
         if let Some(handle) = self.tx.take() {
-            handle.join().expect("flush thread panicked during FrozenMMap::drop");
+            let _ = handle.join();
         }
 
         // sync if dirty
