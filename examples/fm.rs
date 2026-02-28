@@ -1,32 +1,49 @@
-use frozen_core::ffile;
+use frozen_core::fmmap::{FMCfg, FrozenMMap};
+
+const MID: u8 = 0;
+
+#[repr(C)]
+#[derive(Debug)]
+struct Meta(u64);
+
+unsafe impl Send for Meta {}
+unsafe impl Sync for Meta {}
 
 fn main() {
-    let module_id = 0u8;
-
     let dir = std::path::PathBuf::from("./target/examples");
-    let path = dir.join("ff_example.bin");
+    let path = dir.join("fm_example.bin");
 
-    std::fs::create_dir_all(&dir).expect("create example dir");
     let _ = std::fs::remove_file(&path);
+    std::fs::create_dir_all(&dir).unwrap();
 
-    let cfg = ffile::FFCfg {
-        path: path.to_path_buf(),
-        mid: module_id,
-        chunk_size: 0x10,
-        initial_chunk_amount: 0x0A,
+    let cfg = FMCfg {
+        mid: MID,
+        initial_count: 1,
+        path: path.clone(),
+        flush_duration: std::time::Duration::from_micros(100),
     };
 
-    let ff = ffile::FrozenFile::new(cfg).expect("new FFile");
-    assert!(ff.fd() >= 0);
+    let mmap = FrozenMMap::<Meta>::new(cfg.clone()).unwrap();
+    assert_eq!(mmap.slots(), 1);
 
-    // let fm = fmmap::FrozenMMap::new(ff, fmmap::FMCfg::new(module_id)).expect("mmap");
-    // let (_, epoch) = fm.with_write::<u64, _>(0, |v| *v = 0xDEADC0DE).unwrap();
+    let (_, epoch) = mmap.write(0, |m| m.0 = 0x0A).unwrap();
+    mmap.wait_for_durability(epoch).unwrap();
 
-    // match fm.wait_for_durability(epoch) {
-    //     Ok(_) => {
-    //         let value = fm.with_read::<u64, u64>(0, |v| *v).unwrap();
-    //         assert_eq!(value, 0xDEADC0DE);
-    //     }
-    //     Err(e) => panic!("{e}"),
-    // }
+    let val = mmap.read(0, |m| m.0).unwrap();
+    assert_eq!(val, 10);
+
+    mmap.grow(1).unwrap();
+    assert_eq!(mmap.slots(), 2);
+
+    mmap.write(1, |m| m.0 = 0x0F).unwrap();
+    drop(mmap); // syncs data
+
+    // reopen & verify
+    let reopened = FrozenMMap::<Meta>::new(cfg).unwrap();
+
+    let v0 = reopened.read(0, |m| m.0).unwrap();
+    let v1 = reopened.read(1, |m| m.0).unwrap();
+
+    assert_eq!(v0, 0x0A);
+    assert_eq!(v1, 0x0F);
 }

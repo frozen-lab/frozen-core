@@ -1,4 +1,38 @@
 //! Custom implementation of `mmap(2)`
+//!
+//! ## Example
+//!
+//! ```
+//! use frozen_core::fmmap::{FrozenMMap, FMCfg};
+//!
+//! let dir = tempfile::tempdir().unwrap();
+//! let path = dir.path().join("tmp_frozen_mmap");
+//!
+//! let cfg = FMCfg {
+//!     path,
+//!     mid: 0u8,
+//!     initial_count: 0x0A,
+//!     flush_duration: std::time::Duration::from_micros(100),
+//! };
+//!
+//! let mmap = FrozenMMap::<u64>::new(cfg.clone()).unwrap();
+//! assert_eq!(mmap.slots(), 0x0A);
+//!
+//! let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
+//! mmap.wait_for_durability(epoch).unwrap();
+//!
+//! let val = mmap.read(0, |v| *v).unwrap();
+//! assert_eq!(val, 0xDEADC0DE);
+//!
+//! mmap.grow(0x05).unwrap();
+//! assert_eq!(mmap.slots(), 0x0A + 0x05);
+//!
+//! drop(mmap);
+//!
+//! let reopened = FrozenMMap::<u64>::new(cfg).unwrap();
+//! let val = reopened.read(0, |v| *v).unwrap();
+//! assert_eq!(val, 0xDEADC0DE);
+//! ```
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
@@ -112,6 +146,40 @@ pub struct FMCfg {
 }
 
 /// Custom implementation of `mmap(2)`
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+///
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("tmp_frozen_mmap");
+///
+/// let cfg = FMCfg {
+///     path,
+///     mid: 0u8,
+///     initial_count: 0x0A,
+///     flush_duration: std::time::Duration::from_micros(100),
+/// };
+///
+/// let mmap = FrozenMMap::<u64>::new(cfg.clone()).unwrap();
+/// assert_eq!(mmap.slots(), 0x0A);
+///
+/// let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
+/// mmap.wait_for_durability(epoch).unwrap();
+///
+/// let val = mmap.read(0, |v| *v).unwrap();
+/// assert_eq!(val, 0xDEADC0DE);
+///
+/// mmap.grow(0x05).unwrap();
+/// assert_eq!(mmap.slots(), 0x0A + 0x05);
+///
+/// drop(mmap);
+///
+/// let reopened = FrozenMMap::<u64>::new(cfg).unwrap();
+/// let val = reopened.read(0, |v| *v).unwrap();
+/// assert_eq!(val, 0xDEADC0DE);
+/// ```
 #[derive(Debug)]
 pub struct FrozenMMap<T>
 where
@@ -198,6 +266,30 @@ where
     ///
     /// When a background sync succeeds, the internal durable epoch is incremented, indicating that all writes
     /// that observed the previous epoch are now durable on disk
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_wait_epoch");
+    ///
+    /// let cfg = FMCfg {
+    ///     path,
+    ///     mid: 0u8,
+    ///     initial_count: 0x04,
+    ///     flush_duration: std::time::Duration::from_micros(100),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    ///
+    /// let (_, epoch) = mmap.write(0, |v| *v = 123).unwrap();
+    /// mmap.wait_for_durability(epoch).unwrap();
+    ///
+    /// let val = mmap.read(0, |v| *v).unwrap();
+    /// assert_eq!(val, 123);
+    /// ```
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
         if let Some(sync_err) = self.core.get_sync_error() {
             return Err(sync_err);
@@ -230,6 +322,28 @@ where
     }
 
     /// Read a `T` at given `index` via callback (`f`)
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_read_mmap");
+    ///
+    /// let cfg = FMCfg {
+    ///     path,
+    ///     mid: 0u8,
+    ///     initial_count: 0x02,
+    ///     flush_duration: std::time::Duration::from_micros(100),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    /// mmap.write(0, |v| *v = 0x0A).unwrap();
+    ///
+    /// let val = mmap.read(0, |v| *v).unwrap();
+    /// assert_eq!(val, 0x0A);
+    /// ```
     #[inline]
     pub fn read<R>(&self, index: usize, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
         let offset = Self::SLOT_SIZE * index;
@@ -243,6 +357,30 @@ where
     }
 
     /// Write/update a `T` at given `index` via callback (`f`)
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_write_mmap");
+    ///
+    /// let cfg = FMCfg {
+    ///     path,
+    ///     mid: 0u8,
+    ///     initial_count: 0x02,
+    ///     flush_duration: std::time::Duration::from_micros(100),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    ///
+    /// let (_, epoch) = mmap.write(1, |v| *v = 0x2B).unwrap();
+    /// mmap.wait_for_durability(epoch).unwrap();
+    ///
+    /// let val = mmap.read(1, |v| *v).unwrap();
+    /// assert_eq!(val, 0x2B);
+    /// ```
     #[inline]
     pub fn write<R>(&self, index: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
         let offset = Self::SLOT_SIZE * index;
@@ -274,6 +412,34 @@ where
     /// - grow underlying [`FrozenFile`] by requested `count` via [`FrozenFile::grow`]
     /// - `mmap(2)` entire file again
     /// - free the lock and unpause all ops
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_grow_mmap");
+    ///
+    /// let cfg = FMCfg {
+    ///     mid: 0u8,
+    ///     path,
+    ///     initial_count: 0x02,
+    ///     flush_duration: std::time::Duration::from_micros(100),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    /// assert_eq!(mmap.slots(), 0x02);
+    ///
+    /// mmap.grow(0x03).unwrap();
+    /// assert_eq!(mmap.slots(), 0x05);
+    ///
+    /// let idx = mmap.slots() - 1;
+    /// mmap.write(idx, |v| *v = 0x100).unwrap();
+    ///
+    /// let val = mmap.read(idx, |v| *v).unwrap();
+    /// assert_eq!(val, 0x100);
+    /// ```
     pub fn grow(&self, count: usize) -> FrozenRes<()> {
         let core = &self.core;
 
@@ -323,6 +489,28 @@ where
     /// - brodcast closing so flusher tx could wrap up
     /// - `munmap(2)` current mapping
     /// - call delete on [`FrozenFile`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_delete_mmap");
+    ///
+    /// let cfg = FMCfg {
+    ///     mid: 0u8,
+    ///     path: path.clone(),
+    ///     initial_count: 0x04,
+    ///     flush_duration: std::time::Duration::from_micros(100),
+    /// };
+    ///
+    /// let mut mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    ///
+    /// mmap.write(0, |v| *v = 55).unwrap();
+    /// mmap.delete().unwrap();
+    /// assert!(!path.exists());
+    /// ```
     pub fn delete(&mut self) -> FrozenRes<()> {
         let core = &self.core;
 
