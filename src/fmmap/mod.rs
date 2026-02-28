@@ -1,4 +1,4 @@
-//! Custom implementation of `mmap`
+//! Custom implementation of `mmap(2)`
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
@@ -85,7 +85,7 @@ pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(res: FMMapErrRes, erro
     )
 }
 
-/// Custom implementation of `mmap`
+/// Custom implementation of `mmap(2)`
 #[derive(Debug)]
 pub struct FrozenMMap<T>
 where

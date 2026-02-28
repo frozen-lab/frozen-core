@@ -31,6 +31,16 @@ impl FrozenErr {
     pub fn cmp(&self, reason: u16) -> bool {
         self.reason == reason
     }
+
+    /// construct an `error_id` for [`FrozenErr`]
+    ///
+    /// ## Structure
+    ///
+    /// `| module:8 | domain:8 | reason:16 |`
+    #[inline]
+    pub const fn error_id(&self) -> u32 {
+        ((self.module as u32) << 24) | ((self.domain as u32) << 16) | (self.reason as u32)
+    }
 }
 
 impl core::fmt::Display for FrozenErr {
@@ -38,11 +48,15 @@ impl core::fmt::Display for FrozenErr {
         let detail = core::str::from_utf8(&self.errmsg).unwrap_or("<non-utf8>");
         let errmsg = core::str::from_utf8(&self.errmsg).unwrap_or("<non-utf8>");
 
-        write!(
+        #[cfg(test)]
+        return write!(
             f,
             "[m={}, d={}, c={}] ({detail}) {errmsg}",
             self.module, self.domain, self.reason
-        )
+        );
+
+        #[cfg(not(test))]
+        write!(f, "[0x{:08x}] ({detail}) {errmsg}", self.error_id())
     }
 }
 
