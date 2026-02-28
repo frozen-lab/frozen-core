@@ -10,6 +10,13 @@
   - impl of exclusive locking to prevent simultaneously running multiple instances
   - updated example
   - impl of `FFCfg`
+- `FM`
+  - improved publinc api
+  - impl of `grow` and `delete`
+  - completely thread safe, parallel ops on same index w/ internal locking
+  - impl of `wait_for_durability`
+  - added durability guarantees for write ops
+  - simplified locking mechanism
 
 ## `0.0.6`
 
