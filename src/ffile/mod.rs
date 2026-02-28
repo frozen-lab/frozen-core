@@ -650,6 +650,8 @@ mod tests {
                 file.grow(0x100).unwrap();
                 file.sync().unwrap();
             }
+
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + (0x0A * 0x100)));
         }
     }
 
