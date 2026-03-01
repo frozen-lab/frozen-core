@@ -375,7 +375,7 @@ mod tests {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 // write
-                let wptr = mmap.as_ptr::<[u32; 0x0A]>(0x0C);
+                let wptr = mmap.as_ptr::<[u32; 0x0A]>(0);
                 let oi = &*wptr;
                 *oi.get_mut() = VAL;
 
@@ -383,7 +383,7 @@ mod tests {
                 mmap.sync(LENGTH).unwrap();
 
                 // read
-                let rptr = mmap.as_ptr::<[u32; 0x0A]>(0x0C);
+                let rptr = mmap.as_ptr::<[u32; 0x0A]>(0);
                 let oi = &*rptr;
                 assert_eq!(*oi.get(), VAL);
 

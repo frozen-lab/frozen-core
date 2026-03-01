@@ -13,3 +13,6 @@ pub mod ffile;
 
 #[cfg(feature = "fmmap")]
 pub mod fmmap;
+
+#[cfg(feature = "crc")]
+pub mod crc;
