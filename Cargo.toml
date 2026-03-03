@@ -9,9 +9,9 @@ repository = "https://github.com/frozen-lab/frozen-core"
 description = "Custom implementations and core utilities for frozen codebases"
 
 [features]
-crc = []
 error = []
 hints = []
+crc = ["hints"]
 ffile = ["libc", "error", "hints"]
 fmmap = ["libc", "error", "hints", "ffile"]
 default = ["crc", "error", "hints", "ffile", "fmmap"]
