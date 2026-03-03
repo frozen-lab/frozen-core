@@ -95,7 +95,7 @@ impl Crc32C {
         unimplemented!()
     }
 
-    /// Generate crc for given `buffers` (2x) using CRC32C algorithm and `intra-core parallelism` (ILP)
+    /// Generate crc for given `buffers` (2x) using CRC32C algorithm and ILP
     ///
     /// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
     pub fn crc_2x(&self, buffers: [&[u8]; 2]) -> [u32; 2] {
@@ -106,7 +106,7 @@ impl Crc32C {
         unimplemented!()
     }
 
-    /// Generate crc for given `buffers` (4x) using CRC32C algorithm and `intra-core parallelism` (ILP)
+    /// Generate crc for given `buffers` (4x) using CRC32C algorithm and ILP
     ///
     /// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
     pub fn crc_4x(&self, buffers: [&[u8]; 4]) -> [u32; 4] {
@@ -201,7 +201,7 @@ fn crc32c_slice8(buffer: &[u8]) -> u32 {
     !crc
 }
 
-/// Software CRC32C (Castagnoli) impl to generate 32-bit crc for `buffers` (2x) using `intra-core parallelism` (ILP)
+/// Software CRC32C (Castagnoli) impl to generate 32-bit crc for `buffers` (2x) using ILP
 ///
 /// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
 #[inline(always)]
@@ -260,7 +260,7 @@ fn crc32c_slice8_2x(buffers: [&[u8]; 2]) -> [u32; 2] {
 }
 
 /// Software CRC32C (Castagnoli) impl to generate 32-bit crc for `buffers` (2x buffers)
-/// using `intra-core parallelism` (ILP)
+/// using ILP
 ///
 /// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
 #[inline(always)]
