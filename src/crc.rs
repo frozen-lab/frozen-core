@@ -345,3 +345,36 @@ fn crc32c_slice8_4x(buffers: [&[u8]; 4]) -> [u32; 4] {
 
     [!crc0, !crc1, !crc2, !crc3]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod software {
+        use super::*;
+
+        #[test]
+        fn ilp_consistency_2x() {
+            let buf = vec![0xABu8; 0x1000];
+
+            let c1 = crc32c_slice8(&buf);
+            let [c2a, c2b] = crc32c_slice8_2x([&buf, &buf]);
+
+            assert_eq!(c1, c2a);
+            assert_eq!(c1, c2b);
+        }
+
+        #[test]
+        fn ilp_consistency_4x() {
+            let buf = vec![0xABu8; 0x1000];
+
+            let c1 = crc32c_slice8(&buf);
+            let [c4a, c4b, c4c, c4d] = crc32c_slice8_4x([&buf, &buf, &buf, &buf]);
+
+            assert_eq!(c1, c4a);
+            assert_eq!(c1, c4b);
+            assert_eq!(c1, c4c);
+            assert_eq!(c1, c4d);
+        }
+    }
+}
