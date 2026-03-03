@@ -22,6 +22,8 @@
 //! It uses polynomial arithmetic in a finite field GF(2), i.e. Galois Field of order 2, i.e. {0, 1}, w/ `0x1EDC6F41`
 //! as polynomial constant (init value), we use the refelected form `0x82F63B78` (little endian)
 
+use crate::hints;
+
 #[derive(Debug, PartialEq, Clone)]
 enum Backend {
     Hardware,
@@ -81,6 +83,39 @@ impl Crc32C {
     pub fn is_hardware_acceleration_available(&self) -> bool {
         self.0 == Backend::Hardware
     }
+
+    /// Generate a 32-bit crc for `buffer` using CRC32C algorithm
+    ///
+    /// Length of `buffer` must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
+    pub fn crc(&self, buffer: &[u8]) -> u32 {
+        if hints::unlikely(!self.is_hardware_acceleration_available()) {
+            return crc32c_slice8(buffer);
+        }
+
+        unimplemented!()
+    }
+
+    /// Generate crc for given `buffers` (2x) using CRC32C algorithm and `intra-core parallelism` (ILP)
+    ///
+    /// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
+    pub fn crc_2x(&self, buffers: [&[u8]; 2]) -> [u32; 2] {
+        if hints::unlikely(!self.is_hardware_acceleration_available()) {
+            return crc32c_slice8_2x(buffers);
+        }
+
+        unimplemented!()
+    }
+
+    /// Generate crc for given `buffers` (4x) using CRC32C algorithm and `intra-core parallelism` (ILP)
+    ///
+    /// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
+    pub fn crc_4x(&self, buffers: [&[u8]; 4]) -> [u32; 4] {
+        if hints::unlikely(!self.is_hardware_acceleration_available()) {
+            return crc32c_slice8_4x(buffers);
+        }
+
+        unimplemented!()
+    }
 }
 
 /// Polynomial in refelected form (little endian) over `0x1EDC6F41`, used by CRC32C algorithm as init value
@@ -130,17 +165,19 @@ const CRC_TABLE: [[u32; 0x100]; 8] = {
     table
 };
 
-/// Software impl of CRC32C algo using [`CASTAGNOLI_POLYNOMIAL`] as init value
+/// Software CRC32C (Castagnoli) impl to generate 32-bit crc for `buffer`
 ///
-/// The length of `bytes_buf` must be >= 8
+/// Length of `buffer` must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
 #[inline(always)]
-fn crc32c_slice8(bytes_buf: &[u8]) -> u32 {
+fn crc32c_slice8(buffer: &[u8]) -> u32 {
     // sanity check
-    debug_assert!(bytes_buf.len() & 7 == 0);
+    debug_assert!(buffer.len() & 7 == 0);
+
+    let table = &CRC_TABLE;
 
     let mut crc = !0u32;
-    let mut len = bytes_buf.len();
-    let mut ptr = bytes_buf.as_ptr();
+    let mut len = buffer.len();
+    let mut ptr = buffer.as_ptr();
 
     // NOTE: we process 8 bytes at a time for ilp
 
@@ -148,18 +185,163 @@ fn crc32c_slice8(bytes_buf: &[u8]) -> u32 {
         let word = unsafe { core::ptr::read_unaligned(ptr as *const u64) };
         crc ^= word as u32;
 
-        crc = CRC_TABLE[0][(crc & 0xFF) as usize]
-            ^ CRC_TABLE[1][((crc >> 8) & 0xFF) as usize]
-            ^ CRC_TABLE[2][((crc >> 0x10) & 0xFF) as usize]
-            ^ CRC_TABLE[3][(crc >> 0x18) as usize]
-            ^ CRC_TABLE[4][((word >> 0x20) & 0xFF) as usize]
-            ^ CRC_TABLE[5][((word >> 0x28) & 0xFF) as usize]
-            ^ CRC_TABLE[6][((word >> 0x30) & 0xFF) as usize]
-            ^ CRC_TABLE[7][(word >> 0x38) as usize];
+        crc = table[0][(crc & 0xFF) as usize]
+            ^ table[1][((crc >> 8) & 0xFF) as usize]
+            ^ table[2][((crc >> 0x10) & 0xFF) as usize]
+            ^ table[3][(crc >> 0x18) as usize]
+            ^ table[4][((word >> 0x20) & 0xFF) as usize]
+            ^ table[5][((word >> 0x28) & 0xFF) as usize]
+            ^ table[6][((word >> 0x30) & 0xFF) as usize]
+            ^ table[7][(word >> 0x38) as usize];
 
         ptr = unsafe { ptr.add(8) };
         len -= 8;
     }
 
     !crc
+}
+
+/// Software CRC32C (Castagnoli) impl to generate 32-bit crc for `buffers` (2x) using `intra-core parallelism` (ILP)
+///
+/// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
+#[inline(always)]
+fn crc32c_slice8_2x(buffers: [&[u8]; 2]) -> [u32; 2] {
+    let mut len = buffers[0].len();
+
+    // sanity checks
+    debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
+
+    let table = &CRC_TABLE;
+
+    let mut crc0 = !0u32;
+    let mut crc1 = !0u32;
+
+    let mut p0 = buffers[0].as_ptr();
+    let mut p1 = buffers[1].as_ptr();
+
+    while len > 0 {
+        unsafe {
+            let w0 = core::ptr::read_unaligned(p0 as *const u64);
+            let w1 = core::ptr::read_unaligned(p1 as *const u64);
+
+            crc0 ^= w0 as u32;
+            crc1 ^= w1 as u32;
+
+            crc0 = table[0][(crc0 & 0xFF) as usize]
+                ^ table[1][((crc0 >> 8) & 0xFF) as usize]
+                ^ table[2][((crc0 >> 0x10) & 0xFF) as usize]
+                ^ table[3][(crc0 >> 0x18) as usize]
+                ^ table[4][((w0 >> 0x20) & 0xFF) as usize]
+                ^ table[5][((w0 >> 0x28) & 0xFF) as usize]
+                ^ table[6][((w0 >> 0x30) & 0xFF) as usize]
+                ^ table[7][(w0 >> 0x38) as usize];
+
+            crc1 = table[0][(crc1 & 0xFF) as usize]
+                ^ table[1][((crc1 >> 8) & 0xFF) as usize]
+                ^ table[2][((crc1 >> 0x10) & 0xFF) as usize]
+                ^ table[3][(crc1 >> 0x18) as usize]
+                ^ table[4][((w1 >> 0x20) & 0xFF) as usize]
+                ^ table[5][((w1 >> 0x28) & 0xFF) as usize]
+                ^ table[6][((w1 >> 0x30) & 0xFF) as usize]
+                ^ table[7][(w1 >> 0x38) as usize];
+
+            p0 = p0.add(8);
+            p1 = p1.add(8);
+        }
+
+        len -= 8;
+    }
+
+    [!crc0, !crc1]
+}
+
+/// Software CRC32C (Castagnoli) impl to generate 32-bit crc for `buffers` (2x buffers)
+/// using `intra-core parallelism` (ILP)
+///
+/// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
+#[inline(always)]
+fn crc32c_slice8_4x(buffers: [&[u8]; 4]) -> [u32; 4] {
+    let mut len = buffers[0].len();
+
+    // sanity checks
+    debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
+
+    let table = &CRC_TABLE;
+
+    let mut crc0 = !0u32;
+    let mut crc1 = !0u32;
+    let mut crc2 = !0u32;
+    let mut crc3 = !0u32;
+
+    let mut p0 = buffers[0].as_ptr();
+    let mut p1 = buffers[1].as_ptr();
+    let mut p2 = buffers[2].as_ptr();
+    let mut p3 = buffers[3].as_ptr();
+
+    while len > 0 {
+        unsafe {
+            let w0 = core::ptr::read_unaligned(p0 as *const u64);
+            let w1 = core::ptr::read_unaligned(p1 as *const u64);
+            let w2 = core::ptr::read_unaligned(p2 as *const u64);
+            let w3 = core::ptr::read_unaligned(p3 as *const u64);
+
+            crc0 ^= w0 as u32;
+            crc1 ^= w1 as u32;
+            crc2 ^= w2 as u32;
+            crc3 ^= w3 as u32;
+
+            crc0 = table[0][(crc0 & 0xFF) as usize]
+                ^ table[1][((crc0 >> 8) & 0xFF) as usize]
+                ^ table[2][((crc0 >> 0x10) & 0xFF) as usize]
+                ^ table[3][(crc0 >> 0x18) as usize]
+                ^ table[4][((w0 >> 0x20) & 0xFF) as usize]
+                ^ table[5][((w0 >> 0x28) & 0xFF) as usize]
+                ^ table[6][((w0 >> 0x30) & 0xFF) as usize]
+                ^ table[7][(w0 >> 0x38) as usize];
+
+            crc1 = table[0][(crc1 & 0xFF) as usize]
+                ^ table[1][((crc1 >> 8) & 0xFF) as usize]
+                ^ table[2][((crc1 >> 0x10) & 0xFF) as usize]
+                ^ table[3][(crc1 >> 0x18) as usize]
+                ^ table[4][((w1 >> 0x20) & 0xFF) as usize]
+                ^ table[5][((w1 >> 0x28) & 0xFF) as usize]
+                ^ table[6][((w1 >> 0x30) & 0xFF) as usize]
+                ^ table[7][(w1 >> 0x38) as usize];
+
+            crc2 = table[0][(crc2 & 0xFF) as usize]
+                ^ table[1][((crc2 >> 8) & 0xFF) as usize]
+                ^ table[2][((crc2 >> 0x10) & 0xFF) as usize]
+                ^ table[3][(crc2 >> 0x18) as usize]
+                ^ table[4][((w2 >> 0x20) & 0xFF) as usize]
+                ^ table[5][((w2 >> 0x28) & 0xFF) as usize]
+                ^ table[6][((w2 >> 0x30) & 0xFF) as usize]
+                ^ table[7][(w2 >> 0x38) as usize];
+
+            crc3 = table[0][(crc3 & 0xFF) as usize]
+                ^ table[1][((crc3 >> 8) & 0xFF) as usize]
+                ^ table[2][((crc3 >> 0x10) & 0xFF) as usize]
+                ^ table[3][(crc3 >> 0x18) as usize]
+                ^ table[4][((w3 >> 0x20) & 0xFF) as usize]
+                ^ table[5][((w3 >> 0x28) & 0xFF) as usize]
+                ^ table[6][((w3 >> 0x30) & 0xFF) as usize]
+                ^ table[7][(w3 >> 0x38) as usize];
+
+            p0 = p0.add(8);
+            p1 = p1.add(8);
+            p2 = p2.add(8);
+            p3 = p3.add(8);
+        }
+
+        len -= 8;
+    }
+
+    [!crc0, !crc1, !crc2, !crc3]
 }
