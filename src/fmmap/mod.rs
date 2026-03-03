@@ -808,7 +808,7 @@ impl Core {
     }
 }
 
-#[repr(C, align(0x40))]
+#[repr(C)]
 pub(in crate::fmmap) struct ObjectInterface<T>
 where
     T: Sized + Send + Sync,
