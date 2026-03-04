@@ -524,3 +524,78 @@ unsafe fn crc32c_hardware_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
 
     [!(c0 as TCrc), !(c1 as TCrc), !(c2 as TCrc), !(c3 as TCrc)]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_buf(len: usize, seed: u8) -> Vec<u8> {
+        (0..len).map(|i| seed.wrapping_add(i as u8)).collect()
+    }
+
+    mod hw_sw_consistency {
+        use super::*;
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn ok_crc_single_buf() {
+            if !std::is_x86_feature_detected!("sse4.2") {
+                return;
+            }
+
+            let buf = make_buf(0x1000, 0x0A);
+
+            let sw = crc32c_slice8(&buf);
+            let hw = unsafe { crc32c_hardware(&buf) };
+            assert_eq!(sw, hw);
+        }
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn ok_crc_random_bufs() {
+            if !std::is_x86_feature_detected!("sse4.2") {
+                return;
+            }
+
+            for seed in 0..0x20u8 {
+                let buf = make_buf(0x2000, seed);
+
+                let sw = crc32c_slice8(&buf);
+                let hw = unsafe { crc32c_hardware(&buf) };
+                assert_eq!(sw, hw);
+            }
+        }
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn ok_crc_buf_2x() {
+            if !std::is_x86_feature_detected!("sse4.2") {
+                return;
+            }
+
+            let b0 = make_buf(0x1000, 0x0A);
+            let b1 = make_buf(0x1000, 0x0B);
+
+            let sw = crc32c_slice8_2x([&b0, &b1]);
+            let hw = unsafe { crc32c_hardware_2x([&b0, &b1]) };
+            assert_eq!(sw, hw);
+        }
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn ok_crc_buf_4x() {
+            if !std::is_x86_feature_detected!("sse4.2") {
+                return;
+            }
+
+            let b0 = make_buf(0x1000, 0x0A);
+            let b1 = make_buf(0x1000, 0x0B);
+            let b2 = make_buf(0x1000, 0x0C);
+            let b3 = make_buf(0x1000, 0x0D);
+
+            let sw = crc32c_slice8_4x([&b0, &b1, &b2, &b3]);
+            let hw = unsafe { crc32c_hardware_4x([&b0, &b1, &b2, &b3]) };
+            assert_eq!(sw, hw);
+        }
+    }
+}
