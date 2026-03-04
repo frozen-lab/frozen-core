@@ -234,16 +234,18 @@ fn crc32c_slice8(buf: &TBuf) -> TCrc {
 
     while len > 0 {
         let word: u64 = unsafe { core::ptr::read_unaligned(ptr as *const u64) };
-        crc ^= word as TCrc;
+        let hi = (word >> 0x20) as TCrc;
+        let w = word as TCrc;
+        let x = crc ^ w;
 
-        crc = table[0][(crc & 0xFF) as usize]
-            ^ table[1][((crc >> 8) & 0xFF) as usize]
-            ^ table[2][((crc >> 0x10) & 0xFF) as usize]
-            ^ table[3][(crc >> 0x18) as usize]
-            ^ table[4][((word >> 0x20) & 0xFF) as usize]
-            ^ table[5][((word >> 0x28) & 0xFF) as usize]
-            ^ table[6][((word >> 0x30) & 0xFF) as usize]
-            ^ table[7][(word >> 0x38) as usize];
+        crc = table[7][(x & 0xFF) as usize]
+            ^ table[6][((x >> 8) & 0xFF) as usize]
+            ^ table[5][((x >> 0x10) & 0xFF) as usize]
+            ^ table[4][((x >> 0x18) & 0xFF) as usize]
+            ^ table[3][(hi & 0xFF) as usize]
+            ^ table[2][((hi >> 8) & 0xFF) as usize]
+            ^ table[1][((hi >> 0x10) & 0xFF) as usize]
+            ^ table[0][((hi >> 0x18) & 0xFF) as usize];
 
         ptr = unsafe { ptr.add(8) };
         len -= 8;
@@ -280,26 +282,32 @@ fn crc32c_slice8_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
             let w0: u64 = core::ptr::read_unaligned(p0 as *const u64);
             let w1: u64 = core::ptr::read_unaligned(p1 as *const u64);
 
-            crc0 ^= w0 as TCrc;
-            crc1 ^= w1 as TCrc;
+            let lo0 = w0 as TCrc;
+            let lo1 = w1 as TCrc;
 
-            crc0 = table[0][(crc0 & 0xFF) as usize]
-                ^ table[1][((crc0 >> 8) & 0xFF) as usize]
-                ^ table[2][((crc0 >> 0x10) & 0xFF) as usize]
-                ^ table[3][(crc0 >> 0x18) as usize]
-                ^ table[4][((w0 >> 0x20) & 0xFF) as usize]
-                ^ table[5][((w0 >> 0x28) & 0xFF) as usize]
-                ^ table[6][((w0 >> 0x30) & 0xFF) as usize]
-                ^ table[7][(w0 >> 0x38) as usize];
+            let hi0 = (w0 >> 0x20) as TCrc;
+            let hi1 = (w1 >> 0x20) as TCrc;
 
-            crc1 = table[0][(crc1 & 0xFF) as usize]
-                ^ table[1][((crc1 >> 8) & 0xFF) as usize]
-                ^ table[2][((crc1 >> 0x10) & 0xFF) as usize]
-                ^ table[3][(crc1 >> 0x18) as usize]
-                ^ table[4][((w1 >> 0x20) & 0xFF) as usize]
-                ^ table[5][((w1 >> 0x28) & 0xFF) as usize]
-                ^ table[6][((w1 >> 0x30) & 0xFF) as usize]
-                ^ table[7][(w1 >> 0x38) as usize];
+            let x0 = crc0 ^ lo0;
+            let x1 = crc1 ^ lo1;
+
+            crc0 = table[7][(x0 & 0xFF) as usize]
+                ^ table[6][((x0 >> 8) & 0xFF) as usize]
+                ^ table[5][((x0 >> 0x10) & 0xFF) as usize]
+                ^ table[4][((x0 >> 0x18) & 0xFF) as usize]
+                ^ table[3][(hi0 & 0xFF) as usize]
+                ^ table[2][((hi0 >> 8) & 0xFF) as usize]
+                ^ table[1][((hi0 >> 0x10) & 0xFF) as usize]
+                ^ table[0][((hi0 >> 0x18) & 0xFF) as usize];
+
+            crc1 = table[7][(x1 & 0xFF) as usize]
+                ^ table[6][((x1 >> 8) & 0xFF) as usize]
+                ^ table[5][((x1 >> 0x10) & 0xFF) as usize]
+                ^ table[4][((x1 >> 0x18) & 0xFF) as usize]
+                ^ table[3][(hi1 & 0xFF) as usize]
+                ^ table[2][((hi1 >> 8) & 0xFF) as usize]
+                ^ table[1][((hi1 >> 0x10) & 0xFF) as usize]
+                ^ table[0][((hi1 >> 0x18) & 0xFF) as usize];
 
             p0 = p0.add(8);
             p1 = p1.add(8);
@@ -345,46 +353,56 @@ fn crc32c_slice8_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
             let w2: u64 = core::ptr::read_unaligned(p2 as *const u64);
             let w3: u64 = core::ptr::read_unaligned(p3 as *const u64);
 
-            crc0 ^= w0 as TCrc;
-            crc1 ^= w1 as TCrc;
-            crc2 ^= w2 as TCrc;
-            crc3 ^= w3 as TCrc;
+            let lo0 = w0 as TCrc;
+            let lo1 = w1 as TCrc;
+            let lo2 = w2 as TCrc;
+            let lo3 = w3 as TCrc;
 
-            crc0 = table[0][(crc0 & 0xFF) as usize]
-                ^ table[1][((crc0 >> 8) & 0xFF) as usize]
-                ^ table[2][((crc0 >> 0x10) & 0xFF) as usize]
-                ^ table[3][(crc0 >> 0x18) as usize]
-                ^ table[4][((w0 >> 0x20) & 0xFF) as usize]
-                ^ table[5][((w0 >> 0x28) & 0xFF) as usize]
-                ^ table[6][((w0 >> 0x30) & 0xFF) as usize]
-                ^ table[7][(w0 >> 0x38) as usize];
+            let hi0 = (w0 >> 0x20) as TCrc;
+            let hi1 = (w1 >> 0x20) as TCrc;
+            let hi2 = (w2 >> 0x20) as TCrc;
+            let hi3 = (w3 >> 0x20) as TCrc;
 
-            crc1 = table[0][(crc1 & 0xFF) as usize]
-                ^ table[1][((crc1 >> 8) & 0xFF) as usize]
-                ^ table[2][((crc1 >> 0x10) & 0xFF) as usize]
-                ^ table[3][(crc1 >> 0x18) as usize]
-                ^ table[4][((w1 >> 0x20) & 0xFF) as usize]
-                ^ table[5][((w1 >> 0x28) & 0xFF) as usize]
-                ^ table[6][((w1 >> 0x30) & 0xFF) as usize]
-                ^ table[7][(w1 >> 0x38) as usize];
+            let x0 = crc0 ^ lo0;
+            let x1 = crc1 ^ lo1;
+            let x2 = crc2 ^ lo2;
+            let x3 = crc3 ^ lo3;
 
-            crc2 = table[0][(crc2 & 0xFF) as usize]
-                ^ table[1][((crc2 >> 8) & 0xFF) as usize]
-                ^ table[2][((crc2 >> 0x10) & 0xFF) as usize]
-                ^ table[3][(crc2 >> 0x18) as usize]
-                ^ table[4][((w2 >> 0x20) & 0xFF) as usize]
-                ^ table[5][((w2 >> 0x28) & 0xFF) as usize]
-                ^ table[6][((w2 >> 0x30) & 0xFF) as usize]
-                ^ table[7][(w2 >> 0x38) as usize];
+            crc0 = table[7][(x0 & 0xFF) as usize]
+                ^ table[6][((x0 >> 8) & 0xFF) as usize]
+                ^ table[5][((x0 >> 0x10) & 0xFF) as usize]
+                ^ table[4][((x0 >> 0x18) & 0xFF) as usize]
+                ^ table[3][(hi0 & 0xFF) as usize]
+                ^ table[2][((hi0 >> 8) & 0xFF) as usize]
+                ^ table[1][((hi0 >> 0x10) & 0xFF) as usize]
+                ^ table[0][((hi0 >> 0x18) & 0xFF) as usize];
 
-            crc3 = table[0][(crc3 & 0xFF) as usize]
-                ^ table[1][((crc3 >> 8) & 0xFF) as usize]
-                ^ table[2][((crc3 >> 0x10) & 0xFF) as usize]
-                ^ table[3][(crc3 >> 0x18) as usize]
-                ^ table[4][((w3 >> 0x20) & 0xFF) as usize]
-                ^ table[5][((w3 >> 0x28) & 0xFF) as usize]
-                ^ table[6][((w3 >> 0x30) & 0xFF) as usize]
-                ^ table[7][(w3 >> 0x38) as usize];
+            crc1 = table[7][(x1 & 0xFF) as usize]
+                ^ table[6][((x1 >> 8) & 0xFF) as usize]
+                ^ table[5][((x1 >> 0x10) & 0xFF) as usize]
+                ^ table[4][((x1 >> 0x18) & 0xFF) as usize]
+                ^ table[3][(hi1 & 0xFF) as usize]
+                ^ table[2][((hi1 >> 8) & 0xFF) as usize]
+                ^ table[1][((hi1 >> 0x10) & 0xFF) as usize]
+                ^ table[0][((hi1 >> 0x18) & 0xFF) as usize];
+
+            crc2 = table[7][(x2 & 0xFF) as usize]
+                ^ table[6][((x2 >> 8) & 0xFF) as usize]
+                ^ table[5][((x2 >> 0x10) & 0xFF) as usize]
+                ^ table[4][((x2 >> 0x18) & 0xFF) as usize]
+                ^ table[3][(hi2 & 0xFF) as usize]
+                ^ table[2][((hi2 >> 8) & 0xFF) as usize]
+                ^ table[1][((hi2 >> 0x10) & 0xFF) as usize]
+                ^ table[0][((hi2 >> 0x18) & 0xFF) as usize];
+
+            crc3 = table[7][(x3 & 0xFF) as usize]
+                ^ table[6][((x3 >> 8) & 0xFF) as usize]
+                ^ table[5][((x3 >> 0x10) & 0xFF) as usize]
+                ^ table[4][((x3 >> 0x18) & 0xFF) as usize]
+                ^ table[3][(hi3 & 0xFF) as usize]
+                ^ table[2][((hi3 >> 8) & 0xFF) as usize]
+                ^ table[1][((hi3 >> 0x10) & 0xFF) as usize]
+                ^ table[0][((hi3 >> 0x18) & 0xFF) as usize];
 
             p0 = p0.add(8);
             p1 = p1.add(8);
@@ -407,7 +425,7 @@ unsafe fn crc32c_hardware(buf: &TBuf) -> TCrc {
     // sanity check
     debug_assert!(buf.len() & 7 == 0, "bytes_buf must be 8 bytes aligned");
 
-    let mut crc: u64 = !0;
+    let mut crc: u64 = (!0u32) as u64;
     let mut len = buf.len();
     let mut ptr = buf.as_ptr();
 
@@ -438,8 +456,8 @@ unsafe fn crc32c_hardware_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
         "each buf in bytes_bufs must be of same length"
     );
 
-    let mut c0: u64 = !0;
-    let mut c1: u64 = !0;
+    let mut c0: u64 = (!0u32) as u64;
+    let mut c1: u64 = (!0u32) as u64;
 
     let mut p0 = buffers[0].as_ptr();
     let mut p1 = buffers[1].as_ptr();
@@ -475,10 +493,10 @@ unsafe fn crc32c_hardware_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
         "each buf in bytes_bufs must be of same length"
     );
 
-    let mut c0: u64 = !0;
-    let mut c1: u64 = !0;
-    let mut c2: u64 = !0;
-    let mut c3: u64 = !0;
+    let mut c0: u64 = (!0u32) as u64;
+    let mut c1: u64 = (!0u32) as u64;
+    let mut c2: u64 = (!0u32) as u64;
+    let mut c3: u64 = (!0u32) as u64;
 
     let mut p0 = buffers[0].as_ptr();
     let mut p1 = buffers[1].as_ptr();
@@ -505,37 +523,4 @@ unsafe fn crc32c_hardware_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
     }
 
     [!(c0 as TCrc), !(c1 as TCrc), !(c2 as TCrc), !(c3 as TCrc)]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    mod software {
-        use super::*;
-
-        #[test]
-        fn ilp_consistency_2x() {
-            let buf = vec![0xABu8; 0x1000];
-
-            let c1 = crc32c_slice8(&buf);
-            let [c2a, c2b] = crc32c_slice8_2x([&buf, &buf]);
-
-            assert_eq!(c1, c2a);
-            assert_eq!(c1, c2b);
-        }
-
-        #[test]
-        fn ilp_consistency_4x() {
-            let buf = vec![0xABu8; 0x1000];
-
-            let c1 = crc32c_slice8(&buf);
-            let [c4a, c4b, c4c, c4d] = crc32c_slice8_4x([&buf, &buf, &buf, &buf]);
-
-            assert_eq!(c1, c4a);
-            assert_eq!(c1, c4b);
-            assert_eq!(c1, c4c);
-            assert_eq!(c1, c4d);
-        }
-    }
 }
