@@ -598,4 +598,67 @@ mod tests {
             assert_eq!(sw, hw);
         }
     }
+
+    mod corruption_detection {
+        use super::*;
+
+        #[test]
+        fn ok_single_bit_flip_changes_crc() {
+            let crc = Crc32C::new();
+
+            let mut buf = make_buf(0x1000, 0xAA);
+            let original = crc.crc(&buf);
+            buf[0x1A] ^= 1; // manually corrupt a single bit
+
+            let corrupted = crc.crc(&buf);
+            assert_ne!(original, corrupted);
+        }
+
+        #[test]
+        fn ok_multiple_bit_flips_change_crc() {
+            let crc = Crc32C::new();
+
+            let mut buf = make_buf(0x2000, 0x11);
+            let original = crc.crc(&buf);
+
+            buf[0] ^= 0b0000_0001;
+            buf[0x12A] ^= 0b1000_0000;
+            buf[0x23B] ^= 0b0001_0000;
+            buf[0x100B] ^= 0b0100_0000;
+
+            let corrupted = crc.crc(&buf);
+            assert_ne!(original, corrupted);
+        }
+
+        #[test]
+        fn ok_detects_torn_write_simulation() {
+            let crc = Crc32C::new();
+
+            let mut buf = make_buf(0x1000, 0x55);
+            let original = crc.crc(&buf);
+
+            // simulating partial overwrites
+            for b in &mut buf[0x80..0x100] {
+                *b = 0;
+            }
+
+            let corrupted = crc.crc(&buf);
+            assert_ne!(original, corrupted);
+        }
+
+        #[test]
+        fn ok_detects_random_corruption() {
+            let crc = Crc32C::new();
+
+            let mut buf = make_buf(0x1000, 0x42);
+            let original = crc.crc(&buf);
+
+            for i in (0..buf.len()).step_by(0x5F) {
+                buf[i] ^= 0xFF;
+            }
+
+            let corrupted = crc.crc(&buf);
+            assert_ne!(original, corrupted);
+        }
+    }
 }
