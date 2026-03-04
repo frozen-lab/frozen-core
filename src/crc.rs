@@ -21,10 +21,24 @@
 //!
 //! It uses polynomial arithmetic in a finite field GF(2), i.e. Galois Field of order 2, i.e. {0, 1}, w/ `0x1EDC6F41`
 //! as polynomial constant (init value), we use the refelected form `0x82F63B78` (little endian)
+//!
+//! ## Example
+//!
+//! ```
+//! let crc = frozen_core::crc::Crc32C::new();
+//!
+//! #[cfg(target_arch = "x86_64")]
+//! let expected = std::is_x86_feature_detected!("sse4.2");
+//!
+//! #[cfg(target_arch = "aarch64")]
+//! let expected = std::arch::is_aarch64_feature_detected!("crc");
+//!
+//! assert_eq!(crc.is_hardware_acceleration_available(), expected);
+//! ```
 
 use crate::hints;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum Backend {
     Hardware,
     Software,
@@ -35,11 +49,8 @@ type TBuf = [u8];
 
 /// Implementation of CRC32C (Castagnoli polynomial) to compute a 32-bit cyclic redundancy check (CRC) using
 /// Castagnoli polynomial
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Crc32C(Backend);
-
-unsafe impl Send for Crc32C {}
-unsafe impl Sync for Crc32C {}
 
 impl Crc32C {
     /// Create a new instance of [`Crc32C`]
@@ -132,7 +143,7 @@ impl Crc32C {
             return crc32c_slice8_2x(buffers);
         }
 
-        unimplemented!()
+        unsafe { crc32c_hardware_2x(buffers) }
     }
 
     /// Generate crc for given `buffers` (4x) using CRC32C algorithm and ILP
@@ -158,7 +169,7 @@ impl Crc32C {
             return crc32c_slice8_4x(buffers);
         }
 
-        unimplemented!()
+        unsafe { crc32c_hardware_4x(buffers) }
     }
 }
 
@@ -211,7 +222,7 @@ const CRC_TABLE: [[TCrc; 0x100]; 8] = {
 
 /// Software CRC32C (Castagnoli) impl to generate 32-bit crc for `buffer`
 ///
-/// Length of `buffer` must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
+/// Length of buffer must be a multiple of 8
 #[inline(always)]
 fn crc32c_slice8(buffer: &TBuf) -> TCrc {
     // sanity check
@@ -247,7 +258,7 @@ fn crc32c_slice8(buffer: &TBuf) -> TCrc {
 
 /// Software CRC32C (Castagnoli) impl to generate 32-bit crc for `buffers` (2x) using ILP
 ///
-/// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
+/// Length of each buffer must be equal and a multiple of 8
 #[inline(always)]
 fn crc32c_slice8_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
     let mut len = buffers[0].len();
@@ -306,7 +317,7 @@ fn crc32c_slice8_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
 /// Software CRC32C (Castagnoli) impl to generate 32-bit crc for `buffers` (2x buffers)
 /// using ILP
 ///
-/// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
+/// Length of each buffer must be equal and a multiple of 8
 #[inline(always)]
 fn crc32c_slice8_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
     let mut len = buffers[0].len();
@@ -392,7 +403,7 @@ fn crc32c_slice8_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
 
 /// Hardware (sse4.2) impl to generate 32-bit crc for `buffer`
 ///
-/// Length of `buffer` must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
+/// Length of buffer must be a multiple of 8
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
 unsafe fn crc32c_hardware(buffer: &TBuf) -> TCrc {
@@ -412,6 +423,89 @@ unsafe fn crc32c_hardware(buffer: &TBuf) -> TCrc {
     }
 
     (!crc) as TCrc
+}
+
+/// Hardware (sse4.2) impl to generate 32-bit crc for `buffers` (2x) using ILP
+///
+/// Length of each buffer must be equal and a multiple of 8
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn crc32c_hardware_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
+    let mut len = buffers[0].len();
+
+    // sanity checks
+    debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
+
+    let mut c0: u64 = !0;
+    let mut c1: u64 = !0;
+
+    let mut p0 = buffers[0].as_ptr();
+    let mut p1 = buffers[1].as_ptr();
+
+    while len > 0 {
+        let w0 = core::ptr::read_unaligned(p0 as *const u64);
+        let w1 = core::ptr::read_unaligned(p1 as *const u64);
+
+        c0 = core::arch::x86_64::_mm_crc32_u64(c0, w0);
+        c1 = core::arch::x86_64::_mm_crc32_u64(c1, w1);
+
+        p0 = p0.add(8);
+        p1 = p1.add(8);
+        len -= 8;
+    }
+
+    [!(c0 as TCrc), !(c1 as TCrc)]
+}
+
+/// Hardware (sse4.2) impl to generate 32-bit crc for `buffers` (4x) using ILP
+///
+/// Length of each buffer must be equal and a multiple of 8
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn crc32c_hardware_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
+    let mut len = buffers[0].len();
+
+    // sanity checks
+    debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
+
+    let mut c0: u64 = !0;
+    let mut c1: u64 = !0;
+    let mut c2: u64 = !0;
+    let mut c3: u64 = !0;
+
+    let mut p0 = buffers[0].as_ptr();
+    let mut p1 = buffers[1].as_ptr();
+    let mut p2 = buffers[2].as_ptr();
+    let mut p3 = buffers[3].as_ptr();
+
+    while len > 0 {
+        let w0 = core::ptr::read_unaligned(p0 as *const u64);
+        let w1 = core::ptr::read_unaligned(p1 as *const u64);
+        let w2 = core::ptr::read_unaligned(p2 as *const u64);
+        let w3 = core::ptr::read_unaligned(p3 as *const u64);
+
+        c0 = core::arch::x86_64::_mm_crc32_u64(c0, w0);
+        c1 = core::arch::x86_64::_mm_crc32_u64(c1, w1);
+        c2 = core::arch::x86_64::_mm_crc32_u64(c2, w2);
+        c3 = core::arch::x86_64::_mm_crc32_u64(c3, w3);
+
+        p0 = p0.add(8);
+        p1 = p1.add(8);
+        p2 = p2.add(8);
+        p3 = p3.add(8);
+
+        len -= 8;
+    }
+
+    [!(c0 as TCrc), !(c1 as TCrc), !(c2 as TCrc), !(c3 as TCrc)]
 }
 
 #[cfg(test)]
