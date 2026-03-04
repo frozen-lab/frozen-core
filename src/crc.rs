@@ -110,13 +110,7 @@ impl Crc32C {
     pub fn crc(&self, buf: &TBuf) -> TCrc {
         match self.0 {
             Backend::Software => crc32c_slice8(buf),
-            Backend::Hardware => {
-                #[cfg(target_arch = "x86_64")]
-                return unsafe { crc32c_hardware(buf) };
-
-                #[cfg(target_arch = "aarch64")]
-                unimplemented!()
-            }
+            Backend::Hardware => unsafe { crc32c_hardware(buf) },
         }
     }
 
@@ -135,13 +129,7 @@ impl Crc32C {
     pub fn crc_2x(&self, buffers: [&TBuf; 2]) -> [TCrc; 2] {
         match self.0 {
             Backend::Software => crc32c_slice8_2x(buffers),
-            Backend::Hardware => {
-                #[cfg(target_arch = "x86_64")]
-                return unsafe { crc32c_hardware_2x(buffers) };
-
-                #[cfg(target_arch = "aarch64")]
-                unimplemented!()
-            }
+            Backend::Hardware => unsafe { crc32c_hardware_2x(buffers) },
         }
     }
 
@@ -160,13 +148,7 @@ impl Crc32C {
     pub fn crc_4x(&self, buffers: [&TBuf; 4]) -> [TCrc; 4] {
         match self.0 {
             Backend::Software => crc32c_slice8_4x(buffers),
-            Backend::Hardware => {
-                #[cfg(target_arch = "x86_64")]
-                return unsafe { crc32c_hardware_4x(buffers) };
-
-                #[cfg(target_arch = "aarch64")]
-                unimplemented!()
-            }
+            Backend::Hardware => unsafe { crc32c_hardware_4x(buffers) },
         }
     }
 }
@@ -226,7 +208,7 @@ fn crc32c_slice8(buf: &TBuf) -> TCrc {
     // sanity check
     debug_assert!(buf.len() & 7 == 0);
 
-    let table = &CRC_TABLE;
+    let table = &CRC_TABLE[..];
 
     let mut crc: TCrc = !0;
     let mut len = buf.len();
@@ -269,10 +251,10 @@ fn crc32c_slice8_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
         "each buf in bytes_bufs must be of same length"
     );
 
-    let table = &CRC_TABLE;
+    let table = &CRC_TABLE[..];
 
-    let mut crc0: u32 = !0;
-    let mut crc1: u32 = !0;
+    let mut crc0: TCrc = !0;
+    let mut crc1: TCrc = !0;
 
     let mut p0 = buffers[0].as_ptr();
     let mut p1 = buffers[1].as_ptr();
@@ -334,7 +316,7 @@ fn crc32c_slice8_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
         "each buf in bytes_bufs must be of same length"
     );
 
-    let table = &CRC_TABLE;
+    let table = &CRC_TABLE[..];
 
     let mut crc0: TCrc = !0;
     let mut crc1: TCrc = !0;
@@ -525,6 +507,116 @@ unsafe fn crc32c_hardware_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
     [!(c0 as TCrc), !(c1 as TCrc), !(c2 as TCrc), !(c3 as TCrc)]
 }
 
+/// Compute CRC32C w/ ArmV8 `crc` SIMD instruction, to generate 32-bit crc
+///
+/// **NOTE:** Length of `buf` must be a multiple of 8
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "crc")]
+unsafe fn crc32c_hardware(buf: &TBuf) -> TCrc {
+    // sanity check
+    debug_assert!(buf.len() & 7 == 0, "bytes_buf must be 8 bytes aligned");
+
+    let mut crc: TCrc = !0;
+    let mut len = buf.len();
+    let mut ptr = buf.as_ptr();
+
+    while len > 0 {
+        let word: u64 = core::ptr::read_unaligned(ptr as *const u64);
+        crc = core::arch::aarch64::__crc32cd(crc, word);
+        ptr = ptr.add(8);
+
+        len -= 8;
+    }
+
+    !crc
+}
+
+/// Compute CRC32C for two bufs in parallel using `Instruction Level Parallelism` w/ ArmV8 `crc` SIMD instruction,
+/// to generate 32-bit crc for each buf (mapped one-to-one)
+///
+/// **NOTE:** Length of each buf must be equal and a multiple of 8
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "crc")]
+unsafe fn crc32c_hardware_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
+    let mut len = buffers[0].len();
+
+    // sanity checks
+    debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
+
+    let mut c0: TCrc = !0;
+    let mut c1: TCrc = !0;
+
+    let mut p0 = buffers[0].as_ptr();
+    let mut p1 = buffers[1].as_ptr();
+
+    while len > 0 {
+        let w0: u64 = core::ptr::read_unaligned(p0 as *const u64);
+        let w1: u64 = core::ptr::read_unaligned(p1 as *const u64);
+
+        c0 = core::arch::aarch64::__crc32cd(c0, w0);
+        c1 = core::arch::aarch64::__crc32cd(c1, w1);
+
+        p0 = p0.add(8);
+        p1 = p1.add(8);
+
+        len -= 8;
+    }
+
+    [!c0, !c1]
+}
+
+/// Compute CRC32C for four bufs in parallel using `Instruction Level Parallelism` w/ ArmV8 `crc` SIMD instruction,
+/// to generate 32-bit crc for each buf (mapped one-to-one)
+///
+/// **NOTE:** Length of each buf must be equal and a multiple of 8
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "crc")]
+unsafe fn crc32c_hardware_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
+    let mut len = buffers[0].len();
+
+    // sanity checks
+    debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
+
+    let mut c0: TCrc = !0;
+    let mut c1: TCrc = !0;
+    let mut c2: TCrc = !0;
+    let mut c3: TCrc = !0;
+
+    let mut p0 = buffers[0].as_ptr();
+    let mut p1 = buffers[1].as_ptr();
+    let mut p2 = buffers[2].as_ptr();
+    let mut p3 = buffers[3].as_ptr();
+
+    while len > 0 {
+        let w0: u64 = core::ptr::read_unaligned(p0 as *const u64);
+        let w1: u64 = core::ptr::read_unaligned(p1 as *const u64);
+        let w2: u64 = core::ptr::read_unaligned(p2 as *const u64);
+        let w3: u64 = core::ptr::read_unaligned(p3 as *const u64);
+
+        c0 = core::arch::aarch64::__crc32cd(c0, w0);
+        c1 = core::arch::aarch64::__crc32cd(c1, w1);
+        c2 = core::arch::aarch64::__crc32cd(c2, w2);
+        c3 = core::arch::aarch64::__crc32cd(c3, w3);
+
+        p0 = p0.add(8);
+        p1 = p1.add(8);
+        p2 = p2.add(8);
+        p3 = p3.add(8);
+
+        len -= 8;
+    }
+
+    [!c0, !c1, !c2, !c3]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,8 +625,23 @@ mod tests {
         (0..len).map(|i| seed.wrapping_add(i as u8)).collect()
     }
 
+    #[inline]
+    fn is_simd_available() -> bool {
+        #[cfg(target_arch = "x86_64")]
+        return std::is_x86_feature_detected!("sse4.2");
+
+        #[cfg(target_arch = "aarch64")]
+        return std::arch::is_aarch64_feature_detected!("crc");
+    }
+
     mod public_api {
         use super::*;
+
+        #[test]
+        fn ok_known_crc_vectors() {
+            let crc = Crc32C::new();
+            assert_eq!(crc.crc(b"12345678"), 0x6087809A);
+        }
 
         #[test]
         fn ok_crc_is_deterministic() {
@@ -597,9 +704,8 @@ mod tests {
         use super::*;
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn ok_crc_single_buf() {
-            if !std::is_x86_feature_detected!("sse4.2") {
+            if !is_simd_available() {
                 return;
             }
 
@@ -611,12 +717,7 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn ok_crc_random_bufs() {
-            if !std::is_x86_feature_detected!("sse4.2") {
-                return;
-            }
-
             for seed in 0..0x20u8 {
                 let buf = make_buf(0x2000, seed);
 
@@ -627,9 +728,8 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn ok_crc_buf_2x() {
-            if !std::is_x86_feature_detected!("sse4.2") {
+            if !is_simd_available() {
                 return;
             }
 
@@ -642,9 +742,8 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn ok_crc_buf_4x() {
-            if !std::is_x86_feature_detected!("sse4.2") {
+            if !is_simd_available() {
                 return;
             }
 
