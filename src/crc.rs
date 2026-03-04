@@ -533,6 +533,66 @@ mod tests {
         (0..len).map(|i| seed.wrapping_add(i as u8)).collect()
     }
 
+    mod public_api {
+        use super::*;
+
+        #[test]
+        fn ok_crc_is_deterministic() {
+            let crc = Crc32C::new();
+
+            let buf = make_buf(0x1000, 0x77);
+
+            let a = crc.crc(&buf);
+            let b = crc.crc(&buf);
+            let c = crc.crc(&buf);
+
+            assert_eq!(a, b);
+            assert_eq!(b, c);
+        }
+
+        #[test]
+        fn ok_different_buffers_have_different_crc() {
+            let crc = Crc32C::new();
+
+            let a = make_buf(0x1000, 0x10);
+            let b = make_buf(0x1000, 0x11);
+
+            assert_ne!(crc.crc(&a), crc.crc(&b));
+        }
+
+        #[test]
+        fn ok_parallel_crc_matches_single() {
+            let crc = Crc32C::new();
+
+            let b0 = make_buf(0x1000, 1);
+            let b1 = make_buf(0x1000, 2);
+            let b2 = make_buf(0x1000, 3);
+            let b3 = make_buf(0x1000, 4);
+
+            let s0 = crc.crc(&b0);
+            let s1 = crc.crc(&b1);
+            let s2 = crc.crc(&b2);
+            let s3 = crc.crc(&b3);
+
+            let p2 = crc.crc_2x([&b0, &b1]);
+            let p4 = crc.crc_4x([&b0, &b1, &b2, &b3]);
+
+            assert_eq!([s0, s1], p2);
+            assert_eq!([s0, s1, s2, s3], p4);
+        }
+
+        #[test]
+        fn ok_zero_buffer_crc() {
+            let crc = Crc32C::new();
+
+            let buf = vec![0u8; 0x1000];
+            let a = crc.crc(&buf);
+            let b = crc.crc(&buf);
+
+            assert_eq!(a, b);
+        }
+    }
+
     mod hw_sw_consistency {
         use super::*;
 
@@ -659,6 +719,22 @@ mod tests {
 
             let corrupted = crc.crc(&buf);
             assert_ne!(original, corrupted);
+        }
+
+        #[test]
+        fn ok_every_bit_flip_changes_crc() {
+            let crc = Crc32C::new();
+
+            let mut buf = make_buf(0x40, 0xAB);
+            let base = crc.crc(&buf);
+
+            for i in 0..buf.len() {
+                for bit in 0..8 {
+                    buf[i] ^= 1 << bit;
+                    assert_ne!(base, crc.crc(&buf));
+                    buf[i] ^= 1 << bit;
+                }
+            }
         }
     }
 }
