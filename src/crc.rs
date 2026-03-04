@@ -30,6 +30,9 @@ enum Backend {
     Software,
 }
 
+type TCrc = u32;
+type TBuf = [u8];
+
 /// Implementation of CRC32C (Castagnoli polynomial) to compute a 32-bit cyclic redundancy check (CRC) using
 /// Castagnoli polynomial
 #[derive(Debug, Clone)]
@@ -46,7 +49,7 @@ impl Crc32C {
     /// When the new instance is created, we select the fastest available backend,
     ///
     /// - On x86_64 we use `sse4.2` SIMD instructions when available
-    /// - On aarch64 we use ARMv8 CRC instructions when available
+    /// - On aarch64 we use ARMv8 `crc` instructions when available
     /// - Otherwise, fallback to portable software implementation
     ///
     /// Hardware acceleration is significantly faster than the software fallback, while both backend producing
@@ -86,19 +89,45 @@ impl Crc32C {
 
     /// Generate a 32-bit crc for `buffer` using CRC32C algorithm
     ///
-    /// Length of `buffer` must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
-    pub fn crc(&self, buffer: &[u8]) -> u32 {
+    /// ## Requirements
+    ///
+    /// Length of given `buffer` must be multiple of 8
+    ///
+    /// ## SIMD
+    ///
+    /// When available, we use:
+    ///
+    /// - `sse4.2` on x86_64 machines
+    /// - ArmV8 `crc` on aarch64 machines
+    ///
+    /// Otherwise, we fallback to software CRC32C (Castagnoli) impl
+    pub fn crc(&self, buffer: &TBuf) -> TCrc {
         if hints::unlikely(!self.is_hardware_acceleration_available()) {
             return crc32c_slice8(buffer);
         }
 
-        unimplemented!()
+        unsafe { crc32c_hardware(buffer) }
     }
 
     /// Generate crc for given `buffers` (2x) using CRC32C algorithm and ILP
     ///
-    /// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
-    pub fn crc_2x(&self, buffers: [&[u8]; 2]) -> [u32; 2] {
+    /// ## Requirements
+    ///
+    /// Length of given `buffer` must be multiple of 8
+    ///
+    /// ## SIMD
+    ///
+    /// When available, we use:
+    ///
+    /// - `sse4.2` on x86_64 machines
+    /// - ArmV8 `crc` on aarch64 machines
+    ///
+    /// Otherwise, we fallback to software CRC32C (Castagnoli) impl  
+    ///
+    /// ## ILP
+    ///
+    /// We compute crc for 2x bufs on a single CPU core by manually forcing ILP
+    pub fn crc_2x(&self, buffers: [&TBuf; 2]) -> [TCrc; 2] {
         if hints::unlikely(!self.is_hardware_acceleration_available()) {
             return crc32c_slice8_2x(buffers);
         }
@@ -108,8 +137,23 @@ impl Crc32C {
 
     /// Generate crc for given `buffers` (4x) using CRC32C algorithm and ILP
     ///
-    /// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
-    pub fn crc_4x(&self, buffers: [&[u8]; 4]) -> [u32; 4] {
+    /// ## Requirements
+    ///
+    /// Length of given `buffer` must be multiple of 8
+    ///
+    /// ## SIMD
+    ///
+    /// When available, we use:
+    ///
+    /// - `sse4.2` on x86_64
+    /// - ArmV8 `crc` instruction on aarch64
+    ///
+    /// Otherwise, we fallback to software CRC32C (Castagnoli) impl  
+    ///
+    /// ## ILP
+    ///
+    /// We compute crc for 4x bufs on a single CPU core by manually forcing ILP
+    pub fn crc_4x(&self, buffers: [&TBuf; 4]) -> [TCrc; 4] {
         if hints::unlikely(!self.is_hardware_acceleration_available()) {
             return crc32c_slice8_4x(buffers);
         }
@@ -119,20 +163,20 @@ impl Crc32C {
 }
 
 /// Polynomial in refelected form (little endian) over `0x1EDC6F41`, used by CRC32C algorithm as init value
-const CASTAGNOLI_POLYNOMIAL: u32 = 0x82F63B78;
+const CASTAGNOLI_POLYNOMIAL: TCrc = 0x82F63B78;
 
 /// Precomputed table of CRC32C values, for runtime perf by reducing computations at runtime,
 ///
 /// ## Memory Footprint
 ///
 /// Memory used is `0x100 * 4 * 8` i.e. `8 KiB`, which is stored in `.rodata` section
-const CRC_TABLE: [[u32; 0x100]; 8] = {
-    let mut table = [[0u32; 0x100]; 8];
+const CRC_TABLE: [[TCrc; 0x100]; 8] = {
+    let mut table = [[0; 0x100]; 8];
 
     // table[0]
     let mut i = 0;
     while i < 0x100 {
-        let mut crc = i as u32;
+        let mut crc = i as TCrc;
         let mut j = 0;
 
         while j < 8 {
@@ -169,13 +213,13 @@ const CRC_TABLE: [[u32; 0x100]; 8] = {
 ///
 /// Length of `buffer` must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
 #[inline(always)]
-fn crc32c_slice8(buffer: &[u8]) -> u32 {
+fn crc32c_slice8(buffer: &TBuf) -> TCrc {
     // sanity check
     debug_assert!(buffer.len() & 7 == 0);
 
     let table = &CRC_TABLE;
 
-    let mut crc = !0u32;
+    let mut crc = !0;
     let mut len = buffer.len();
     let mut ptr = buffer.as_ptr();
 
@@ -183,7 +227,7 @@ fn crc32c_slice8(buffer: &[u8]) -> u32 {
 
     while len > 0 {
         let word = unsafe { core::ptr::read_unaligned(ptr as *const u64) };
-        crc ^= word as u32;
+        crc ^= word as TCrc;
 
         crc = table[0][(crc & 0xFF) as usize]
             ^ table[1][((crc >> 8) & 0xFF) as usize]
@@ -205,7 +249,7 @@ fn crc32c_slice8(buffer: &[u8]) -> u32 {
 ///
 /// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
 #[inline(always)]
-fn crc32c_slice8_2x(buffers: [&[u8]; 2]) -> [u32; 2] {
+fn crc32c_slice8_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
     let mut len = buffers[0].len();
 
     // sanity checks
@@ -217,8 +261,8 @@ fn crc32c_slice8_2x(buffers: [&[u8]; 2]) -> [u32; 2] {
 
     let table = &CRC_TABLE;
 
-    let mut crc0 = !0u32;
-    let mut crc1 = !0u32;
+    let mut crc0 = !0;
+    let mut crc1 = !0;
 
     let mut p0 = buffers[0].as_ptr();
     let mut p1 = buffers[1].as_ptr();
@@ -228,8 +272,8 @@ fn crc32c_slice8_2x(buffers: [&[u8]; 2]) -> [u32; 2] {
             let w0 = core::ptr::read_unaligned(p0 as *const u64);
             let w1 = core::ptr::read_unaligned(p1 as *const u64);
 
-            crc0 ^= w0 as u32;
-            crc1 ^= w1 as u32;
+            crc0 ^= w0 as TCrc;
+            crc1 ^= w1 as TCrc;
 
             crc0 = table[0][(crc0 & 0xFF) as usize]
                 ^ table[1][((crc0 >> 8) & 0xFF) as usize]
@@ -264,7 +308,7 @@ fn crc32c_slice8_2x(buffers: [&[u8]; 2]) -> [u32; 2] {
 ///
 /// Length of each buffer must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
 #[inline(always)]
-fn crc32c_slice8_4x(buffers: [&[u8]; 4]) -> [u32; 4] {
+fn crc32c_slice8_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
     let mut len = buffers[0].len();
 
     // sanity checks
@@ -276,10 +320,10 @@ fn crc32c_slice8_4x(buffers: [&[u8]; 4]) -> [u32; 4] {
 
     let table = &CRC_TABLE;
 
-    let mut crc0 = !0u32;
-    let mut crc1 = !0u32;
-    let mut crc2 = !0u32;
-    let mut crc3 = !0u32;
+    let mut crc0 = !0;
+    let mut crc1 = !0;
+    let mut crc2 = !0;
+    let mut crc3 = !0;
 
     let mut p0 = buffers[0].as_ptr();
     let mut p1 = buffers[1].as_ptr();
@@ -293,10 +337,10 @@ fn crc32c_slice8_4x(buffers: [&[u8]; 4]) -> [u32; 4] {
             let w2 = core::ptr::read_unaligned(p2 as *const u64);
             let w3 = core::ptr::read_unaligned(p3 as *const u64);
 
-            crc0 ^= w0 as u32;
-            crc1 ^= w1 as u32;
-            crc2 ^= w2 as u32;
-            crc3 ^= w3 as u32;
+            crc0 ^= w0 as TCrc;
+            crc1 ^= w1 as TCrc;
+            crc2 ^= w2 as TCrc;
+            crc3 ^= w3 as TCrc;
 
             crc0 = table[0][(crc0 & 0xFF) as usize]
                 ^ table[1][((crc0 >> 8) & 0xFF) as usize]
@@ -344,6 +388,30 @@ fn crc32c_slice8_4x(buffers: [&[u8]; 4]) -> [u32; 4] {
     }
 
     [!crc0, !crc1, !crc2, !crc3]
+}
+
+/// Hardware (sse4.2) impl to generate 32-bit crc for `buffer`
+///
+/// Length of `buffer` must be >= 8 and power of 2 (i.e. all power of 2 values after 2^3)
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn crc32c_hardware(buffer: &TBuf) -> TCrc {
+    // sanity check
+    debug_assert!(buffer.len() & 7 == 0, "bytes_buf must be 8 bytes aligned");
+
+    let mut crc: u64 = !0;
+    let mut ptr = buffer.as_ptr();
+    let mut len = buffer.len();
+
+    while len > 0 {
+        let word = core::ptr::read_unaligned(ptr as *const u64);
+        crc = core::arch::x86_64::_mm_crc32_u64(crc, word);
+        ptr = ptr.add(8);
+
+        len -= 8;
+    }
+
+    (!crc) as TCrc
 }
 
 #[cfg(test)]
