@@ -5,7 +5,7 @@
 //! > We assume little-endian target architecture, while big-endian architectures are not supported
 //!
 //! > [!IMPORTANT]
-//! > The generated 32-bit CRC is not cryptographically secure, it's intended use is, only for data integrity in IO ops
+//! > The generated 32-bit CRC is not cryptographically secure, it's intended use only is for data integrity in IO ops
 //!
 //! ## What is CRC?
 //!

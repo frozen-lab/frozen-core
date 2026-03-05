@@ -9,6 +9,7 @@ Custom implementations and core utilities for frozen codebases.
 - [`fmmap`](#frozenmmap)
 - [`error`](#frozenerr)
 - [`hints`](#hints)
+- [`crc`](#crc)
 - [`notes`](#notes)
 
 ## Usage
@@ -143,6 +144,51 @@ To use the `hints` module, add it as a dependency in your `Cargo.toml`:
 ```toml
 [dependencies]
 frozen-core = { version = "0.0.7", default-features = false, features = ["hints"] }
+```
+
+## Crc
+
+Implementation of CRC32C (Castagnoli polynomial) to compute a 32-bit cyclic redundancy check (CRC) using
+Castagnoli polynomial, intended for data integrity verification for torn writes and curruption detection
+
+> [!WARNING]
+> We assume little-endian target architecture, as big-endian architectures are not supported
+
+> [!IMPORTANT]
+> The generated 32-bit CRC is not cryptographically secure, it's intended use only is for data integrity in IO ops
+
+To use the `crc` module, add it as a dependency in your `Cargo.toml`:
+
+```toml
+[dependencies]
+frozen-core = { version = "0.0.7", default-features = false, features = ["crc"] }
+```
+
+`Crc32C` is available on following architectires,
+
+| Architecture    | Support |
+|-----------------|:-------:|
+| `aarch64`       | ✅      |
+| `x86_64`        | ✅      |
+
+
+Read the example below for usage details,
+
+```rs
+use frozen_core::crc::Crc32C;
+
+fn main() {
+    let crc = Crc32C::new();
+
+    let b0: [u8; 8] = *b"12345678";
+    let b1: [u8; 8] = *b"ABCDEFGH";
+    let b2: [u8; 8] = *b"abcdefgh";
+    let b3: [u8; 8] = *b"zyxwvuts";
+
+    assert_eq!(crc.crc(&b0), crc.crc(&b0));
+    assert_eq!(crc.crc_2x([&b0, &b1]), crc.crc_2x([&b0, &b1]));
+    assert_eq!(crc.crc_4x([&b0, &b1, &b2, &b3]), crc.crc_4x([&b0, &b1, &b2, &b3]));
+}
 ```
 
 ## Notes
