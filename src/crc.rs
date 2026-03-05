@@ -5,7 +5,7 @@
 //! > We assume little-endian target architecture, while big-endian architectures are not supported
 //!
 //! > [!IMPORTANT]
-//! > The generated 32-bit CRC is not cryptographically secure, it's intended use is for data integrity in IO ops
+//! > The generated 32-bit CRC is not cryptographically secure, it's intended use is, only for data integrity in IO ops
 //!
 //! ## What is CRC?
 //!
@@ -27,13 +27,14 @@
 //! ```
 //! let crc = frozen_core::crc::Crc32C::new();
 //!
-//! #[cfg(target_arch = "x86_64")]
-//! let expected = std::is_x86_feature_detected!("sse4.2");
+//! let b0: [u8; 8] = *b"12345678";
+//! let b1: [u8; 8] = *b"ABCDEFGH";
+//! let b2: [u8; 8] = *b"abcdefgh";
+//! let b3: [u8; 8] = *b"zyxwvuts";
 //!
-//! #[cfg(target_arch = "aarch64")]
-//! let expected = std::arch::is_aarch64_feature_detected!("crc");
-//!
-//! assert_eq!(crc.is_hardware_acceleration_available(), expected);
+//! assert_eq!(crc.crc(&b0), crc.crc(&b0));
+//! assert_eq!(crc.crc_2x([&b0, &b1]),crc.crc_2x([&b0, &b1]));
+//! assert_eq!(crc.crc_4x([&b0, &b1, &b2, &b3]),crc.crc_4x([&b0, &b1, &b2, &b3]));
 //! ```
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -47,6 +48,21 @@ type TBuf = [u8];
 
 /// Implementation of CRC32C (Castagnoli polynomial) to compute a 32-bit cyclic redundancy check (CRC) using
 /// Castagnoli polynomial
+///
+/// ## Example
+///
+/// ```
+/// let crc = frozen_core::crc::Crc32C::new();
+///
+/// let b0: [u8; 8] = *b"12345678";
+/// let b1: [u8; 8] = *b"ABCDEFGH";
+/// let b2: [u8; 8] = *b"abcdefgh";
+/// let b3: [u8; 8] = *b"zyxwvuts";
+///
+/// assert_eq!(crc.crc(&b0), crc.crc(&b0));
+/// assert_eq!(crc.crc_2x([&b0, &b1]),crc.crc_2x([&b0, &b1]));
+/// assert_eq!(crc.crc_4x([&b0, &b1, &b2, &b3]),crc.crc_4x([&b0, &b1, &b2, &b3]));
+/// ```
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Crc32C(Backend);
 
@@ -69,13 +85,14 @@ impl Crc32C {
     /// ```
     /// let crc = frozen_core::crc::Crc32C::new();
     ///
-    /// #[cfg(target_arch = "x86_64")]
-    /// let expected = std::is_x86_feature_detected!("sse4.2");
+    /// let b0: [u8; 8] = *b"12345678";
+    /// let b1: [u8; 8] = *b"ABCDEFGH";
+    /// let b2: [u8; 8] = *b"abcdefgh";
+    /// let b3: [u8; 8] = *b"zyxwvuts";
     ///
-    /// #[cfg(target_arch = "aarch64")]
-    /// let expected = std::arch::is_aarch64_feature_detected!("crc");
-    ///
-    /// assert_eq!(crc.is_hardware_acceleration_available(), expected);
+    /// assert_eq!(crc.crc(&b0), crc.crc(&b0));
+    /// assert_eq!(crc.crc_2x([&b0, &b1]),crc.crc_2x([&b0, &b1]));
+    /// assert_eq!(crc.crc_4x([&b0, &b1, &b2, &b3]),crc.crc_4x([&b0, &b1, &b2, &b3]));
     /// ```
     pub fn new() -> Self {
         #[cfg(target_arch = "x86_64")]
@@ -92,6 +109,17 @@ impl Crc32C {
     }
 
     /// Checks whether hardware acceleration is available at runtime
+    /// ```
+    /// let crc = frozen_core::crc::Crc32C::new();
+    ///
+    /// #[cfg(target_arch = "x86_64")]
+    /// let expected = std::is_x86_feature_detected!("sse4.2");
+    ///
+    /// #[cfg(target_arch = "aarch64")]
+    /// let expected = std::arch::is_aarch64_feature_detected!("crc");
+    ///
+    /// assert_eq!(crc.is_hardware_acceleration_available(), expected);    
+    /// ```
     pub fn is_hardware_acceleration_available(&self) -> bool {
         self.0 == Backend::Hardware
     }
@@ -107,6 +135,15 @@ impl Crc32C {
     /// - fallback: software castagnoli impl
     ///
     /// All backends produce identical CRC32C values
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// let crc = frozen_core::crc::Crc32C::new();
+    ///
+    /// let b0: [u8; 8] = *b"12345678";
+    /// assert_eq!(crc.crc(&b0), crc.crc(&b0));
+    /// ```
     pub fn crc(&self, buf: &TBuf) -> TCrc {
         match self.0 {
             Backend::Software => crc32c_slice8(buf),
@@ -126,6 +163,17 @@ impl Crc32C {
     /// - fallback: software castagnoli impl
     ///
     /// All backends produce identical CRC32C values
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// let crc = frozen_core::crc::Crc32C::new();
+    ///
+    /// let b0: [u8; 8] = *b"12345678";
+    /// let b1: [u8; 8] = *b"ABCDEFGH";
+    ///
+    /// assert_eq!(crc.crc_2x([&b0, &b1]),crc.crc_2x([&b0, &b1]));
+    /// ```
     pub fn crc_2x(&self, buffers: [&TBuf; 2]) -> [TCrc; 2] {
         match self.0 {
             Backend::Software => crc32c_slice8_2x(buffers),
@@ -145,6 +193,18 @@ impl Crc32C {
     /// - fallback: software castagnoli impl
     ///
     /// All backends produce identical CRC32C values
+    /// ## Example
+    ///
+    /// ```
+    /// let crc = frozen_core::crc::Crc32C::new();
+    ///
+    /// let b0: [u8; 8] = *b"12345678";
+    /// let b1: [u8; 8] = *b"ABCDEFGH";
+    /// let b2: [u8; 8] = *b"abcdefgh";
+    /// let b3: [u8; 8] = *b"zyxwvuts";
+    ///
+    /// assert_eq!(crc.crc_4x([&b0, &b1, &b2, &b3]),crc.crc_4x([&b0, &b1, &b2, &b3]));
+    /// ```
     pub fn crc_4x(&self, buffers: [&TBuf; 4]) -> [TCrc; 4] {
         match self.0 {
             Backend::Software => crc32c_slice8_4x(buffers),
