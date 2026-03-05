@@ -18,7 +18,7 @@ Add following to your `Cargo.toml`,
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.7", default-features = true }
+frozen-core = { version = "0.0.8", default-features = true }
 ```
 
 > [!TIP]
@@ -32,7 +32,7 @@ To use the `ffile` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.7", default-features = false, features = ["ffile"] }
+frozen-core = { version = "0.0.8", default-features = false, features = ["ffile"] }
 ```
 
 `FrozenFile` is currently available on the following platforms,
@@ -56,7 +56,7 @@ To use the `fmmap` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.7", default-features = false, features = ["fmmap"] }
+frozen-core = { version = "0.0.8", default-features = false, features = ["fmmap"] }
 ```
 
 `FrozenMMap` is currently available on the following platforms,
@@ -132,7 +132,7 @@ To use the `error` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.7", default-features = false, features = ["error"] }
+frozen-core = { version = "0.0.8", default-features = false, features = ["error"] }
 ```
 
 ## Hints
@@ -143,7 +143,7 @@ To use the `hints` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.7", default-features = false, features = ["hints"] }
+frozen-core = { version = "0.0.8", default-features = false, features = ["hints"] }
 ```
 
 ## Crc
@@ -161,7 +161,7 @@ To use the `crc` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.7", default-features = false, features = ["crc"] }
+frozen-core = { version = "0.0.8", default-features = false, features = ["crc"] }
 ```
 
 `Crc32C` is available on following architectires,
