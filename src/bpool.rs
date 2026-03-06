@@ -1,8 +1,93 @@
+//! Lock-free buffer pool used for staging IO buffers
+//!
+//! ## Features
+//!
+//! - *RAII Safe*
+//! - *Graceful Shutdown*
+//! - *Lock-free fast path*
+//!
+//! ## Pooling for allocations
+//!
+//! Bufs are allocated in batches using [`BPool::allocate`], it may allocate fewer then requested, in such cases
+//! caller should wait using [`BPool::wait`] which block till any bufs are available to use again
+//!
+//! ## Example
+//!
+//! ```
+//! use std::thread;
+//! use std::sync::Arc;
+//! use frozen_core::bpool::BPool;
+//!
+//! const MODULE_ID: u8 = 0;
+//! const POOL_CAP: usize = 8;
+//! const BUF_SIZE: usize = 0x20;
+//!
+//! let pool = Arc::new(BPool::new(BUF_SIZE, POOL_CAP, MODULE_ID));
+//! let mut handles = Vec::new();
+//!
+//! for _ in 0..4 {
+//!     let pool = pool.clone();
+//!     handles.push(thread::spawn(move || {
+//!         for _ in 0..0x80 {
+//!             let mut n = 2;
+//!             while n != 0 {
+//!                 let alloc = pool.allocate(n);
+//!
+//!                 // pool when not all bufs are allocated
+//!                 if alloc.count == 0 {
+//!                     pool.wait().expect("wait failed");
+//!                     continue;
+//!                 }
+//!
+//!                n -= alloc.count;
+//!             }
+//!
+//!             // NOTE: allocated bufs are freed automatically when `alloc` drops
+//!         }
+//!     }));
+//! }
+//!
+//! for h in handles {
+//!     h.join().unwrap();
+//! }
+//! ```
+
 use crate::error::{FrozenErr, FrozenRes};
 use std::sync::{self, atomic};
 
 const INVALID_POOL_SLOT: usize = u32::MAX as usize;
 
+/// Lock-free buffer pool used for staging IO buffers
+///
+/// ## Features
+///
+/// - *RAII Safe*
+/// - *Graceful Shutdown*
+/// - *Lock-free fast path*
+///
+/// ## Pooling for allocations
+///
+/// Bufs are allocated in batches using [`BPool::allocate`], it may allocate fewer then requested, in such cases
+/// caller should wait using [`BPool::wait`] which block till any bufs are available to use again
+///
+/// ## Example
+///
+/// ```
+/// const MODULE_ID: u8 = 0;
+/// const POOL_CAP: usize = 4;
+/// const BUF_SIZE: usize = 0x20;
+///
+/// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, POOL_CAP, MODULE_ID);
+///
+/// {
+///     // NOTE: allocations are RAII safe, hence the underlying resource is reused when `alloc` is dropped
+///     let alloc = pool.allocate(4);
+///     assert_eq!(alloc.count, 4);
+/// }
+///
+/// let alloc2 = pool.allocate(4);
+/// assert_eq!(alloc2.count, 4);
+/// ```
 #[derive(Debug)]
 pub struct BPool {
     ptr: PoolPtr,
@@ -21,10 +106,36 @@ unsafe impl Send for BPool {}
 unsafe impl Sync for BPool {}
 
 impl BPool {
-    pub fn new(capacity: usize, buf_size: usize, module_id: u8) -> Self {
+    /// Create a new instance of [`BPool`]
+    ///
+    /// ## Params
+    ///
+    /// - `buf_size`: size of each buf in [`BPool`]
+    /// - `capacity`: capacity of [`BPool`] i.e. number of buffers in memory
+    /// - `module_id`: id used by [`FrozenErr`] for error propagation
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// const MODULE_ID: u8 = 0;
+    /// const POOL_CAP: usize = 4;
+    /// const BUF_SIZE: usize = 0x20;
+    ///
+    /// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, POOL_CAP, MODULE_ID);
+    ///
+    /// {
+    ///     // NOTE: allocations are RAII safe, hence the underlying resource is reused when `alloc` is dropped
+    ///     let alloc = pool.allocate(4);
+    ///     assert_eq!(alloc.count, 4);
+    /// }
+    ///
+    /// let alloc2 = pool.allocate(4);
+    /// assert_eq!(alloc2.count, 4);
+    /// ```
+    pub fn new(buf_size: usize, capacity: usize, module_id: u8) -> Self {
         let pool_size = capacity * buf_size;
         let mut pool = Vec::<u8>::with_capacity(pool_size);
-        let ptr = PoolPtr(pool.as_mut_ptr());
+        let ptr = PoolPtr { ptr: pool.as_mut_ptr() };
 
         // NOTE: `Vec::with_capacity(N)` allocates memory but keeps the len at 0. We use raw pointers
         // to access different slots, if the len stays at 0, it'd create undefined behavior. Also, the
@@ -71,6 +182,27 @@ impl BPool {
     /// which stores the result of `allocate`, is dropped, the buffer's it holds are
     /// also automatically freed. The burden of _freeing after use_ does not fall on
     /// the caller.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// const MODULE_ID: u8 = 0;
+    /// const POOL_CAP: usize = 4;
+    /// const BUF_SIZE: usize = 0x20;
+    ///
+    /// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, POOL_CAP, MODULE_ID);
+    ///
+    /// let alloc1 = pool.allocate(4);
+    /// assert!(alloc1.count == 4);
+    ///
+    /// let alloc2 = pool.allocate(1);
+    /// assert!(alloc2.count == 0);
+    ///
+    /// drop(alloc1);
+    ///
+    /// let alloc3 = pool.allocate(1);
+    /// assert!(alloc3.count == 1);
+    /// ```
     #[inline(always)]
     pub fn allocate(&self, n: usize) -> Allocation {
         let mut head = self.head.load(atomic::Ordering::Acquire);
@@ -90,10 +222,13 @@ impl BPool {
                 return batch;
             }
 
+            //
             // local walk
-            let cur = idx;
-            let mut last = cur;
+            //
+
             let mut count = 1;
+            let mut last = idx;
+
             while count < n {
                 // This is valid as `next` is already the index (unpacked version) of the slot
                 let next = self.next[last as usize].load(atomic::Ordering::Relaxed);
@@ -112,17 +247,17 @@ impl BPool {
                 .head
                 .compare_exchange(head, new_head, atomic::Ordering::AcqRel, atomic::Ordering::Acquire)
             {
+                Err(h) => head = h,
                 Ok(_) => {
-                    // materialize slots
                     let mut cur = idx;
                     for _ in 0..count {
                         batch.slots.push(self.ptr.add((cur * self.buf_size) as u64));
                         cur = self.next[cur as usize].load(atomic::Ordering::Relaxed);
                     }
+
                     batch.count = count;
                     return batch;
                 }
-                Err(h) => head = h,
             }
         }
     }
@@ -151,6 +286,45 @@ impl BPool {
         }
     }
 
+    /// Block until at least one buffer becomes available
+    ///
+    /// This function is intended to be used when [`BPool::allocate`] returns less then requested bufs, i.e. when pool
+    /// is exhausted
+    ///
+    /// ## Polling
+    ///
+    /// The typical allocation pattern is,
+    ///
+    /// - Attempt allocation w/ [`BPool::allocate`]
+    /// - If less then requested bufs are allocated, call [`BPool::wait`]
+    /// - Retry the allocation; all within a loop
+    ///
+    /// ## Notes
+    ///
+    /// - The caller must retry [`BPool::allocate`] after calling [`BPool::wait`]
+    /// - Only threads waiting for buffers are blocked, the allocation fast path remains lock-free
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// const MODULE_ID: u8 = 0;
+    /// const POOL_CAP: usize = 2;
+    /// const BUF_SIZE: usize = 0x20;
+    ///
+    /// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, POOL_CAP, MODULE_ID);
+    ///
+    /// let alloc = pool.allocate(2);
+    /// assert_eq!(alloc.count, 2);
+    ///
+    /// let empty = pool.allocate(1);
+    /// assert_eq!(empty.count, 0);
+    ///
+    /// drop(alloc);
+    /// pool.wait().expect("wait failed");
+    ///
+    /// let alloc2 = pool.allocate(1);
+    /// assert_eq!(alloc2.count, 1);
+    /// ```
     #[inline]
     pub fn wait(&self) -> FrozenRes<()> {
         if self.has_free() {
@@ -198,7 +372,7 @@ impl Drop for BPool {
 
         // NOTE: We re-construct original allocation from the stored pointer! This builds up the vecotor
         // as it was created, which then is dropped by Rust destructor's automatically!
-        let _ = unsafe { Vec::from_raw_parts(self.ptr.ptr(), pool_size, pool_size) };
+        let _ = unsafe { Vec::from_raw_parts(self.ptr.ptr, pool_size, pool_size) };
     }
 }
 
@@ -246,35 +420,42 @@ const fn unpack_pool_idx(id: usize) -> (usize, usize) {
     (id & POOL_IDX_MASK, id >> POOL_IDX_BITS)
 }
 
-type TSlot = *mut u8;
+type TPoolPtr = *mut u8;
 
+/// Pointer to buffer allocated by [`BPool::allocate`]
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct PoolPtr(TSlot);
+pub struct PoolPtr {
+    /// Raw pointer of the buffer allocated by [`BPool::allocate`]
+    pub ptr: TPoolPtr,
+}
 
 unsafe impl Send for PoolPtr {}
 unsafe impl Sync for PoolPtr {}
 
 impl PoolPtr {
     #[inline]
-    pub const fn ptr(&self) -> TSlot {
-        self.0
+    fn add(&self, count: u64) -> Self {
+        Self {
+            ptr: unsafe { self.ptr.add(count as usize) },
+        }
     }
 
     #[inline]
-    const fn add(&self, count: u64) -> Self {
-        unsafe { Self(self.0.add(count as usize)) }
-    }
-
-    #[inline]
-    const fn offset_from(&self, ptr: &Self) -> usize {
-        unsafe { ptr.0.offset_from(self.0) as usize }
+    fn offset_from(&self, ptr: &Self) -> usize {
+        unsafe { ptr.ptr.offset_from(self.ptr) as usize }
     }
 }
 
+/// Buffer allocations allocated by [`BPool::allocate`]
 #[derive(Debug)]
 pub struct Allocation<'a> {
+    /// Number of buffers allocated, can be lower then the requested amount
     pub count: usize,
+
+    /// Vector of [`PoolPtr`] objects, i.e. Raw buffer pointers
     pub slots: Vec<PoolPtr>,
+
+    /// Guard to enforce RAII safety
     guard: AllocationGuard<'a>,
 }
 
