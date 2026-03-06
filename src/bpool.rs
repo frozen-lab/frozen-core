@@ -8,7 +8,7 @@
 //!
 //! ## Pooling for allocations
 //!
-//! Bufs are allocated in batches using [`BPool::allocate`], it may allocate fewer then requested, in such cases
+//! Bufs are allocated in batches using [`BPool::allocate`], it may allocate fewer than requested, in such cases
 //! caller should wait using [`BPool::wait`] which block till any bufs are available to use again
 //!
 //! ## Example
@@ -19,10 +19,10 @@
 //! use frozen_core::bpool::BPool;
 //!
 //! const MODULE_ID: u8 = 0;
-//! const POOL_CAP: usize = 8;
+//! const CAPACITY: usize = 8;
 //! const BUF_SIZE: usize = 0x20;
 //!
-//! let pool = Arc::new(BPool::new(BUF_SIZE, POOL_CAP, MODULE_ID));
+//! let pool = Arc::new(BPool::new(BUF_SIZE, CAPACITY, MODULE_ID));
 //! let mut handles = Vec::new();
 //!
 //! for _ in 0..4 {
@@ -67,17 +67,17 @@ const INVALID_POOL_SLOT: usize = u32::MAX as usize;
 ///
 /// ## Pooling for allocations
 ///
-/// Bufs are allocated in batches using [`BPool::allocate`], it may allocate fewer then requested, in such cases
+/// Bufs are allocated in batches using [`BPool::allocate`], it may allocate fewer than requested, in such cases
 /// caller should wait using [`BPool::wait`] which block till any bufs are available to use again
 ///
 /// ## Example
 ///
 /// ```
 /// const MODULE_ID: u8 = 0;
-/// const POOL_CAP: usize = 4;
+/// const CAPACITY: usize = 4;
 /// const BUF_SIZE: usize = 0x20;
 ///
-/// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, POOL_CAP, MODULE_ID);
+/// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, CAPACITY, MODULE_ID);
 ///
 /// {
 ///     // NOTE: allocations are RAII safe, hence the underlying resource is reused when `alloc` is dropped
@@ -118,10 +118,10 @@ impl BPool {
     ///
     /// ```
     /// const MODULE_ID: u8 = 0;
-    /// const POOL_CAP: usize = 4;
+    /// const CAPACITY: usize = 4;
     /// const BUF_SIZE: usize = 0x20;
     ///
-    /// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, POOL_CAP, MODULE_ID);
+    /// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, CAPACITY, MODULE_ID);
     ///
     /// {
     ///     // NOTE: allocations are RAII safe, hence the underlying resource is reused when `alloc` is dropped
@@ -169,28 +169,42 @@ impl BPool {
         }
     }
 
-    /// Allocates `N` buffers for use in write IO ops.
+    /// Allocates `N` buffers for staging IO ops
+    ///
+    /// ## Calling Pattern
+    ///
+    /// ```txt
+    /// remaining = n
+    /// loop
+    ///     alloc = allocate(remaining)
+    ///     if alloc.count == 0
+    ///         wait()
+    ///         continue
+    ///
+    ///     remaining -= alloc.count
+    ///     if remaining == 0
+    ///         break
+    /// ```
     ///
     /// ## Polling
     ///
-    /// This function may not allocate all the `N` required buffers in one call,
-    /// so the caller must poll (wait and retry) for remaining `N` buffers.
+    /// This function may not allocate all the `N` required buffers in one call, so the caller must
+    /// poll (wait and retry) for remaining `N` buffers
     ///
     /// ## RAII Safety
     ///
-    /// All [`BufPool`] aloocations are RAII safe by default, hence when the variable
-    /// which stores the result of `allocate`, is dropped, the buffer's it holds are
-    /// also automatically freed. The burden of _freeing after use_ does not fall on
-    /// the caller.
+    /// All [`BPool`] aloocations are RAII safe by default, hence when the variable which stores the result
+    /// of `allocate`, is dropped, the buffer's it holds are also automatically freed, the burden of _freeing after use_
+    /// does not fall on the caller
     ///
     /// ## Example
     ///
     /// ```
     /// const MODULE_ID: u8 = 0;
-    /// const POOL_CAP: usize = 4;
+    /// const CAPACITY: usize = 4;
     /// const BUF_SIZE: usize = 0x20;
     ///
-    /// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, POOL_CAP, MODULE_ID);
+    /// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, CAPACITY, MODULE_ID);
     ///
     /// let alloc1 = pool.allocate(4);
     /// assert!(alloc1.count == 4);
@@ -288,15 +302,15 @@ impl BPool {
 
     /// Block until at least one buffer becomes available
     ///
-    /// This function is intended to be used when [`BPool::allocate`] returns less then requested bufs, i.e. when pool
-    /// is exhausted
+    /// This function is intended to be used when [`BPool::allocate`] returns less than requested bufs,
+    /// i.e. when pool is exhausted
     ///
     /// ## Polling
     ///
     /// The typical allocation pattern is,
     ///
     /// - Attempt allocation w/ [`BPool::allocate`]
-    /// - If less then requested bufs are allocated, call [`BPool::wait`]
+    /// - If less than requested bufs are allocated, call [`BPool::wait`]
     /// - Retry the allocation; all within a loop
     ///
     /// ## Notes
@@ -308,10 +322,10 @@ impl BPool {
     ///
     /// ```
     /// const MODULE_ID: u8 = 0;
-    /// const POOL_CAP: usize = 2;
+    /// const CAPACITY: usize = 2;
     /// const BUF_SIZE: usize = 0x20;
     ///
-    /// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, POOL_CAP, MODULE_ID);
+    /// let pool = frozen_core::bpool::BPool::new(BUF_SIZE, CAPACITY, MODULE_ID);
     ///
     /// let alloc = pool.allocate(2);
     /// assert_eq!(alloc.count, 2);
@@ -371,7 +385,7 @@ impl Drop for BPool {
         let pool_size = self.capacity * self.buf_size;
 
         // NOTE: We re-construct original allocation from the stored pointer! This builds up the vecotor
-        // as it was created, which then is dropped by Rust destructor's automatically!
+        // as it was created, which than is dropped by Rust destructor's automatically!
         let _ = unsafe { Vec::from_raw_parts(self.ptr.ptr, pool_size, pool_size) };
     }
 }
@@ -425,7 +439,7 @@ type TPoolPtr = *mut u8;
 /// Pointer to buffer allocated by [`BPool::allocate`]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PoolPtr {
-    /// Raw pointer of the buffer allocated by [`BPool::allocate`]
+    /// Raw pointer to the start of a buffer owned by the pool, where the valid memory range is `[ptr, ptr + buf_size)`
     pub ptr: TPoolPtr,
 }
 
@@ -449,7 +463,7 @@ impl PoolPtr {
 /// Buffer allocations allocated by [`BPool::allocate`]
 #[derive(Debug)]
 pub struct Allocation<'a> {
-    /// Number of buffers allocated, can be lower then the requested amount
+    /// Number of buffers allocated, can be lower than the requested amount
     pub count: usize,
 
     /// Vector of [`PoolPtr`] objects, i.e. Raw buffer pointers
@@ -490,6 +504,179 @@ impl Drop for AllocationGuard<'_> {
             if let Ok(_g) = self.0.lock.lock() {
                 self.0.close_cv.notify_one();
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::TEST_MID;
+
+    const CAP: usize = 0x20;
+    const SIZE: usize = 0x0A;
+
+    fn new_pool() -> BPool {
+        BPool::new(SIZE, CAP, TEST_MID)
+    }
+
+    mod utils {
+        use super::*;
+
+        #[test]
+        fn pack_unpack_cycle() {
+            let pack_id = pack_pool_idx(0x20, 0x0A);
+            let (idx, tag) = unpack_pool_idx(pack_id);
+
+            assert_eq!(idx, 0x20);
+            assert_eq!(tag, 0x0A);
+        }
+    }
+
+    mod allocations {
+        use super::*;
+
+        #[test]
+        fn ok_alloc_works() {
+            let pool = new_pool();
+            let alloc = pool.allocate(1);
+
+            assert_eq!(alloc.count, 1);
+            assert_eq!(alloc.slots.len(), 1);
+        }
+
+        #[test]
+        fn ok_alloc_exact_cap_as_requested() {
+            let pool = new_pool();
+            let alloc = pool.allocate(CAP);
+
+            assert_eq!(alloc.count, CAP);
+            assert_eq!(alloc.slots.len(), CAP);
+        }
+
+        #[test]
+        fn ok_alloc_partial_when_exhausted() {
+            let pool = new_pool();
+
+            let a1 = pool.allocate(CAP - 1);
+            assert_eq!(a1.count, CAP - 1);
+
+            let a2 = pool.allocate(CAP);
+            assert_eq!(a2.count, 1);
+
+            let a3 = pool.allocate(1);
+            assert_eq!(a3.count, 0);
+        }
+
+        #[test]
+        fn ok_allocs_none_when_exhausted() {
+            let pool = new_pool();
+
+            let _a1 = pool.allocate(CAP);
+
+            let a2 = pool.allocate(1);
+            assert_eq!(a2.count, 0);
+        }
+
+        #[test]
+        fn ok_no_duplicate_slots_in_single_alloc() {
+            let pool = new_pool();
+
+            let alloc = pool.allocate(CAP);
+            let mut ptrs: Vec<_> = alloc.slots.iter().map(|s| s.ptr).collect();
+
+            // remove duplicates if any
+            ptrs.sort();
+            ptrs.dedup();
+
+            assert_eq!(ptrs.len(), CAP);
+        }
+    }
+
+    mod raii_safety {
+        use super::*;
+
+        #[test]
+        fn ok_auto_free_on_drop() {
+            let pool = new_pool();
+
+            {
+                let alloc = pool.allocate(CAP);
+                assert_eq!(alloc.count, CAP);
+            }
+
+            let alloc2 = pool.allocate(CAP);
+            assert_eq!(alloc2.count, CAP);
+        }
+    }
+
+    mod concurrency {
+        use super::*;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        #[test]
+        fn ok_concurrent_alloc() {
+            const THREADS: usize = 8;
+            const ITERS: usize = 0x1000;
+
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let pool = Arc::new(BPool::new(SIZE, CAP * 0x0A, TEST_MID));
+
+            let mut handles = Vec::new();
+            for _ in 0..THREADS {
+                let pool = pool.clone();
+                let barrier = barrier.clone();
+
+                handles.push(thread::spawn(move || {
+                    barrier.wait();
+
+                    for _ in 0..ITERS {
+                        let mut n = CAP / 2;
+                        while n != 0 {
+                            let alloc = pool.allocate(n);
+                            if alloc.count == 0 {
+                                pool.wait().expect("wait for free");
+                                continue;
+                            }
+
+                            n -= alloc.count;
+                        }
+                    }
+                }));
+            }
+
+            for h in handles {
+                assert!(h.join().is_ok());
+            }
+
+            let final_alloc = pool.allocate(CAP);
+            assert_eq!(final_alloc.count, CAP);
+        }
+    }
+
+    mod shutdown_safety {
+        use super::*;
+        use std::sync::Arc;
+
+        #[test]
+        fn drop_waits_for_active_allocations() {
+            let pool = Arc::new(BPool::new(SIZE, CAP * 0x0A, TEST_MID));
+            let pool2 = pool.clone();
+
+            let handle = std::thread::spawn(move || {
+                let alloc = pool2.allocate(4);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                drop(alloc);
+            });
+
+            // give the other thread time to allocate
+            std::thread::sleep(std::time::Duration::from_millis(10));
+
+            // this must block until alloc is dropped
+            drop(pool);
+
+            assert!(handle.join().is_ok());
         }
     }
 }
