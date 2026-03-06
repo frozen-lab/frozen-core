@@ -172,7 +172,6 @@ frozen-core = { version = "0.0.9", default-features = false, features = ["crc32"
 | `aarch64`       | ✅      |
 | `x86_64`        | ✅      |
 
-
 Read the example below for usage details,
 
 ```rs
@@ -194,7 +193,67 @@ fn main() {
 
 ## BPool
 
-In memory buffer pool
+Lock-free buffer pool used for staging IO buffers
+
+## Features
+
+- *RAII Safe*
+- *Graceful Shutdown*
+- *Lock-free fast path*
+
+## Pooling for allocations
+
+Bufs are allocated in batches using `BPool::allocate`, it may allocate fewer than requested, in such cases
+caller should wait using `BPool::wait` which block till any bufs are available to use again
+
+To use the `bpool` module, add it as a dependency in your `Cargo.toml`:
+
+```toml
+[dependencies]
+frozen-core = { version = "0.0.9", default-features = false, features = ["bpool"] }
+```
+
+Read the example below for usage details,
+
+```rs
+use std::thread;
+use std::sync::Arc;
+use frozen_core::bpool::BPool;
+
+const MODULE_ID: u8 = 0;
+const CAPACITY: usize = 8;
+const BUF_SIZE: usize = 0x20;
+
+let pool = Arc::new(BPool::new(BUF_SIZE, CAPACITY, MODULE_ID));
+
+let mut handles = Vec::new();
+for _ in 0..4 {
+    let pool = pool.clone();
+    
+    handles.push(thread::spawn(move || {
+        for _ in 0..0x80 {
+            let mut n = 2;
+            while n != 0 {
+                let alloc = pool.allocate(n);
+                
+                // pool when not all bufs are allocated
+                if alloc.count == 0 {
+                    pool.wait().expect("wait failed");
+                    continue;
+                }
+                
+               n -= alloc.count;
+            }
+            
+            // NOTE: allocated bufs are freed automatically when `alloc` drops
+        }
+    }));
+}
+
+for h in handles {
+    h.join().unwrap();
+}
+```
 
 ## Notes
 

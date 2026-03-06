@@ -14,9 +14,9 @@
 //! ## Example
 //!
 //! ```
-//! use std::thread;
-//! use std::sync::Arc;
 //! use frozen_core::bpool::BPool;
+//! use std::sync::Arc;
+//! use std::thread;
 //!
 //! const MODULE_ID: u8 = 0;
 //! const CAPACITY: usize = 8;

@@ -2,7 +2,7 @@
 
 ## `0.0.9`
 
-- 
+- Impl of `bpool` module 
 
 ## `0.0.8`
 
