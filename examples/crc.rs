@@ -1,4 +1,4 @@
-use frozen_core::crc::Crc32C;
+use frozen_core::crc32::Crc32C;
 
 fn main() {
     let crc = Crc32C::new();

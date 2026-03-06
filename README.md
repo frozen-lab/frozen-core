@@ -9,7 +9,7 @@ Custom implementations and core utilities for frozen codebases.
 - [`fmmap`](#frozenmmap)
 - [`error`](#frozenerr)
 - [`hints`](#hints)
-- [`crc`](#crc)
+- [`crc32`](#crc32)
 - [`notes`](#notes)
 
 ## Usage
@@ -146,7 +146,7 @@ To use the `hints` module, add it as a dependency in your `Cargo.toml`:
 frozen-core = { version = "0.0.8", default-features = false, features = ["hints"] }
 ```
 
-## Crc
+## Crc32
 
 Implementation of CRC32C (Castagnoli polynomial) to compute a 32-bit cyclic redundancy check (CRC) using
 Castagnoli polynomial, intended for data integrity verification for torn writes and curruption detection
@@ -157,11 +157,11 @@ Castagnoli polynomial, intended for data integrity verification for torn writes 
 > [!IMPORTANT]
 > The generated 32-bit CRC is not cryptographically secure, it's intended use only is for data integrity in IO ops
 
-To use the `crc` module, add it as a dependency in your `Cargo.toml`:
+To use the `crc32` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.8", default-features = false, features = ["crc"] }
+frozen-core = { version = "0.0.8", default-features = false, features = ["crc32"] }
 ```
 
 `Crc32C` is available on following architectires,
@@ -175,7 +175,7 @@ frozen-core = { version = "0.0.8", default-features = false, features = ["crc"] 
 Read the example below for usage details,
 
 ```rs
-use frozen_core::crc::Crc32C;
+use frozen_core::crc32::Crc32C;
 
 fn main() {
     let crc = Crc32C::new();

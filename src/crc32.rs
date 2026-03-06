@@ -25,7 +25,7 @@
 //! ## Example
 //!
 //! ```
-//! let crc = frozen_core::crc::Crc32C::new();
+//! let crc = frozen_core::crc32::Crc32C::new();
 //!
 //! let b0: [u8; 8] = *b"12345678";
 //! let b1: [u8; 8] = *b"ABCDEFGH";
@@ -52,7 +52,7 @@ type TBuf = [u8];
 /// ## Example
 ///
 /// ```
-/// let crc = frozen_core::crc::Crc32C::new();
+/// let crc = frozen_core::crc32::Crc32C::new();
 ///
 /// let b0: [u8; 8] = *b"12345678";
 /// let b1: [u8; 8] = *b"ABCDEFGH";
@@ -83,7 +83,7 @@ impl Crc32C {
     /// ## Example
     ///
     /// ```
-    /// let crc = frozen_core::crc::Crc32C::new();
+    /// let crc = frozen_core::crc32::Crc32C::new();
     ///
     /// let b0: [u8; 8] = *b"12345678";
     /// let b1: [u8; 8] = *b"ABCDEFGH";
@@ -110,7 +110,7 @@ impl Crc32C {
 
     /// Checks whether hardware acceleration is available at runtime
     /// ```
-    /// let crc = frozen_core::crc::Crc32C::new();
+    /// let crc = frozen_core::crc32::Crc32C::new();
     ///
     /// #[cfg(target_arch = "x86_64")]
     /// let expected = std::is_x86_feature_detected!("sse4.2");
@@ -139,7 +139,7 @@ impl Crc32C {
     /// ## Example
     ///
     /// ```
-    /// let crc = frozen_core::crc::Crc32C::new();
+    /// let crc = frozen_core::crc32::Crc32C::new();
     ///
     /// let b0: [u8; 8] = *b"12345678";
     /// assert_eq!(crc.crc(&b0), crc.crc(&b0));
@@ -167,7 +167,7 @@ impl Crc32C {
     /// ## Example
     ///
     /// ```
-    /// let crc = frozen_core::crc::Crc32C::new();
+    /// let crc = frozen_core::crc32::Crc32C::new();
     ///
     /// let b0: [u8; 8] = *b"12345678";
     /// let b1: [u8; 8] = *b"ABCDEFGH";
@@ -196,7 +196,7 @@ impl Crc32C {
     /// ## Example
     ///
     /// ```
-    /// let crc = frozen_core::crc::Crc32C::new();
+    /// let crc = frozen_core::crc32::Crc32C::new();
     ///
     /// let b0: [u8; 8] = *b"12345678";
     /// let b1: [u8; 8] = *b"ABCDEFGH";

@@ -83,8 +83,12 @@ jobs:
           
       - name: FrozenMMap
         run: |
-          cargo run --release --example fm
-  
+          cargo run --release --example fm  
+          
+      - name: Example (Crc32)
+        run: |
+          cargo run --release --example crc
+
   release:
     needs: examples
     runs-on: ubuntu-latest

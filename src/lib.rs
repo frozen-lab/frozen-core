@@ -14,5 +14,8 @@ pub mod ffile;
 #[cfg(feature = "fmmap")]
 pub mod fmmap;
 
-#[cfg(feature = "crc")]
-pub mod crc;
+#[cfg(feature = "crc32")]
+pub mod crc32;
+
+#[cfg(feature = "bpool")]
+pub mod bpool;
