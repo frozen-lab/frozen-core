@@ -1,7 +1,7 @@
 [package]
 name = "frozen-core"
 edition = "2024"
-version = "0.0.9"
+version = "0.0.10"
 exclude = ["shell.nix"]
 license = "MIT OR Apache-2.0"
 keywords = ["frozen-lab", "frozen-core"]
@@ -15,7 +15,8 @@ hints = []
 bpool = ["libc", "error"]
 ffile = ["libc", "error", "hints"]
 fmmap = ["libc", "error", "hints", "ffile"]
-default = ["crc32", "error", "hints", "ffile", "fmmap", "bpool"]
+pipeq = ["libc", "error", "ffile", "bpool"]
+default = ["crc32", "error", "hints", "ffile", "fmmap", "bpool", "pipeq"]
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.178", optional = true }

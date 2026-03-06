@@ -19,3 +19,6 @@ pub mod crc32;
 
 #[cfg(feature = "bpool")]
 pub mod bpool;
+
+#[cfg(feature = "pipeq")]
+pub mod pipeq;
