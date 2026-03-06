@@ -218,7 +218,7 @@ impl BPool {
     /// assert!(alloc3.count == 1);
     /// ```
     #[inline(always)]
-    pub fn allocate(&self, n: usize) -> Allocation {
+    pub fn allocate<'a>(&'a self, n: usize) -> Allocation<'a> {
         let mut head = self.head.load(atomic::Ordering::Acquire);
         let mut batch = Allocation::new(self, n);
 

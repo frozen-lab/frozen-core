@@ -21,6 +21,7 @@ pkgs.mkShell {
   shellHook = ''
     export RUST_LOG=trace
     export RUST_BACKTRACE=1
+    export RUSTFLAGS="-D warnings"
     export CARGO_TERM_COLOR=always
   '';
 }
