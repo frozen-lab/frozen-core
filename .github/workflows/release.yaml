@@ -88,6 +88,10 @@ jobs:
       - name: Example (Crc32)
         run: |
           cargo run --release --example crc
+        
+      - name: Example (BPool)
+        run: |
+          cargo run --release --example bp
 
   release:
     needs: examples
