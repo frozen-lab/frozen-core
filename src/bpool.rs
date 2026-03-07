@@ -757,11 +757,47 @@ mod tests {
         }
     }
 
+    mod dynamic_allocations {
+        use super::*;
+
+        #[test]
+        fn ok_dynamic_alloc() {
+            let pool = new_pool();
+            let alloc = pool.allocate_dynamic(CAP);
+
+            assert_eq!(alloc.count, CAP);
+            assert_eq!(alloc.slots().len(), CAP);
+        }
+
+        #[test]
+        fn ok_no_duplicate_slots_in_single_dynamic_alloc() {
+            let pool = new_pool();
+
+            let alloc = pool.allocate_dynamic(CAP);
+            let mut ptrs: Vec<_> = alloc.slots().iter().map(|s| s.ptr).collect();
+
+            // remove duplicates if any
+            ptrs.sort();
+            ptrs.dedup();
+
+            assert_eq!(ptrs.len(), CAP);
+        }
+
+        #[test]
+        fn ok_large_allocation_with_dynamic_alloc() {
+            let pool = new_pool();
+            let alloc = pool.allocate_dynamic(0x400);
+
+            assert_eq!(alloc.count, 0x400);
+            assert_eq!(alloc.slots().len(), 0x400);
+        }
+    }
+
     mod raii_safety {
         use super::*;
 
         #[test]
-        fn ok_auto_free_on_drop() {
+        fn ok_alloc_auto_free_on_drop() {
             let pool = new_pool();
 
             {
@@ -769,8 +805,24 @@ mod tests {
                 assert_eq!(alloc.count, CAP);
             }
 
+            // validate free on drop
+            assert_eq!(pool.active.load(atomic::Ordering::Acquire), 0);
+
             let alloc2 = pool.allocate(CAP);
             assert_eq!(alloc2.count, CAP);
+        }
+
+        #[test]
+        fn ok_dynamic_alloc_auto_free_on_drop() {
+            let pool = new_pool();
+
+            {
+                let alloc = pool.allocate_dynamic(CAP);
+                assert_eq!(alloc.count, CAP);
+            }
+
+            // validate free on drop
+            assert_eq!(pool.active.load(atomic::Ordering::Acquire), 0);
         }
     }
 
@@ -817,6 +869,44 @@ mod tests {
             let final_alloc = pool.allocate(CAP);
             assert_eq!(final_alloc.count, CAP);
         }
+
+        #[test]
+        fn ok_dynamic_large_allocation() {
+            let pool = new_pool();
+
+            let alloc = pool.allocate_dynamic(1024);
+
+            assert_eq!(alloc.count, 1024);
+            assert_eq!(alloc.slots().len(), 1024);
+        }
+
+        #[test]
+        fn ok_concurrent_dynamic_alloc() {
+            const THREADS: usize = 8;
+            const ITERS: usize = 0x200;
+
+            let pool = Arc::new(new_pool());
+
+            let mut handles = Vec::new();
+            for _ in 0..THREADS {
+                let pool = pool.clone();
+
+                handles.push(thread::spawn(move || {
+                    for _ in 0..ITERS {
+                        let alloc = pool.allocate_dynamic(0x10);
+                        assert_eq!(alloc.count, 0x10);
+                    }
+                }));
+            }
+
+            for h in handles {
+                assert!(h.join().is_ok());
+            }
+
+            // pool should still function correctly
+            let alloc = pool.allocate(CAP);
+            assert_eq!(alloc.count, CAP);
+        }
     }
 
     mod shutdown_safety {
@@ -830,15 +920,29 @@ mod tests {
 
             let handle = std::thread::spawn(move || {
                 let alloc = pool2.allocate(4);
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(0x32));
                 drop(alloc);
             });
 
-            // give the other thread time to allocate
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(0x0A)); // give the other thread time to allocate
+            drop(pool); // this must block until alloc is dropped
 
-            // this must block until alloc is dropped
-            drop(pool);
+            assert!(handle.join().is_ok());
+        }
+
+        #[test]
+        fn drop_waits_for_active_dynamic_allocations() {
+            let pool = Arc::new(BPool::new(SIZE, CAP * 0x0A, TEST_MID));
+            let pool2 = pool.clone();
+
+            let handle = std::thread::spawn(move || {
+                let alloc = pool2.allocate_dynamic(4);
+                std::thread::sleep(std::time::Duration::from_millis(0x32));
+                drop(alloc);
+            });
+
+            std::thread::sleep(std::time::Duration::from_millis(0x0A)); // give the other thread time to allocate
+            drop(pool); // this must block until alloc is dropped
 
             assert!(handle.join().is_ok());
         }

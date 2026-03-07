@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.10`
+
+- Impl of dynamic allocations in `BPool` (via `BPool::allocate_dynamic`)
+
 ## `0.0.9`
 
 - Impl of `bpool` module 
