@@ -2,9 +2,9 @@ use super::{new_err, new_err_default, FFId, FFileErrRes};
 use crate::{error::FrozenRes, hints};
 use libc::{
     access, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite, pwritev,
-    size_t, stat, strerror, sysconf, unlink, EACCES, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT,
-    ENOLCK, ENOSPC, ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX, LOCK_NB, O_CLOEXEC, O_CREAT,
-    O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, _SC_IOV_MAX,
+    size_t, stat, strerror, sysconf, unlink, EACCES, EAGAIN, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE,
+    ENOENT, ENOLCK, ENOSPC, ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX, LOCK_NB, O_CLOEXEC,
+    O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, _SC_IOV_MAX,
 };
 use std::{
     ffi::CStr,
@@ -270,17 +270,17 @@ impl POSIXFile {
         sync_file_range_raw(self.fd(), offset, len)
     }
 
-    /// Read a single `iovec` from given `offset` w/ `pread` syscall
+    /// Read a single chunk from given `offset` w/ `pread` syscall
     #[inline(always)]
-    pub(super) unsafe fn pread(&self, iov: &mut iovec, offset: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn pread(&self, ptr: *mut u8, offset: usize, chunk_size: usize) -> FrozenRes<()> {
         let fd = self.fd();
-        let mut read = 0usize;
 
-        while read < iov.iov_len {
+        let mut read = 0usize;
+        while read < chunk_size {
             let res = pread(
                 fd,
-                (iov.iov_base as *mut u8).add(read) as *mut c_void,
-                (iov.iov_len - read) as size_t,
+                ptr.add(read) as *mut c_void,
+                (chunk_size - read) as size_t,
                 (offset + read) as off_t,
             );
 
@@ -297,7 +297,7 @@ impl POSIXFile {
 
                 match errno {
                     // io interrupt
-                    EINTR => continue,
+                    EINTR | EAGAIN => continue,
 
                     // permission denied
                     EACCES | EPERM => return new_err(FFileErrRes::Prm, err_msg),
@@ -315,34 +315,32 @@ impl POSIXFile {
         Ok(())
     }
 
-    /// Write a single `iovec` at given `offset` w/ `pwrite` syscall
+    /// Write a single chunk at given `offset` w/ `pwrite` syscall
     #[inline(always)]
-    pub(super) unsafe fn pwrite(&self, iov: &iovec, offset: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn pwrite(&self, ptr: *mut u8, offset: usize, chunk_size: usize) -> FrozenRes<()> {
         let fd = self.fd();
-        let mut written = 0usize;
 
-        while written < iov.iov_len {
+        let mut written = 0usize;
+        while written < chunk_size {
             let res = pwrite(
                 fd,
-                (iov.iov_base as *mut u8).add(written) as *mut c_void,
-                (iov.iov_len - written) as size_t,
+                ptr.add(written) as *mut c_void,
+                (chunk_size - written) as size_t,
                 (offset + written) as off_t,
             );
 
             // unexpected EOF
             if res == 0 {
-                // NOTE: we treat this as `Hcf` error cause, this only occurs when we tried to read
-                // beyound current length of the file, which is result of invalid impl
                 return new_err_default(FFileErrRes::Hcf);
             }
 
-            if hints::unlikely(res <= 0) {
+            if hints::unlikely(res < 0) {
                 let errno = last_errno();
                 let err_msg = err_msg(errno);
 
                 match errno {
                     // io interrupt
-                    EINTR => continue,
+                    EINTR | EAGAIN => continue,
 
                     // permission denied or read-only file
                     EACCES | EPERM | EROFS => return new_err(FFileErrRes::Prm, err_msg),
@@ -360,19 +358,25 @@ impl POSIXFile {
         Ok(())
     }
 
-    /// Read multiple `iovec` objects starting from given `offset` w/ `preadv` syscall
+    /// Read multiple chunk objects starting from given `offset` w/ `preadv` syscall
     ///
     /// ## NOTES
     ///
-    /// - All `iovec` objects in given `[iovec]` slice must be of same length
+    /// - All chunks in given bufs slice must be of same length
     /// - The caller must not try to read byound current length of `[POSIXFile]`
     #[inline(always)]
-    pub(super) unsafe fn preadv(&self, iovecs: &mut [iovec], offset: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn preadv(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenRes<()> {
         let fd = self.fd();
-        let max_iovs = read_max_iovecs();
+        let iovecs_len = bufs.len();
 
-        let iovecs_len = iovecs.len();
-        let iov_size = iovecs[0].iov_len;
+        let max_iovs = read_max_iovecs();
+        let mut iovecs: Vec<iovec> = bufs
+            .iter()
+            .map(|b| iovec {
+                iov_base: *b as *mut c_void,
+                iov_len: chunk_size,
+            })
+            .collect();
 
         let mut head = 0usize;
         let mut off = offset as off_t;
@@ -380,7 +384,7 @@ impl POSIXFile {
         while head < iovecs_len {
             let remaining_iov = iovecs_len - head;
             let cnt = remaining_iov.min(max_iovs) as c_int;
-            let ptr = iovecs.as_ptr().add(head);
+            let ptr = iovecs.as_mut_ptr().add(head);
 
             let res = preadv(fd, ptr, cnt, off);
 
@@ -396,7 +400,7 @@ impl POSIXFile {
                 let err_msg = err_msg(errno);
 
                 match errno {
-                    EINTR => continue,
+                    EINTR | EAGAIN => continue,
 
                     // permission denied
                     EACCES | EPERM => return new_err(FFileErrRes::Prm, err_msg),
@@ -420,15 +424,15 @@ impl POSIXFile {
 
             off += res as off_t;
 
-            let written = res as usize;
-            let full_pages = written / iov_size;
-            let partial = written % iov_size;
+            let read = res as usize;
+            let partial = read % chunk_size;
+            let full_pages = read / chunk_size;
 
             // fully written pages
             head += full_pages;
 
             // partially written page (rare)
-            if partial > 0 {
+            if partial > 0 && head < iovecs_len {
                 let iov = &mut iovecs[head];
                 iov.iov_base = (iov.iov_base as *mut u8).add(partial) as *mut c_void;
                 iov.iov_len -= partial;
@@ -438,19 +442,25 @@ impl POSIXFile {
         Ok(())
     }
 
-    /// Write multiple `iovec` objects starting from given `offset` w/ `writev` syscall
+    /// Write multiple chunk objects starting from given `offset` w/ `writev` syscall
     ///
     /// ## NOTES
     ///
-    /// - All `iovec` objects in given `[iovec]` slice must be of same length
+    /// - All chunk objects in given slice must be of same length
     /// - The caller must not try to write byound current length of `[POSIXFile]`
     #[inline(always)]
-    pub(super) unsafe fn pwritev(&self, iovecs: &mut [iovec], offset: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn pwritev(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenRes<()> {
         let fd = self.fd();
         let max_iovs = read_max_iovecs();
 
-        let iovecs_len = iovecs.len();
-        let iov_size = iovecs[0].iov_len;
+        let iovecs_len = bufs.len();
+        let mut iovecs: Vec<iovec> = bufs
+            .iter()
+            .map(|b| iovec {
+                iov_base: *b as *mut c_void,
+                iov_len: chunk_size,
+            })
+            .collect();
 
         let mut head = 0usize;
         let mut off = offset as off_t;
@@ -458,14 +468,12 @@ impl POSIXFile {
         while head < iovecs_len {
             let remaining_iov = iovecs_len - head;
             let cnt = remaining_iov.min(max_iovs) as c_int;
-            let ptr = iovecs.as_ptr().add(head);
+            let ptr = iovecs.as_mut_ptr().add(head);
 
             let res = pwritev(fd, ptr, cnt, off);
 
             // unexpected EOF
             if res == 0 {
-                // NOTE: we treat this as `Hcf` error cause, this only occurs when we tried to read
-                // beyound current length of the file, which is result of invalid impl
                 return new_err_default(FFileErrRes::Hcf);
             }
 
@@ -474,7 +482,7 @@ impl POSIXFile {
                 let err_msg = err_msg(errno);
 
                 match errno {
-                    EINTR => continue,
+                    EINTR | EAGAIN => continue,
 
                     // permission denied
                     EACCES | EPERM => return new_err(FFileErrRes::Prm, err_msg),
@@ -499,14 +507,14 @@ impl POSIXFile {
             off += res as off_t;
 
             let written = res as usize;
-            let full_pages = written / iov_size;
-            let partial = written % iov_size;
+            let partial = written % chunk_size;
+            let full_pages = written / chunk_size;
 
             // fully written pages
             head += full_pages;
 
             // partially written page (rare)
-            if partial > 0 {
+            if partial > 0 && head < iovecs_len {
                 let iov = &mut iovecs[head];
                 iov.iov_base = (iov.iov_base as *mut u8).add(partial) as *mut c_void;
                 iov.iov_len -= partial;
@@ -1295,14 +1303,9 @@ mod tests {
                 file.grow(0, 0x500).unwrap();
 
                 let mut buf = vec![0u8; 0x500];
-                let mut iov = libc::iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
+                file.pread(buf.as_mut_ptr(), 0, 0x500).unwrap();
 
-                file.pread(&mut iov, 0).unwrap();
                 assert!(buf.iter().all(|b| *b == 0));
-
                 file.close().unwrap();
             }
         }
@@ -1350,20 +1353,12 @@ mod tests {
                 let file = POSIXFile::new(&path).unwrap();
                 file.grow(0, 0x200).unwrap();
 
-                let data = b"grave_engine";
-                let write_iov = libc::iovec {
-                    iov_base: data.as_ptr() as *mut _,
-                    iov_len: data.len(),
-                };
-                file.pwrite(&write_iov, 0x80).unwrap();
+                let mut data = b"grave_engine".to_vec();
+                file.pwrite(data.as_mut_ptr(), 0x80, 0x0C).unwrap();
 
                 let mut buf = vec![0u8; data.len()];
-                let mut read_iov = libc::iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
-                file.pread(&mut read_iov, 0x80).unwrap();
-                assert_eq!(&buf, data);
+                file.pread(buf.as_mut_ptr(), 0x80, 0x0C).unwrap();
+                assert_eq!(buf, data);
             }
         }
 
@@ -1376,13 +1371,9 @@ mod tests {
                 let file = POSIXFile::new(&path).unwrap();
                 file.grow(0, 0x1000).unwrap();
 
-                let data = b"persist_me";
-                let iov = libc::iovec {
-                    iov_base: data.as_ptr() as *mut _,
-                    iov_len: data.len(),
-                };
+                let mut data = b"persist_me".to_vec();
+                file.pwrite(data.as_mut_ptr(), 0, data.len()).unwrap();
 
-                file.pwrite(&iov, 0).unwrap();
                 file.sync().unwrap();
                 file.close().unwrap();
             }
@@ -1391,13 +1382,8 @@ mod tests {
             unsafe {
                 let file = POSIXFile::new(&path).unwrap();
 
-                let mut buf = vec![0u8; 10];
-                let mut iov = libc::iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
-
-                file.pread(&mut iov, 0).unwrap();
+                let mut buf = vec![0u8; 0x0A];
+                file.pread(buf.as_mut_ptr(), 0, buf.len()).unwrap();
                 assert_eq!(&buf, b"persist_me");
             }
         }
@@ -1414,13 +1400,8 @@ mod tests {
                 for i in 0..0x0A {
                     let f = file.clone();
                     handles.push(std::thread::spawn(move || {
-                        let data = vec![i as u8; 0x100];
-                        let iov = libc::iovec {
-                            iov_base: data.as_ptr() as *mut _,
-                            iov_len: data.len(),
-                        };
-
-                        f.pwrite(&iov, i * 0x100).unwrap();
+                        let mut data = vec![i as u8; 0x100];
+                        f.pwrite(data.as_mut_ptr(), i * 0x100, data.len()).unwrap();
                     }));
                 }
 
@@ -1431,12 +1412,7 @@ mod tests {
                 file.sync().unwrap();
                 for i in 0..0x0A {
                     let mut buf = vec![0u8; 0x100];
-                    let mut iov = libc::iovec {
-                        iov_base: buf.as_mut_ptr() as *mut _,
-                        iov_len: buf.len(),
-                    };
-
-                    file.pread(&mut iov, i * 0x100).unwrap();
+                    file.pread(buf.as_mut_ptr(), i * 0x100, buf.len()).unwrap();
                     assert!(buf.iter().all(|b| *b == i as u8));
                 }
             }
@@ -1450,28 +1426,14 @@ mod tests {
                 let file = POSIXFile::new(&path).unwrap();
                 file.grow(0, 0x100).unwrap();
 
-                let a = [1u8; 0x80];
-                let b = [2u8; 0x80];
+                let mut a = [1u8; 0x80];
+                let mut b = [2u8; 0x80];
 
-                let iov_a = libc::iovec {
-                    iov_base: a.as_ptr() as *mut _,
-                    iov_len: a.len(),
-                };
-                let iov_b = libc::iovec {
-                    iov_base: b.as_ptr() as *mut _,
-                    iov_len: b.len(),
-                };
-
-                file.pwrite(&iov_a, 0).unwrap();
-                file.pwrite(&iov_b, 0).unwrap();
+                file.pwrite(a.as_mut_ptr(), 0, a.len()).unwrap();
+                file.pwrite(b.as_mut_ptr(), 0, b.len()).unwrap();
 
                 let mut buf = vec![0u8; 0x80];
-                let mut read_iov = libc::iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
-
-                file.pread(&mut read_iov, 0).unwrap();
+                file.pread(buf.as_mut_ptr(), 0, buf.len()).unwrap();
                 assert!(buf.iter().all(|b| *b == 2));
             }
         }
@@ -1489,24 +1451,12 @@ mod tests {
                 file.grow(0, 0x1000).unwrap();
 
                 let mut buffers = [vec![1u8; 0x80], vec![2u8; 0x80], vec![3u8; 0x80]];
-                let mut iovecs: Vec<iovec> = buffers
-                    .iter_mut()
-                    .map(|b| iovec {
-                        iov_base: b.as_mut_ptr() as *mut _,
-                        iov_len: b.len(),
-                    })
-                    .collect();
-                file.pwritev(&mut iovecs, 0).unwrap();
+                let ptrs: Vec<*mut u8> = buffers.iter_mut().map(|b| b.as_mut_ptr()).collect();
+                file.pwritev(&ptrs, 0, 0x80).unwrap();
 
                 let mut read_bufs = [vec![0u8; 0x80], vec![0u8; 0x80], vec![0u8; 0x80]];
-                let mut read_iovs: Vec<iovec> = read_bufs
-                    .iter_mut()
-                    .map(|b| iovec {
-                        iov_base: b.as_mut_ptr() as *mut _,
-                        iov_len: b.len(),
-                    })
-                    .collect();
-                file.preadv(&mut read_iovs, 0).unwrap();
+                let read_ptrs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+                file.preadv(&read_ptrs, 0, 0x80).unwrap();
 
                 assert!(read_bufs[0].iter().all(|b| *b == 1));
                 assert!(read_bufs[1].iter().all(|b| *b == 2));
@@ -1525,25 +1475,14 @@ mod tests {
                 file.grow(0, count * 0x40).unwrap();
 
                 let mut buffers: Vec<Vec<u8>> = (0..count).map(|i| vec![i as u8; 0x40]).collect();
-                let mut iovecs: Vec<iovec> = buffers
-                    .iter_mut()
-                    .map(|b| iovec {
-                        iov_base: b.as_mut_ptr() as *mut _,
-                        iov_len: b.len(),
-                    })
-                    .collect();
+                let ptrs: Vec<*mut u8> = buffers.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
-                file.pwritev(&mut iovecs, 0).unwrap();
+                file.pwritev(&ptrs, 0, 0x40).unwrap();
                 file.sync().unwrap();
 
                 for i in 0..count {
                     let mut buf = vec![0u8; 0x40];
-                    let mut iov = iovec {
-                        iov_base: buf.as_mut_ptr() as *mut _,
-                        iov_len: buf.len(),
-                    };
-
-                    file.pread(&mut iov, i * 0x40).unwrap();
+                    file.pread(buf.as_mut_ptr(), i * 0x40, 0x40).unwrap();
                     assert!(buf.iter().all(|b| *b == i as u8));
                 }
             }
@@ -1559,15 +1498,9 @@ mod tests {
                 file.grow(0, 0x400).unwrap();
 
                 let mut bufs = [vec![9u8; 0x80], vec![8u8; 0x80]];
-                let mut iovs: Vec<iovec> = bufs
-                    .iter_mut()
-                    .map(|b| iovec {
-                        iov_base: b.as_mut_ptr() as *mut _,
-                        iov_len: b.len(),
-                    })
-                    .collect();
+                let ptrs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
-                file.pwritev(&mut iovs, 0).unwrap();
+                file.pwritev(&ptrs, 0, 0x80).unwrap();
                 file.sync().unwrap();
                 file.close().unwrap();
             }
@@ -1577,15 +1510,8 @@ mod tests {
                 let file = POSIXFile::new(&path).unwrap();
 
                 let mut read_bufs = [vec![0u8; 0x80], vec![0u8; 0x80]];
-                let mut read_iovs: Vec<iovec> = read_bufs
-                    .iter_mut()
-                    .map(|b| iovec {
-                        iov_base: b.as_mut_ptr() as *mut _,
-                        iov_len: b.len(),
-                    })
-                    .collect();
-
-                file.preadv(&mut read_iovs, 0).unwrap();
+                let read_ptrs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+                file.preadv(&read_ptrs, 0, 0x80).unwrap();
 
                 assert!(read_bufs[0].iter().all(|b| *b == 9));
                 assert!(read_bufs[1].iter().all(|b| *b == 8));
@@ -1613,16 +1539,10 @@ mod tests {
                     handles.push(std::thread::spawn(move || {
                         let mut bufs: Vec<Vec<u8>> =
                             (0..per_thread_iovs).map(|i| vec![(t * 10 + i) as u8; page]).collect();
-                        let mut iovs: Vec<iovec> = bufs
-                            .iter_mut()
-                            .map(|b| iovec {
-                                iov_base: b.as_mut_ptr() as *mut _,
-                                iov_len: b.len(),
-                            })
-                            .collect();
+                        let ptrs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
                         let offset = t * per_thread_iovs * page;
-                        f.pwritev(&mut iovs, offset).unwrap();
+                        f.pwritev(&ptrs, offset, page).unwrap();
                     }));
                 }
 
@@ -1635,13 +1555,8 @@ mod tests {
                 for t in 0..threads {
                     for i in 0..per_thread_iovs {
                         let mut buf = vec![0u8; page];
-                        let mut iov = iovec {
-                            iov_base: buf.as_mut_ptr() as *mut _,
-                            iov_len: buf.len(),
-                        };
-
                         let offset = (t * per_thread_iovs + i) * page;
-                        file.pread(&mut iov, offset).unwrap();
+                        file.pread(buf.as_mut_ptr(), offset, page).unwrap();
 
                         let expected = (t * 10 + i) as u8;
                         assert!(buf.iter().all(|b| *b == expected));
@@ -1666,27 +1581,15 @@ mod tests {
                 file.grow(0, count * page).unwrap();
 
                 let mut buffers: Vec<Vec<u8>> = (0..count).map(|i| vec![(i % 0xFB) as u8; page]).collect();
-                let mut iovs: Vec<iovec> = buffers
-                    .iter_mut()
-                    .map(|b| iovec {
-                        iov_base: b.as_mut_ptr() as *mut _,
-                        iov_len: b.len(),
-                    })
-                    .collect();
+                let ptrs: Vec<*mut u8> = buffers.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
-                file.pwritev(&mut iovs, 0).unwrap();
+                file.pwritev(&ptrs, 0, page).unwrap();
                 file.sync().unwrap();
 
                 let mut read_bufs: Vec<Vec<u8>> = (0..count).map(|_| vec![0u8; page]).collect();
-                let mut read_iovs: Vec<iovec> = read_bufs
-                    .iter_mut()
-                    .map(|b| iovec {
-                        iov_base: b.as_mut_ptr() as *mut _,
-                        iov_len: b.len(),
-                    })
-                    .collect();
+                let read_ptrs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
-                file.preadv(&mut read_iovs, 0).unwrap();
+                file.preadv(&read_ptrs, 0, page).unwrap();
                 for i in 0..count {
                     let expected = (i % 0xFB) as u8;
                     assert!(read_bufs[i].iter().all(|b| *b == expected));
@@ -1715,16 +1618,10 @@ mod tests {
                     handles.push(std::thread::spawn(move || {
                         let mut bufs: Vec<Vec<u8>> =
                             (0..per_thread).map(|i| vec![(t * 0x1F + i) as u8; page]).collect();
-                        let mut iovs: Vec<iovec> = bufs
-                            .iter_mut()
-                            .map(|b| iovec {
-                                iov_base: b.as_mut_ptr() as *mut _,
-                                iov_len: b.len(),
-                            })
-                            .collect();
+                        let ptrs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
                         let offset = t * per_thread * page;
-                        f.pwritev(&mut iovs, offset).unwrap();
+                        f.pwritev(&ptrs, offset, page).unwrap();
                     }));
                 }
 
@@ -1737,13 +1634,8 @@ mod tests {
                 for t in 0..threads {
                     for i in 0..per_thread {
                         let mut buf = vec![0u8; page];
-                        let mut iov = iovec {
-                            iov_base: buf.as_mut_ptr() as *mut _,
-                            iov_len: buf.len(),
-                        };
-
                         let offset = (t * per_thread + i) * page;
-                        file.pread(&mut iov, offset).unwrap();
+                        file.pread(buf.as_mut_ptr(), offset, page).unwrap();
 
                         let expected = (t * 0x1F + i) as u8;
                         assert!(buf.iter().all(|b| *b == expected));
@@ -1855,12 +1747,7 @@ mod tests {
                 file.close().unwrap();
 
                 let mut buf = vec![0u8; 8];
-                let mut iov = iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
-
-                let err = file.pread(&mut iov, 0).unwrap_err();
+                let err = file.pread(buf.as_mut_ptr(), 0, buf.len()).unwrap_err();
                 assert!(err.cmp(FFileErrRes::Hcf as u16));
             }
         }
@@ -1874,13 +1761,8 @@ mod tests {
                 file.grow(0, 0x100).unwrap();
                 file.close().unwrap();
 
-                let data = b"dead";
-                let iov = iovec {
-                    iov_base: data.as_ptr() as *mut _,
-                    iov_len: data.len(),
-                };
-
-                let err = file.pwrite(&iov, 0).unwrap_err();
+                let mut data = b"dead".to_vec();
+                let err = file.pwrite(data.as_mut_ptr(), 0, data.len()).unwrap_err();
                 assert!(err.cmp(FFileErrRes::Hcf as u16));
             }
         }
@@ -1938,22 +1820,12 @@ mod tests {
                 let file = POSIXFile::new(&path).unwrap();
                 file.grow(0, 0x400).unwrap();
 
-                let data = [7u8; 0x80];
-                let iov = iovec {
-                    iov_base: data.as_ptr() as *mut _,
-                    iov_len: data.len(),
-                };
-
-                file.pwrite(&iov, 0).unwrap();
+                let mut data = [7u8; 0x80];
+                file.pwrite(data.as_mut_ptr(), 0, data.len()).unwrap();
                 file.sync().unwrap(); // validates fdatasync or f_fullsync path
 
                 let mut buf = vec![0u8; 0x80];
-                let mut riov = iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
-
-                file.pread(&mut riov, 0).unwrap();
+                file.pread(buf.as_mut_ptr(), 0, buf.len()).unwrap();
                 assert_eq!(buf, data);
             }
         }
@@ -1967,25 +1839,15 @@ mod tests {
                 let file = POSIXFile::new(&path).unwrap();
                 file.grow(0, 0x1000).unwrap();
 
-                let data = [5u8; 0x100];
-                let iov = iovec {
-                    iov_base: data.as_ptr() as *mut _,
-                    iov_len: data.len(),
-                };
-
-                file.pwrite(&iov, 0x200).unwrap();
+                let mut data = [5u8; 0x100];
+                file.pwrite(data.as_mut_ptr(), 0x200, data.len()).unwrap();
 
                 // best-effort flush hint (must not fail when not supported by fs)
                 file.sync_range(0x200, 0x100).unwrap();
                 file.sync().unwrap();
 
                 let mut buf = vec![0u8; 0x100];
-                let mut riov = iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
-
-                file.pread(&mut riov, 0x200).unwrap();
+                file.pread(buf.as_mut_ptr(), 0x200, buf.len()).unwrap();
                 assert_eq!(buf, data);
             }
         }
@@ -1998,21 +1860,11 @@ mod tests {
                 let file = POSIXFile::new(&path).unwrap();
                 file.grow(0, 0x200).unwrap();
 
-                let data = [3u8; 0x40];
-                let iov = iovec {
-                    iov_base: data.as_ptr() as *mut _,
-                    iov_len: data.len(),
-                };
-
-                file.pwrite(&iov, 0x200 - 0x40).unwrap();
+                let mut data = [3u8; 0x40];
+                file.pwrite(data.as_mut_ptr(), 0x200 - 0x40, data.len()).unwrap();
 
                 let mut buf = vec![0u8; 0x40];
-                let mut riov = iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
-
-                file.pread(&mut riov, 0x200 - 0x40).unwrap();
+                file.pread(buf.as_mut_ptr(), 0x200 - 0x40, buf.len()).unwrap();
                 assert_eq!(buf, data);
             }
         }

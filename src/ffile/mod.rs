@@ -18,22 +18,12 @@
 //! let file = FrozenFile::new(cfg.clone()).unwrap();
 //! assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
 //!
-//! let data = vec![1u8; 0x10];
-//! let iov = libc::iovec {
-//!     iov_base: data.as_ptr() as *mut _,
-//!     iov_len: data.len(),
-//! };
-//!
-//! assert!(file.write(&iov, 0).is_ok());
+//! let mut data = vec![1u8; 0x10];
+//! assert!(file.write(data.as_mut_ptr(), 0).is_ok());
 //! assert!(file.sync().is_ok());
 //!
 //! let mut buf = vec![0u8; data.len()];
-//! let mut read_iov = libc::iovec {
-//!     iov_base: buf.as_mut_ptr() as *mut _,
-//!     iov_len: buf.len(),
-//! };
-//!
-//! assert!(file.read(&mut read_iov, 0).is_ok());
+//! assert!(file.read(buf.as_mut_ptr(), 0).is_ok());
 //! assert_eq!(buf, data);
 //!
 //! assert!(FrozenFile::new(cfg.clone()).is_err());
@@ -179,22 +169,12 @@ pub struct FFCfg {
 /// let file = FrozenFile::new(cfg.clone()).unwrap();
 /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
 ///
-/// let data = vec![1u8; 0x10];
-/// let iov = libc::iovec {
-///     iov_base: data.as_ptr() as *mut _,
-///     iov_len: data.len(),
-/// };
-///
-/// assert!(file.write(&iov, 0).is_ok());
+/// let mut data = vec![1u8; 0x10];
+/// assert!(file.write(data.as_mut_ptr(), 0).is_ok());
 /// assert!(file.sync().is_ok());
 ///
 /// let mut buf = vec![0u8; data.len()];
-/// let mut read_iov = libc::iovec {
-///     iov_base: buf.as_mut_ptr() as *mut _,
-///     iov_len: buf.len(),
-/// };
-///
-/// assert!(file.read(&mut read_iov, 0).is_ok());
+/// assert!(file.read(buf.as_mut_ptr(), 0).is_ok());
 /// assert_eq!(buf, data);
 ///
 /// assert!(FrozenFile::new(cfg.clone()).is_err());
@@ -346,7 +326,7 @@ impl FrozenFile {
     }
 
     /// Initiates writeback (best-effort) of dirty pages in the specified range
-    #[cfg(any(target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     pub fn sync_range(&self, index: usize, count: usize) -> FrozenRes<()> {
         let offset = self.cfg.chunk_size * index;
         let len_to_sync = self.cfg.chunk_size * count;
@@ -383,56 +363,44 @@ impl FrozenFile {
         unsafe { file.unlink(&self.cfg.path) }
     }
 
-    /// Read a single `iovec` chunk at given `index` w/ `pread` syscall
+    /// Read a single chunk at given `index` w/ `pread` syscall
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn read(&self, buf: &mut libc::iovec, index: usize) -> FrozenRes<()> {
-        // sanity check
-        debug_assert_eq!(buf.iov_len, self.cfg.chunk_size);
-
+    pub fn read(&self, buf: *mut u8, index: usize) -> FrozenRes<()> {
         let offset = self.cfg.chunk_size * index;
         let file = self.get_file();
 
-        unsafe { file.pread(buf, offset) }
+        unsafe { file.pread(buf, offset, self.cfg.chunk_size) }
     }
 
-    /// Write a single `iovec` chunk at given `index` w/ `pwrite` syscall
+    /// Write a single chunk at given `index` w/ `pwrite` syscall
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn write(&self, buf: &libc::iovec, index: usize) -> FrozenRes<()> {
-        // sanity check
-        debug_assert_eq!(buf.iov_len, self.cfg.chunk_size);
-
+    pub fn write(&self, buf: *mut u8, index: usize) -> FrozenRes<()> {
         let offset = self.cfg.chunk_size * index;
         let file = self.get_file();
 
-        unsafe { file.pwrite(buf, offset) }
+        unsafe { file.pwrite(buf, offset, self.cfg.chunk_size) }
     }
 
-    /// Read multiple `iovec` chunks starting from given `index` till `iovs.len()` w/ `preadv` syscall
+    /// Read multiple chunks starting from given `index` till `bufs.len()` w/ `preadv` syscall
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn preadv(&self, iovs: &mut [libc::iovec], index: usize) -> FrozenRes<()> {
-        // sanity check
-        debug_assert!(iovs.iter().all(|i| i.iov_len == self.cfg.chunk_size));
-
+    pub fn preadv(&self, bufs: &[*mut u8], index: usize) -> FrozenRes<()> {
         let offset = self.cfg.chunk_size * index;
         let file = self.get_file();
 
-        unsafe { file.preadv(iovs, offset) }
+        unsafe { file.preadv(bufs, offset, self.cfg.chunk_size) }
     }
 
-    /// Write multiple `iovec` chunks starting from given `index` till `iovs.len()` w/ `pwritev` syscall
+    /// Write multiple chunks starting from given `index` till `bufs.len()` w/ `pwritev` syscall
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn pwritev(&self, iovs: &mut [libc::iovec], index: usize) -> FrozenRes<()> {
-        // sanity check
-        debug_assert!(iovs.iter().all(|i| i.iov_len == self.cfg.chunk_size));
-
+    pub fn pwritev(&self, bufs: &[*mut u8], index: usize) -> FrozenRes<()> {
         let offset = self.cfg.chunk_size * index;
         let file = self.get_file();
 
-        unsafe { file.pwritev(iovs, offset) }
+        unsafe { file.pwritev(bufs, offset, self.cfg.chunk_size) }
     }
 
     #[inline]
@@ -479,7 +447,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_ff_file");
         let cfg = FFCfg {
-            path: path,
+            path,
             mid: TEST_MID,
             chunk_size: CHUNK_SIZE,
             initial_chunk_amount: INIT_CHUNKS,
@@ -575,28 +543,20 @@ mod tests {
 
         #[test]
         fn ok_drop_persists_without_explicit_sync() {
-            let data = [0x0Bu8; CHUNK_SIZE];
+            let mut data = [0x0Bu8; CHUNK_SIZE];
             let (_dir, cfg) = tmp_path();
 
             {
                 let file = FrozenFile::new(cfg.clone()).unwrap();
-                let iov = libc::iovec {
-                    iov_base: data.as_ptr() as *mut _,
-                    iov_len: data.len(),
-                };
-                file.write(&iov, 0).unwrap();
+                file.write(data.as_mut_ptr(), 0).unwrap();
                 drop(file);
             }
 
             {
                 let reopened = FrozenFile::new(cfg).unwrap();
                 let mut buf = [0u8; CHUNK_SIZE];
-                let mut iov = libc::iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
 
-                reopened.read(&mut iov, 0).unwrap();
+                reopened.read(buf.as_mut_ptr(), 0).unwrap();
                 assert_eq!(buf, data);
             }
         }
@@ -687,22 +647,13 @@ mod tests {
             let (_dir, cfg) = tmp_path();
             let file = FrozenFile::new(cfg).unwrap();
 
-            let data = [0x0Bu8; CHUNK_SIZE];
-            let iov = libc::iovec {
-                iov_base: data.as_ptr() as *mut _,
-                iov_len: data.len(),
-            };
+            let mut data = [0x0Bu8; CHUNK_SIZE];
 
-            file.write(&iov, 4).unwrap();
+            file.write(data.as_mut_ptr(), 4).unwrap();
             file.sync().unwrap();
 
             let mut buf = [0u8; CHUNK_SIZE];
-            let mut read_iov = libc::iovec {
-                iov_base: buf.as_mut_ptr() as *mut _,
-                iov_len: buf.len(),
-            };
-
-            file.read(&mut read_iov, 4).unwrap();
+            file.read(buf.as_mut_ptr(), 4).unwrap();
             assert_eq!(buf, data);
         }
 
@@ -712,27 +663,15 @@ mod tests {
             let file = FrozenFile::new(cfg).unwrap();
 
             let mut bufs = [[1u8; CHUNK_SIZE], [2u8; CHUNK_SIZE]];
-            let mut iovs: Vec<libc::iovec> = bufs
-                .iter_mut()
-                .map(|b| libc::iovec {
-                    iov_base: b.as_mut_ptr() as *mut _,
-                    iov_len: b.len(),
-                })
-                .collect();
+            let bufs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
-            file.pwritev(&mut iovs, 0).unwrap();
+            file.pwritev(&bufs, 0).unwrap();
             file.sync().unwrap();
 
             let mut read_bufs = [[0u8; CHUNK_SIZE], [0u8; CHUNK_SIZE]];
-            let mut read_iovs: Vec<libc::iovec> = read_bufs
-                .iter_mut()
-                .map(|b| libc::iovec {
-                    iov_base: b.as_mut_ptr() as *mut _,
-                    iov_len: b.len(),
-                })
-                .collect();
+            let rbufs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+            file.preadv(&rbufs, 0).unwrap();
 
-            file.preadv(&mut read_iovs, 0).unwrap();
             assert!(read_bufs[0].iter().all(|b| *b == 1));
             assert!(read_bufs[1].iter().all(|b| *b == 2));
         }
@@ -747,13 +686,8 @@ mod tests {
             for i in 0..0x0A {
                 let f = file.clone();
                 handles.push(std::thread::spawn(move || {
-                    let data = [i as u8; CHUNK_SIZE];
-                    let iov = libc::iovec {
-                        iov_base: data.as_ptr() as *mut _,
-                        iov_len: data.len(),
-                    };
-
-                    f.write(&iov, i).unwrap();
+                    let mut data = [i as u8; CHUNK_SIZE];
+                    f.write(data.as_mut_ptr(), i).unwrap();
                 }));
             }
 
@@ -765,12 +699,7 @@ mod tests {
 
             for i in 0..0x0A {
                 let mut buf = [0u8; CHUNK_SIZE];
-                let mut iov = libc::iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
-
-                file.read(&mut iov, i).unwrap();
+                file.read(buf.as_mut_ptr(), i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
         }
@@ -784,13 +713,8 @@ mod tests {
                 let f = file.clone();
                 std::thread::spawn(move || {
                     for i in 0..INIT_CHUNKS {
-                        let data = [i as u8; CHUNK_SIZE];
-                        let iov = libc::iovec {
-                            iov_base: data.as_ptr() as *mut _,
-                            iov_len: data.len(),
-                        };
-
-                        f.write(&iov, i).unwrap();
+                        let mut data = [i as u8; CHUNK_SIZE];
+                        f.write(data.as_mut_ptr(), i).unwrap();
                     }
                 })
             };
@@ -811,12 +735,7 @@ mod tests {
 
             for i in 0..INIT_CHUNKS {
                 let mut buf = [0u8; CHUNK_SIZE];
-                let mut iov = libc::iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
-
-                file.read(&mut iov, i).unwrap();
+                file.read(buf.as_mut_ptr(), i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
         }
@@ -830,13 +749,8 @@ mod tests {
                 let f = file.clone();
                 std::thread::spawn(move || {
                     for i in 0..INIT_CHUNKS {
-                        let data = [i as u8; CHUNK_SIZE];
-                        let iov = libc::iovec {
-                            iov_base: data.as_ptr() as *mut _,
-                            iov_len: data.len(),
-                        };
-
-                        f.write(&iov, i).unwrap();
+                        let mut data = [i as u8; CHUNK_SIZE];
+                        f.write(data.as_mut_ptr(), i).unwrap();
                     }
                 })
             };
@@ -857,12 +771,7 @@ mod tests {
 
             for i in 0..INIT_CHUNKS {
                 let mut buf = [0; CHUNK_SIZE];
-                let mut iov = libc::iovec {
-                    iov_base: buf.as_mut_ptr() as *mut _,
-                    iov_len: buf.len(),
-                };
-
-                file.read(&mut iov, i).unwrap();
+                file.read(buf.as_mut_ptr(), i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
         }
@@ -872,14 +781,9 @@ mod tests {
             let (_dir, cfg) = tmp_path();
             let file = FrozenFile::new(cfg).unwrap();
 
-            let mut buf = [0; CHUNK_SIZE];
-            let mut iov = libc::iovec {
-                iov_base: buf.as_mut_ptr() as *mut _,
-                iov_len: buf.len(),
-            };
-
             // index > curr_chunks
-            let err = file.read(&mut iov, 0x100).unwrap_err();
+            let mut buf = [0; CHUNK_SIZE];
+            let err = file.read(buf.as_mut_ptr(), 0x100).unwrap_err();
             assert!(err.cmp(FFileErrRes::Hcf as u16));
         }
     }

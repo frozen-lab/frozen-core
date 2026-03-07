@@ -41,12 +41,8 @@ fn write_mode(cfg: FFCfg) -> FrozenRes<()> {
     let file = FrozenFile::new(cfg)?;
     assert_eq!(file.length().unwrap(), INIT_LEN);
 
-    let iov = libc::iovec {
-        iov_len: DATA.len(),
-        iov_base: DATA.as_ptr() as *mut _,
-    };
-
-    file.write(&iov, 0)?;
+    let mut data = DATA.to_vec();
+    file.write(data.as_mut_ptr(), 0)?;
     file.sync()
 }
 
@@ -55,12 +51,7 @@ fn read_mode(cfg: FFCfg) -> FrozenRes<()> {
     assert_eq!(file.length().unwrap(), INIT_LEN);
 
     let mut buf = vec![0u8; DATA.len()];
-    let mut iov = libc::iovec {
-        iov_base: buf.as_mut_ptr() as *mut _,
-        iov_len: buf.len(),
-    };
-
-    file.read(&mut iov, 0)?;
+    file.read(buf.as_mut_ptr(), 0)?;
     assert_eq!(&buf, DATA);
 
     file.delete()
