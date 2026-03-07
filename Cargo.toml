@@ -12,11 +12,11 @@ description = "Custom implementations and core utilities for frozen codebases"
 crc32 = []
 error = []
 hints = []
-bpool = ["libc", "error"]
+bpool = ["error"]
 ffile = ["libc", "error", "hints"]
+fpipe = ["error", "ffile", "bpool"]
 fmmap = ["libc", "error", "hints", "ffile"]
-pipeq = ["libc", "error", "ffile", "bpool"]
-default = ["crc32", "error", "hints", "ffile", "fmmap", "bpool", "pipeq"]
+default = ["crc32", "error", "hints", "ffile", "fmmap", "bpool", "fpipe"]
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.178", optional = true }
