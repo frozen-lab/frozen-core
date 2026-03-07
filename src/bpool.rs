@@ -245,7 +245,7 @@ impl BPool {
     /// assert!(alloc3.count == 1);
     /// ```
     #[inline(always)]
-    pub fn allocate<'a>(&'a self, n: usize) -> Allocation<'a> {
+    pub fn allocate(&self, n: usize) -> Allocation<'_> {
         let mut head = self.head.load(atomic::Ordering::Acquire);
         let mut batch = Allocation::from_pool(self, n);
 
@@ -272,7 +272,7 @@ impl BPool {
 
             while count < n {
                 // This is valid as `next` is already the index (unpacked version) of the slot
-                let next = self.next[last as usize].load(atomic::Ordering::Relaxed);
+                let next = self.next[last].load(atomic::Ordering::Relaxed);
                 if next == INVALID_POOL_SLOT {
                     break;
                 }
@@ -281,7 +281,7 @@ impl BPool {
                 count += 1;
             }
 
-            let new_head_idx = self.next[last as usize].load(atomic::Ordering::Relaxed);
+            let new_head_idx = self.next[last].load(atomic::Ordering::Relaxed);
             let new_head = pack_pool_idx(new_head_idx, 1 + tag);
 
             match self
@@ -293,7 +293,7 @@ impl BPool {
                     let mut cur = idx;
                     for _ in 0..count {
                         batch.slots.slots().push(self.ptr.add((cur * self.buf_size) as u64));
-                        cur = self.next[cur as usize].load(atomic::Ordering::Relaxed);
+                        cur = self.next[cur].load(atomic::Ordering::Relaxed);
                     }
 
                     batch.count = count;
@@ -367,7 +367,7 @@ impl BPool {
     /// }
     /// ```
     #[inline]
-    pub fn allocate_dynamic<'a>(&'a self, n: usize) -> Allocation<'a> {
+    pub fn allocate_dynamic(&self, n: usize) -> Allocation<'_> {
         self.active.fetch_add(1, atomic::Ordering::Relaxed);
 
         let total = self.buf_size * n;
@@ -400,13 +400,13 @@ impl BPool {
 
     #[inline(always)]
     fn free(&self, ptr: &PoolPtr) {
-        let offset = self.ptr.offset_from(&ptr);
+        let offset = self.ptr.offset_from(ptr);
         let idx = offset / self.buf_size;
 
         let mut head = self.head.load(atomic::Ordering::Acquire);
         loop {
             let (head_idx, head_tag) = unpack_pool_idx(head);
-            self.next[idx as usize].store(head_idx, atomic::Ordering::Relaxed);
+            self.next[idx].store(head_idx, atomic::Ordering::Relaxed);
             let new = pack_pool_idx(idx, 1 + head_tag);
 
             match self
@@ -619,7 +619,7 @@ impl<'a> Allocation<'a> {
     }
 }
 
-impl<'a> Drop for Allocation<'a> {
+impl Drop for Allocation<'_> {
     fn drop(&mut self) {
         match &self.slots {
             AllocSlotType::Pool(slots) => {
@@ -664,7 +664,7 @@ enum AllocSlotType {
 }
 
 impl AllocSlotType {
-    fn slots<'a>(&'a mut self) -> &'a mut Vec<PoolPtr> {
+    fn slots(&mut self) -> &mut Vec<PoolPtr> {
         match self {
             Self::Pool(slots) => slots,
             Self::Dynamic(slots) => slots,

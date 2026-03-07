@@ -133,19 +133,19 @@ impl POSIXFile {
 
         match errno {
             // missing file or invalid path
-            ENOENT | ENOTDIR => return new_err(FFileErrRes::Inv, err_msg),
+            ENOENT | ENOTDIR => new_err(FFileErrRes::Inv, err_msg),
 
             // lack of permission or read only fs
-            EACCES | EPERM | EROFS => return new_err(FFileErrRes::Prm, err_msg),
+            EACCES | EPERM | EROFS => new_err(FFileErrRes::Prm, err_msg),
 
             // NOTE: In POSIX systems, kernel may report delayed io failures on `unlink`,
             // this are fatal errors, and can not be retried
             //
             // We protect this by enforcing hard durability right after write ops, so the
             // occurrence of this error is an implementation failure
-            EIO => return new_err(FFileErrRes::Hcf, err_msg),
+            EIO => new_err(FFileErrRes::Hcf, err_msg),
 
-            _ => return new_err(FFileErrRes::Unk, err_msg),
+            _ => new_err(FFileErrRes::Unk, err_msg),
         }
     }
 
@@ -612,7 +612,7 @@ unsafe fn close_raw(fd: FFId) -> FrozenRes<()> {
         return new_err(FFileErrRes::Hcf, err_msg);
     }
 
-    return new_err(FFileErrRes::Unk, err_msg);
+    new_err(FFileErrRes::Unk, err_msg)
 }
 
 #[cfg(target_os = "linux")]
@@ -1066,7 +1066,7 @@ unsafe fn sync_parent_dir(path: &std::path::Path) -> FrozenRes<()> {
 /// - It only works when the UID's are matched for calling processe and file owner
 #[cfg(target_os = "linux")]
 const fn prep_flags() -> c_int {
-    return O_RDWR | O_CLOEXEC | libc::O_NOATIME | O_CREAT;
+    O_RDWR | O_CLOEXEC | libc::O_NOATIME | O_CREAT
 }
 
 /// preps flags for `open()` syscall
@@ -1185,7 +1185,7 @@ mod tests {
             unsafe {
                 let missing = path.join("/missing/file");
                 let err = POSIXFile::new(&missing).unwrap_err();
-                assert!(err.cmp(FFileErrRes::Inv as u16))
+                assert!(err.compare(FFileErrRes::Inv as u16))
             }
         }
     }
@@ -1215,7 +1215,7 @@ mod tests {
                 file.unlink(&path).unwrap();
 
                 let err = file.unlink(&path).unwrap_err();
-                assert!(err.cmp(FFileErrRes::Inv as u16));
+                assert!(err.compare(FFileErrRes::Inv as u16));
             }
         }
     }
@@ -1246,7 +1246,7 @@ mod tests {
                 let file2 = POSIXFile::new(&path).unwrap();
                 let err = file2.flock().unwrap_err();
 
-                assert!(err.cmp(FFileErrRes::Lck as u16));
+                assert!(err.compare(FFileErrRes::Lck as u16));
 
                 file1.close().unwrap();
                 file2.close().unwrap();
@@ -1733,7 +1733,7 @@ mod tests {
                 file.close().unwrap();
 
                 let err = file.length().unwrap_err();
-                assert!(err.cmp(FFileErrRes::Hcf as u16));
+                assert!(err.compare(FFileErrRes::Hcf as u16));
             }
         }
 
@@ -1748,7 +1748,7 @@ mod tests {
 
                 let mut buf = vec![0u8; 8];
                 let err = file.pread(buf.as_mut_ptr(), 0, buf.len()).unwrap_err();
-                assert!(err.cmp(FFileErrRes::Hcf as u16));
+                assert!(err.compare(FFileErrRes::Hcf as u16));
             }
         }
 
@@ -1763,7 +1763,7 @@ mod tests {
 
                 let mut data = b"dead".to_vec();
                 let err = file.pwrite(data.as_mut_ptr(), 0, data.len()).unwrap_err();
-                assert!(err.cmp(FFileErrRes::Hcf as u16));
+                assert!(err.compare(FFileErrRes::Hcf as u16));
             }
         }
 
@@ -1776,7 +1776,7 @@ mod tests {
                 file.close().unwrap();
 
                 let err = file.sync().unwrap_err();
-                assert!(err.cmp(FFileErrRes::Hcf as u16));
+                assert!(err.compare(FFileErrRes::Hcf as u16));
             }
         }
 
@@ -1789,7 +1789,7 @@ mod tests {
                 file.close().unwrap();
 
                 let err = file.grow(0, 0x100).unwrap_err();
-                assert!(err.cmp(FFileErrRes::Hcf as u16));
+                assert!(err.compare(FFileErrRes::Hcf as u16));
             }
         }
 
@@ -1804,7 +1804,7 @@ mod tests {
                 assert!(!path.exists());
 
                 let err = file.unlink(&path).unwrap_err();
-                assert!(err.cmp(FFileErrRes::Inv as u16));
+                assert!(err.compare(FFileErrRes::Inv as u16));
             }
         }
     }

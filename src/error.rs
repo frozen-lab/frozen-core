@@ -22,7 +22,7 @@ impl FrozenErr {
     /// use frozen_core::error::FrozenErr;
     ///
     /// let err = FrozenErr::new(1, 2, 0x0033, b"io", b"failed".to_vec());
-    /// assert_eq!(err.cmp(0x0033), true);
+    /// assert_eq!(err.compare(0x0033), true);
     /// ```
     #[inline]
     pub fn new(module: u8, domain: u8, reason: u16, detail: &'static [u8], errmsg: Vec<u8>) -> Self {
@@ -43,11 +43,11 @@ impl FrozenErr {
     /// use frozen_core::error::FrozenErr;
     ///
     /// let err = FrozenErr::new(1, 2, 42, b"test", Vec::new());
-    /// assert!(err.cmp(42));
-    /// assert!(!err.cmp(7));
+    /// assert!(err.compare(42));
+    /// assert!(!err.compare(7));
     /// ```
     #[inline]
-    pub fn cmp(&self, reason: u16) -> bool {
+    pub fn compare(&self, reason: u16) -> bool {
         self.reason == reason
     }
 

@@ -25,7 +25,7 @@
 //! ## Example
 //!
 //! ```
-//! let crc = frozen_core::crc32::Crc32C::new();
+//! let crc = frozen_core::crc32::Crc32C::default();
 //!
 //! let b0: [u8; 8] = *b"12345678";
 //! let b1: [u8; 8] = *b"ABCDEFGH";
@@ -52,7 +52,7 @@ type TBuf = [u8];
 /// ## Example
 ///
 /// ```
-/// let crc = frozen_core::crc32::Crc32C::new();
+/// let crc = frozen_core::crc32::Crc32C::default();
 ///
 /// let b0: [u8; 8] = *b"12345678";
 /// let b1: [u8; 8] = *b"ABCDEFGH";
@@ -83,7 +83,7 @@ impl Crc32C {
     /// ## Example
     ///
     /// ```
-    /// let crc = frozen_core::crc32::Crc32C::new();
+    /// let crc = frozen_core::crc32::Crc32C::default();
     ///
     /// let b0: [u8; 8] = *b"12345678";
     /// let b1: [u8; 8] = *b"ABCDEFGH";
@@ -110,7 +110,7 @@ impl Crc32C {
 
     /// Checks whether hardware acceleration is available at runtime
     /// ```
-    /// let crc = frozen_core::crc32::Crc32C::new();
+    /// let crc = frozen_core::crc32::Crc32C::default();
     ///
     /// #[cfg(target_arch = "x86_64")]
     /// let expected = std::is_x86_feature_detected!("sse4.2");
@@ -139,7 +139,7 @@ impl Crc32C {
     /// ## Example
     ///
     /// ```
-    /// let crc = frozen_core::crc32::Crc32C::new();
+    /// let crc = frozen_core::crc32::Crc32C::default();
     ///
     /// let b0: [u8; 8] = *b"12345678";
     /// assert_eq!(crc.crc(&b0), crc.crc(&b0));
@@ -167,7 +167,7 @@ impl Crc32C {
     /// ## Example
     ///
     /// ```
-    /// let crc = frozen_core::crc32::Crc32C::new();
+    /// let crc = frozen_core::crc32::Crc32C::default();
     ///
     /// let b0: [u8; 8] = *b"12345678";
     /// let b1: [u8; 8] = *b"ABCDEFGH";
@@ -196,7 +196,7 @@ impl Crc32C {
     /// ## Example
     ///
     /// ```
-    /// let crc = frozen_core::crc32::Crc32C::new();
+    /// let crc = frozen_core::crc32::Crc32C::default();
     ///
     /// let b0: [u8; 8] = *b"12345678";
     /// let b1: [u8; 8] = *b"ABCDEFGH";
@@ -210,6 +210,12 @@ impl Crc32C {
             Backend::Software => crc32c_slice8_4x(buffers),
             Backend::Hardware => unsafe { crc32c_hardware_4x(buffers) },
         }
+    }
+}
+
+impl Default for Crc32C {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -234,7 +240,7 @@ const CRC_TABLE: [[TCrc; 0x100]; 8] = {
             if (crc & 1) != 0 {
                 crc = (crc >> 1) ^ CASTAGNOLI_POLYNOMIAL;
             } else {
-                crc = crc >> 1;
+                crc >>= 1;
             }
 
             j += 1;
@@ -699,13 +705,13 @@ mod tests {
 
         #[test]
         fn ok_known_crc_vectors() {
-            let crc = Crc32C::new();
+            let crc = Crc32C::default();
             assert_eq!(crc.crc(b"12345678"), 0x6087809A);
         }
 
         #[test]
         fn ok_crc_is_deterministic() {
-            let crc = Crc32C::new();
+            let crc = Crc32C::default();
 
             let buf = make_buf(0x1000, 0x77);
 
@@ -719,7 +725,7 @@ mod tests {
 
         #[test]
         fn ok_different_buffers_have_different_crc() {
-            let crc = Crc32C::new();
+            let crc = Crc32C::default();
 
             let a = make_buf(0x1000, 0x10);
             let b = make_buf(0x1000, 0x11);
@@ -729,7 +735,7 @@ mod tests {
 
         #[test]
         fn ok_parallel_crc_matches_single() {
-            let crc = Crc32C::new();
+            let crc = Crc32C::default();
 
             let b0 = make_buf(0x1000, 1);
             let b1 = make_buf(0x1000, 2);
@@ -750,7 +756,7 @@ mod tests {
 
         #[test]
         fn ok_zero_buffer_crc() {
-            let crc = Crc32C::new();
+            let crc = Crc32C::default();
 
             let buf = vec![0u8; 0x1000];
             let a = crc.crc(&buf);
@@ -823,7 +829,7 @@ mod tests {
 
         #[test]
         fn ok_single_bit_flip_changes_crc() {
-            let crc = Crc32C::new();
+            let crc = Crc32C::default();
 
             let mut buf = make_buf(0x1000, 0xAA);
             let original = crc.crc(&buf);
@@ -835,7 +841,7 @@ mod tests {
 
         #[test]
         fn ok_multiple_bit_flips_change_crc() {
-            let crc = Crc32C::new();
+            let crc = Crc32C::default();
 
             let mut buf = make_buf(0x2000, 0x11);
             let original = crc.crc(&buf);
@@ -851,7 +857,7 @@ mod tests {
 
         #[test]
         fn ok_detects_torn_write_simulation() {
-            let crc = Crc32C::new();
+            let crc = Crc32C::default();
 
             let mut buf = make_buf(0x1000, 0x55);
             let original = crc.crc(&buf);
@@ -867,7 +873,7 @@ mod tests {
 
         #[test]
         fn ok_detects_random_corruption() {
-            let crc = Crc32C::new();
+            let crc = Crc32C::default();
 
             let mut buf = make_buf(0x1000, 0x42);
             let original = crc.crc(&buf);
@@ -882,7 +888,7 @@ mod tests {
 
         #[test]
         fn ok_every_bit_flip_changes_crc() {
-            let crc = Crc32C::new();
+            let crc = Crc32C::default();
 
             let mut buf = make_buf(0x40, 0xAB);
             let base = crc.crc(&buf);

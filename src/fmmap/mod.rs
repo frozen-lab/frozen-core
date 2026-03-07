@@ -750,7 +750,7 @@ impl Core {
             }
 
             // this helps us avoid sync when no data is updated
-            if hints::likely(core.dirty.swap(false, atomic::Ordering::AcqRel) == false) {
+            if hints::likely(!core.dirty.swap(false, atomic::Ordering::AcqRel)) {
                 continue;
             }
 
@@ -851,6 +851,7 @@ where
     }
 
     #[inline]
+    #[allow(clippy::mut_from_ref)]
     unsafe fn get_mut(&self) -> &mut T {
         &mut *self.value.get()
     }
@@ -863,7 +864,7 @@ where
     oi: &'a ObjectInterface<T>,
 }
 
-impl<'a, T> Drop for OIGuard<'a, T>
+impl<T> Drop for OIGuard<'_, T>
 where
     T: Sized + Send + Sync,
 {
@@ -945,7 +946,7 @@ mod tests {
             // update cfg + opne existing
             cfg.initial_count = INIT_SLOTS * 2;
             let err = FrozenMMap::<u8>::new(cfg).unwrap_err();
-            assert!(err.cmp(FFileErrRes::Cpt as u16));
+            assert!(err.compare(FFileErrRes::Cpt as u16));
         }
 
         #[test]
@@ -966,7 +967,7 @@ mod tests {
             assert!(!mmap.core.ffile.exists().unwrap());
 
             let err = mmap.delete().unwrap_err();
-            assert!(err.cmp(FFileErrRes::Inv as u16));
+            assert!(err.compare(FFileErrRes::Inv as u16));
         }
 
         #[test]

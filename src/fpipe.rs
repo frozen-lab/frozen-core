@@ -4,7 +4,7 @@
 
 use crate::{bpool, error::FrozenRes, ffile};
 
-///
+/// Frozen Pipe for batched IO ops
 #[derive(Debug)]
 pub struct FPipe {
     pool: bpool::BPool,
@@ -12,7 +12,7 @@ pub struct FPipe {
 }
 
 impl FPipe {
-    ///
+    /// Create a new instance
     pub fn new(
         path: std::path::PathBuf,
         buf_size: usize,

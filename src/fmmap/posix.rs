@@ -242,7 +242,7 @@ mod tests {
 
             unsafe {
                 let err = POSIXMMap::new(file.fd(), 0).unwrap_err();
-                assert!(err.cmp(FMMapErrRes::Hcf as u16));
+                assert!(err.compare(FMMapErrRes::Hcf as u16));
             }
         }
 
@@ -252,7 +252,7 @@ mod tests {
 
             unsafe {
                 let err = POSIXMMap::new(-1, LENGTH).unwrap_err();
-                assert!(err.cmp(FMMapErrRes::Hcf as u16));
+                assert!(err.compare(FMMapErrRes::Hcf as u16));
             }
         }
 
@@ -263,7 +263,7 @@ mod tests {
             unsafe {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
                 let err = mmap.unmap(0).unwrap_err();
-                assert!(err.cmp(FMMapErrRes::Hcf as u16));
+                assert!(err.compare(FMMapErrRes::Hcf as u16));
             }
         }
     }

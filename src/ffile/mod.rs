@@ -365,6 +365,7 @@ impl FrozenFile {
 
     /// Read a single chunk at given `index` w/ `pread` syscall
     #[inline(always)]
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn read(&self, buf: *mut u8, index: usize) -> FrozenRes<()> {
         let offset = self.cfg.chunk_size * index;
@@ -375,6 +376,7 @@ impl FrozenFile {
 
     /// Write a single chunk at given `index` w/ `pwrite` syscall
     #[inline(always)]
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn write(&self, buf: *mut u8, index: usize) -> FrozenRes<()> {
         let offset = self.cfg.chunk_size * index;
@@ -495,7 +497,7 @@ mod tests {
             cfg.chunk_size = cfg.chunk_size * 2;
 
             let err = FrozenFile::new(cfg).unwrap_err();
-            assert!(err.cmp(FFileErrRes::Cpt as u16));
+            assert!(err.compare(FFileErrRes::Cpt as u16));
         }
 
         #[test]
@@ -538,7 +540,7 @@ mod tests {
             file.delete().unwrap();
 
             let err = file.delete().unwrap_err();
-            assert!(err.cmp(FFileErrRes::Inv as u16));
+            assert!(err.compare(FFileErrRes::Inv as u16));
         }
 
         #[test]
@@ -571,7 +573,7 @@ mod tests {
             let file = FrozenFile::new(cfg.clone()).unwrap();
 
             let err = FrozenFile::new(cfg).unwrap_err();
-            assert!(err.cmp(FFileErrRes::Lck as u16));
+            assert!(err.compare(FFileErrRes::Lck as u16));
 
             drop(file);
         }
@@ -635,7 +637,7 @@ mod tests {
             file.delete().unwrap();
 
             let err = file.sync().unwrap_err();
-            assert!(err.cmp(FFileErrRes::Hcf as u16));
+            assert!(err.compare(FFileErrRes::Hcf as u16));
         }
     }
 
@@ -784,7 +786,7 @@ mod tests {
             // index > curr_chunks
             let mut buf = [0; CHUNK_SIZE];
             let err = file.read(buf.as_mut_ptr(), 0x100).unwrap_err();
-            assert!(err.cmp(FFileErrRes::Hcf as u16));
+            assert!(err.compare(FFileErrRes::Hcf as u16));
         }
     }
 }
