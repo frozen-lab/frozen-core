@@ -494,7 +494,7 @@ mod tests {
             drop(file);
 
             // updated cfg
-            cfg.chunk_size = cfg.chunk_size * 2;
+            cfg.chunk_size *= 2;
 
             let err = FrozenFile::new(cfg).unwrap_err();
             assert!(err.compare(FFileErrRes::Cpt as u16));

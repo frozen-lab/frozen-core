@@ -1183,7 +1183,7 @@ mod tests {
             let (_dir, path) = tmp_path();
 
             unsafe {
-                let missing = path.join("/missing/file");
+                let missing = path.join("missing/file");
                 let err = POSIXFile::new(&missing).unwrap_err();
                 assert!(err.compare(FFileErrRes::Inv as u16))
             }
@@ -1590,9 +1590,9 @@ mod tests {
                 let read_ptrs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
                 file.preadv(&read_ptrs, 0, page).unwrap();
-                for i in 0..count {
+                for (i, item) in read_bufs.iter().enumerate().take(count) {
                     let expected = (i % 0xFB) as u8;
-                    assert!(read_bufs[i].iter().all(|b| *b == expected));
+                    assert!(item.iter().all(|b| *b == expected));
                 }
             }
         }

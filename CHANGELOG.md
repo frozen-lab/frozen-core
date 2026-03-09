@@ -3,6 +3,7 @@
 ## `0.0.10`
 
 - Impl of dynamic allocations in `BPool` (via `BPool::allocate_dynamic`)
+- Impl of `mpscq` module
 
 ## `0.0.9`
 

@@ -11,6 +11,7 @@ Custom implementations and core utilities for frozen codebases.
 - [`hints`](#hints)
 - [`crc32`](#crc32)
 - [`bpool`](#bpool)
+- [`mpscq`](#mpscq)
 - [`notes`](#notes)
 
 ## Usage
@@ -19,7 +20,7 @@ Add following to your `Cargo.toml`,
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.9", default-features = true }
+frozen-core = { version = "0.0.10", default-features = true }
 ```
 
 > [!TIP]
@@ -33,7 +34,7 @@ To use the `ffile` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.9", default-features = false, features = ["ffile"] }
+frozen-core = { version = "0.0.10", default-features = false, features = ["ffile"] }
 ```
 
 `FrozenFile` is currently available on the following platforms,
@@ -57,7 +58,7 @@ To use the `fmmap` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.9", default-features = false, features = ["fmmap"] }
+frozen-core = { version = "0.0.10", default-features = false, features = ["fmmap"] }
 ```
 
 `FrozenMMap` is currently available on the following platforms,
@@ -133,7 +134,7 @@ To use the `error` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.9", default-features = false, features = ["error"] }
+frozen-core = { version = "0.0.10", default-features = false, features = ["error"] }
 ```
 
 ## Hints
@@ -144,7 +145,7 @@ To use the `hints` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.9", default-features = false, features = ["hints"] }
+frozen-core = { version = "0.0.10", default-features = false, features = ["hints"] }
 ```
 
 ## Crc32
@@ -162,7 +163,7 @@ To use the `crc32` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.9", default-features = false, features = ["crc32"] }
+frozen-core = { version = "0.0.10", default-features = false, features = ["crc32"] }
 ```
 
 `Crc32C` is available on following architectires,
@@ -195,22 +196,11 @@ fn main() {
 
 Lock-free buffer pool used for staging IO buffers
 
-## Features
-
-- *RAII Safe*
-- *Graceful Shutdown*
-- *Lock-free fast path*
-
-## Pooling for allocations
-
-Bufs are allocated in batches using `BPool::allocate`, it may allocate fewer than requested, in such cases
-caller should wait using `BPool::wait` which block till any bufs are available to use again
-
 To use the `bpool` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.9", default-features = false, features = ["bpool"] }
+frozen-core = { version = "0.0.10", default-features = false, features = ["bpool"] }
 ```
 
 Read the example below for usage details,
@@ -254,6 +244,38 @@ fn main() {
     for h in handles {
         h.join().unwrap();
     }
+}
+```
+
+## MPSCQ
+
+A lock-free multi-producer single-consumer queue
+
+To use the `mpscq` module, add it as a dependency in your `Cargo.toml`:
+
+```toml
+[dependencies]
+frozen-core = { version = "0.0.10", default-features = false, features = ["mpscq"] }
+```
+
+Read the example below for usage details,
+
+```rs
+use frozen_core::mpscq::MPSCQueue;
+
+fn main() {
+    let queue = MPSCQueue::<usize>::default();
+
+    queue.push(1usize);
+    queue.push(2usize);
+    queue.push(3usize);
+
+    let batch = queue.drain();
+
+    assert_eq!(batch.len(), 3);
+    assert_eq!(batch, vec![3usize, 2usize, 1usize]);
+
+    drop(batch); // values is dropped here
 }
 ```
 

@@ -419,7 +419,7 @@ mod tests {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 let ptr = mmap.as_ptr::<u64>(0);
-                *(&*ptr).get_mut() = VAL;
+                *(*ptr).get_mut() = VAL;
 
                 mmap.sync(LENGTH).unwrap();
                 mmap.unmap(LENGTH).unwrap();
@@ -429,7 +429,7 @@ mod tests {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 let ptr = mmap.as_ptr::<u64>(0);
-                assert_eq!(*(&*ptr).get(), VAL);
+                assert_eq!(*(*ptr).get(), VAL);
 
                 mmap.unmap(LENGTH).unwrap();
             }
@@ -444,7 +444,7 @@ mod tests {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 let ptr = mmap.as_ptr::<u64>(0);
-                *(&*ptr).get_mut() = VAL;
+                *(*ptr).get_mut() = VAL;
 
                 mmap.sync(LENGTH).unwrap();
                 mmap.unmap(LENGTH).unwrap();
@@ -464,7 +464,7 @@ mod tests {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 let ptr = mmap.as_ptr::<u64>(0);
-                assert_eq!(*(&*ptr).get(), VAL);
+                assert_eq!(*(*ptr).get(), VAL);
 
                 mmap.unmap(LENGTH).unwrap();
             }

@@ -40,7 +40,7 @@ pub const fn unlikely(b: bool) -> bool {
 }
 
 #[cfg(test)]
-mod hints {
+mod tests {
     use super::*;
 
     #[test]
