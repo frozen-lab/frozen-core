@@ -22,3 +22,6 @@ pub mod bpool;
 
 #[cfg(feature = "fpipe")]
 pub mod fpipe;
+
+#[cfg(feature = "mpscq")]
+pub mod mpscq;
