@@ -91,7 +91,11 @@ jobs:
         
       - name: Example (BPool)
         run: |
-          cargo run --release --example bp
+          cargo run --release --example bp          
+          
+      - name: Example (MPSCQ)
+        run: |
+          cargo run --release --example mq
 
   release:
     needs: examples
