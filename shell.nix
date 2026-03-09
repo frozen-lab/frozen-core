@@ -12,7 +12,6 @@ pkgs.mkShell {
     clippy
     rust-analyzer
     cargo-show-asm
-    python3
   ]
   ++ (if isLinux then [ pkgs.gcc pkgs.linuxPackages.perf pkgs.gdb ] else []);
 
@@ -21,7 +20,6 @@ pkgs.mkShell {
   shellHook = ''
     export RUST_LOG=trace
     export RUST_BACKTRACE=1
-    export RUSTFLAGS="-D warnings"
     export CARGO_TERM_COLOR=always
   '';
 }
