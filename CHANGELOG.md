@@ -2,8 +2,9 @@
 
 ## `0.0.10`
 
-- Impl of dynamic allocations in `BPool` (via `BPool::allocate_dynamic`)
 - Impl of `mpscq` module
+- Impl of dynamic allocations in `BPool` (via `BPool::allocate_dynamic`)
+- Yanked use of lifetimes from `bpool::Allocation` object, w/ use of raw pointer internally
 
 ## `0.0.9`
 

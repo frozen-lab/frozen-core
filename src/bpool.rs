@@ -74,7 +74,10 @@
 //! ```
 
 use crate::error::{FrozenErr, FrozenRes};
-use std::sync::{self, atomic};
+use std::{
+    ptr,
+    sync::{self, atomic},
+};
 
 const INVALID_POOL_SLOT: usize = u32::MAX as usize;
 
@@ -113,7 +116,7 @@ const INVALID_POOL_SLOT: usize = u32::MAX as usize;
 /// ```
 #[derive(Debug)]
 pub struct BPool {
-    ptr: PoolPtr,
+    ptr: BPPtr,
     module_id: u8,
     capacity: usize,
     buf_size: usize,
@@ -160,7 +163,7 @@ impl BPool {
     pub fn new(buf_size: usize, capacity: usize, module_id: u8) -> Self {
         let pool_size = capacity * buf_size;
         let mut pool = Vec::<u8>::with_capacity(pool_size);
-        let ptr = PoolPtr { ptr: pool.as_mut_ptr() };
+        let ptr = BPPtr { ptr: pool.as_mut_ptr() };
 
         // NOTE: `Vec::with_capacity(N)` allocates memory but keeps the len at 0, we use raw pointers to access
         // the slots, if the len stays at 0, it'd be UB while the reconstruction of the slice from the pointer
@@ -218,9 +221,8 @@ impl BPool {
     ///
     /// ## RAII Safety
     ///
-    /// All [`BPool`] aloocations are RAII safe by default, hence when the variable which stores the result
-    /// of `allocate`, is dropped, the buffer's it holds are also automatically freed, the burden of _freeing after use_
-    /// does not fall on the caller
+    /// The [`Allocation`] is RAII safe, as the buffers are automatically returned to the [`BPool`] when caller
+    /// drops reference to the [`Allocation`]
     ///
     /// ## Example
     ///
@@ -245,7 +247,7 @@ impl BPool {
     /// assert!(alloc3.count == 1);
     /// ```
     #[inline(always)]
-    pub fn allocate(&self, n: usize) -> Allocation<'_> {
+    pub fn allocate(&self, n: usize) -> Allocation {
         let mut head = self.head.load(atomic::Ordering::Acquire);
         let mut batch = Allocation::from_pool(self, n);
 
@@ -258,7 +260,7 @@ impl BPool {
             // This allows caller to process allocated buffers, and avoid busy waiting for
             // more buffers
             //
-            // The caller should pool to allocate, till all the required buffers are allocated
+            // The caller should poll to allocate, till all required bufs are allocated
             if idx == INVALID_POOL_SLOT {
                 return batch;
             }
@@ -305,13 +307,18 @@ impl BPool {
 
     /// Allocates `N` buffers at runtime, bypassing the pool
     ///
-    /// This function allocates a contiguous memory region (`buf_size * n`), and returns raw pointers, i.e. [`PoolPtr`],
+    /// This function allocates a contiguous memory region (`buf_size * n`), and returns raw pointers, i.e. [`BPPtr`],
     /// to the allocated buffers
     ///
     /// ## When to use?
     ///
     /// This function is intended as a fallback to [`BPool::allocate`], when a write op requires more buffers then current
     /// capacity of [`BPool`] and/or waiting for buffer availability via [`BPool::wait`] is undesireable
+    ///
+    /// ## RAII Safe
+    ///
+    /// The [`Allocation`] is RAII safe, as the dynamically allocated buffers are automatically freed from memory
+    /// when caller drops reference to the [`Allocation`]
     ///
     /// ## Calling Pattern
     ///
@@ -348,6 +355,9 @@ impl BPool {
     ///
     /// ## Example (Dynamic allocation as fallback)
     ///
+    /// One should use the [`BPool::allocate_dynamic`] as a fallback when [`BPool::allocate`] allocated
+    /// less then required
+    ///
     /// ```
     /// use frozen_core::bpool::BPool;
     ///
@@ -367,7 +377,7 @@ impl BPool {
     /// }
     /// ```
     #[inline]
-    pub fn allocate_dynamic(&self, n: usize) -> Allocation<'_> {
+    pub fn allocate_dynamic(&self, n: usize) -> Allocation {
         self.active.fetch_add(1, atomic::Ordering::Relaxed);
 
         let total = self.buf_size * n;
@@ -388,18 +398,18 @@ impl BPool {
         let mut ptrs = Vec::with_capacity(n);
         for i in 0..n {
             let p = unsafe { base_ptr.add(i * self.buf_size) };
-            ptrs.push(PoolPtr { ptr: p });
+            ptrs.push(BPPtr { ptr: p });
         }
 
         Allocation {
             count: n,
             slots: AllocSlotType::Dynamic(ptrs),
-            guard: AllocationGuard(self),
+            guard: AllocationGuard(ptr::NonNull::from(self)),
         }
     }
 
     #[inline(always)]
-    fn free(&self, ptr: &PoolPtr) {
+    fn free(&self, ptr: &BPPtr) {
         let offset = self.ptr.offset_from(ptr);
         let idx = offset / self.buf_size;
 
@@ -558,19 +568,18 @@ fn unpack_pool_idx(id: usize) -> (usize, usize) {
     (id & POOL_IDX_MASK, id >> POOL_IDX_BITS)
 }
 
-type TPoolPtr = *mut u8;
+type TBPPtr = *mut u8;
 
 /// Pointer to buffer allocated by [`BPool::allocate`]
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct PoolPtr {
+pub struct BPPtr {
     /// Raw pointer to the start of a buffer owned by the pool, where the valid memory range is `[ptr, ptr + buf_size)`
-    pub ptr: TPoolPtr,
+    pub ptr: TBPPtr,
 }
 
-unsafe impl Send for PoolPtr {}
-unsafe impl Sync for PoolPtr {}
+unsafe impl Send for BPPtr {}
 
-impl PoolPtr {
+impl BPPtr {
     #[inline]
     fn add(&self, count: u64) -> Self {
         Self {
@@ -586,21 +595,23 @@ impl PoolPtr {
 
 /// Buffer allocations allocated by [`BPool::allocate`]
 #[derive(Debug)]
-pub struct Allocation<'a> {
+pub struct Allocation {
     /// Number of buffers allocated, can be lower than the requested amount
     pub count: usize,
 
-    /// Vector containing raw buffer pointers, i.e. [`PoolPtr`]
+    /// Vector containing raw buffer pointers, i.e. [`BPPtr`]
     slots: AllocSlotType,
 
     /// Guard to enforce RAII safety
-    guard: AllocationGuard<'a>,
+    guard: AllocationGuard,
 }
 
-impl<'a> Allocation<'a> {
+unsafe impl Send for Allocation {}
+
+impl Allocation {
     /// Get a referenced vector containing raw buffer pointers
     #[inline]
-    pub fn slots(&'a self) -> &'a Vec<PoolPtr> {
+    pub fn slots(&self) -> &Vec<BPPtr> {
         match &self.slots {
             AllocSlotType::Pool(slots) => slots,
             AllocSlotType::Dynamic(slots) => slots,
@@ -608,23 +619,24 @@ impl<'a> Allocation<'a> {
     }
 
     #[inline]
-    fn from_pool(pool: &'a BPool, cap: usize) -> Self {
+    fn from_pool(pool: &BPool, cap: usize) -> Self {
         pool.active.fetch_add(1, atomic::Ordering::Relaxed);
 
         Self {
             count: 0,
-            slots: AllocSlotType::Pool(Vec::<PoolPtr>::with_capacity(cap)),
-            guard: AllocationGuard(pool),
+            slots: AllocSlotType::Pool(Vec::<BPPtr>::with_capacity(cap)),
+            guard: AllocationGuard(ptr::NonNull::from(pool)),
         }
     }
 }
 
-impl Drop for Allocation<'_> {
+impl Drop for Allocation {
     fn drop(&mut self) {
+        let pool = unsafe { self.guard.0.as_ref() };
         match &self.slots {
             AllocSlotType::Pool(slots) => {
                 for ptr in slots {
-                    self.guard.0.free(ptr);
+                    pool.free(ptr);
                 }
             }
             AllocSlotType::Dynamic(slots) => {
@@ -633,7 +645,7 @@ impl Drop for Allocation<'_> {
                     return;
                 }
 
-                let buf_size = self.guard.0.buf_size;
+                let buf_size = pool.buf_size;
                 let total = buf_size * slots.len();
                 let base = slots[0].ptr;
 
@@ -644,14 +656,16 @@ impl Drop for Allocation<'_> {
 }
 
 #[derive(Debug)]
-struct AllocationGuard<'a>(&'a BPool);
+struct AllocationGuard(ptr::NonNull<BPool>);
 
-impl Drop for AllocationGuard<'_> {
+impl Drop for AllocationGuard {
     fn drop(&mut self) {
-        if self.0.active.fetch_sub(1, atomic::Ordering::Release) == 1 {
+        let pool = unsafe { self.0.as_ref() };
+
+        if pool.active.fetch_sub(1, atomic::Ordering::Release) == 1 {
             // last user
-            if let Ok(_g) = self.0.lock.lock() {
-                self.0.close_cv.notify_one();
+            if let Ok(_g) = pool.lock.lock() {
+                pool.close_cv.notify_one();
             }
         }
     }
@@ -659,12 +673,12 @@ impl Drop for AllocationGuard<'_> {
 
 #[derive(Debug)]
 enum AllocSlotType {
-    Pool(Vec<PoolPtr>),
-    Dynamic(Vec<PoolPtr>),
+    Pool(Vec<BPPtr>),
+    Dynamic(Vec<BPPtr>),
 }
 
 impl AllocSlotType {
-    fn slots(&mut self) -> &mut Vec<PoolPtr> {
+    fn slots(&mut self) -> &mut Vec<BPPtr> {
         match self {
             Self::Pool(slots) => slots,
             Self::Dynamic(slots) => slots,

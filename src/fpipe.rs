@@ -2,7 +2,7 @@
 
 #![allow(unused)]
 
-use crate::{bpool, error::FrozenRes, ffile};
+use crate::{bpool, error::FrozenRes, ffile, mpscq};
 use std::{sync::atomic, time};
 
 /// Config for [`FrozenPipe`]
@@ -43,6 +43,7 @@ pub struct FrozenPipe {
     cfg: FPCfg,
     pool: bpool::BPool,
     file: ffile::FrozenFile,
+    mpscq: mpscq::MPSCQueue<WriteReq>,
     epoch: atomic::AtomicUsize,
     closed: atomic::AtomicBool,
 }
@@ -58,6 +59,7 @@ impl FrozenPipe {
             pool,
             file,
             epoch: atomic::AtomicUsize::new(0),
+            mpscq: mpscq::MPSCQueue::default(),
             closed: atomic::AtomicBool::new(false),
         })
     }
@@ -82,7 +84,8 @@ impl Drop for FrozenPipe {
     }
 }
 
-struct WriteReq<'a> {
+#[derive(Debug)]
+struct WriteReq {
     index: usize,
-    alloc: bpool::Allocation<'a>,
+    alloc: bpool::Allocation,
 }
