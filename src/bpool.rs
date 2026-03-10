@@ -8,8 +8,7 @@
 //!
 //! ## Pooling for allocations
 //!
-//! Bufs are allocated in batches using [`BufPool::allocate`], it may allocate fewer than requested, in such cases
-//! caller should wait using [`BufPool::wait`] which block till any bufs are available to use again
+//! NA
 
 use crate::error::{FrozenErr, FrozenRes};
 use std::{
@@ -84,6 +83,7 @@ pub struct BufPool {
 }
 
 unsafe impl Send for BufPool {}
+unsafe impl Sync for BufPool {}
 
 impl BufPool {
     /// Create a new instance of [`BufPool`]
@@ -131,15 +131,12 @@ impl Drop for BufPool {
             guard = self.close_cv.wait(guard).expect("shutdown cv poisoned");
         }
 
-        match &self.state {
-            BackendState::Prealloc(state) => {
-                let pool_size = state.capacity * self.cfg.chunk_size;
+        if let BackendState::Prealloc(state) = &self.state {
+            let pool_size = state.capacity * self.cfg.chunk_size;
 
-                // NOTE: We re-construct original allocation from the stored pointer! This builds up the vecotor
-                // as it was created, which than is dropped by Rust destructor's automatically!
-                let _ = unsafe { Vec::from_raw_parts(state.base_ptr.ptr, pool_size, pool_size) };
-            }
-            _ => {}
+            // NOTE: We re-construct original allocation from the stored pointer! This builds up the vecotor
+            // as it was created, which than is dropped by Rust destructor's automatically!
+            let _ = unsafe { Vec::from_raw_parts(state.base_ptr.ptr, pool_size, pool_size) };
         }
     }
 }
@@ -221,7 +218,7 @@ impl PreallocState {
 
     #[inline(always)]
     fn alloc_batch(&self, cap: usize, pool: &BufPool, out: &mut Allocation) -> usize {
-        let mut head = self.head.load(atomic::Ordering::Acquire);
+        let mut head = self.head.load(atomic::Ordering::Relaxed);
         loop {
             let (idx, tag) = unpack_pool_idx(head);
 
@@ -262,12 +259,11 @@ impl PreallocState {
             {
                 Err(h) => head = h,
                 Ok(_) => {
+                    let slots = out.slots.slots();
                     let mut cur = idx;
-                    for _ in 0..count {
-                        out.slots
-                            .slots()
-                            .push(self.base_ptr.add((cur * pool.cfg.chunk_size) as u64));
 
+                    for _ in 0..count {
+                        slots.push(self.base_ptr.add((cur * pool.cfg.chunk_size) as u64));
                         cur = self.next[cur].load(atomic::Ordering::Relaxed);
                     }
 
@@ -482,7 +478,7 @@ impl Allocation {
         }
 
         Self {
-            count: count,
+            count,
             slots: AllocSlotType::Dynamic(ptrs),
             guard: AllocationGuard(ptr::NonNull::from(pool)),
         }
