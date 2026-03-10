@@ -195,6 +195,12 @@ unsafe impl Send for FrozenFile {}
 unsafe impl Sync for FrozenFile {}
 
 impl FrozenFile {
+    /// Fetch config used for [`FrozenFile`]
+    #[inline]
+    pub fn cfg(&self) -> &FFCfg {
+        &self.cfg
+    }
+
     /// Read current length of [`FrozenFile`]
     #[inline]
     pub fn length(&self) -> FrozenRes<usize> {

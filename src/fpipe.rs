@@ -1,7 +1,5 @@
 //! NA
 
-#![allow(unused)]
-
 use crate::{
     bpool,
     error::{FrozenErr, FrozenRes},
@@ -12,36 +10,53 @@ use std::{
     thread, time,
 };
 
-/// Config for [`FrozenPipe`]
-#[derive(Debug, Clone)]
-pub struct FPCfg {
-    /// Module id used for error logging
-    pub mid: u8,
+/// module id used for [`FrozenPipe`]
+static mut MODULE_ID: u8 = 0;
 
-    /// Path for the file
-    ///
-    /// *NOTE:* The caller must make sure that the parent directory exists
-    pub path: std::path::PathBuf,
+/// Domain Id for [`FrozenPipe`] is **19**
+const ERRDOMAIN: u8 = 0x13;
 
-    /// Size (in bytes) of a single chunk on fs
-    ///
-    /// A chunk is a smalled fixed size allocation and addressing unit used by [`FrozenFile`] for all the
-    /// write/read ops, which are operated by index of the chunk and not the offset of the byte
-    pub chunk_size: usize,
+/// Error codes for [`FrozenPipe`]
+#[repr(u16)]
+pub enum FPErrRes {
+    /// (1024) internal fuck up (hault and catch fire)
+    Hcf = 0x400,
 
-    /// Number of chunks to pin in-mem for [`BPool`], used by all write ops
-    ///
-    /// TODO: Add explanation
-    pub pool_capacity: usize,
+    /// (1025) thread error or panic inside thread
+    Txe = 0x401,
 
-    /// Number of chunks to pre-allocate when [`FrozenFile`] is initialized
-    ///
-    /// Initial file length will be `chunk_size * initial_chunk_amount` (bytes)
-    pub initial_chunk_amount: usize,
+    /// (1026) lock error (failed or poisoned)
+    Lpn = 0x402,
+}
 
-    /// Time interval used by flusher tx, to batch write ops into a durable window and sync them
-    /// together, where all write ops in certain time interval falls into a single durable window
-    pub flush_duration: time::Duration,
+impl FPErrRes {
+    #[inline]
+    fn default_message(&self) -> &'static [u8] {
+        match self {
+            Self::Lpn => b"lock poisoned",
+            Self::Hcf => b"hault and catch fire",
+            Self::Txe => b"thread failed or paniced",
+        }
+    }
+}
+
+#[inline]
+fn new_err<R>(res: FPErrRes, message: Vec<u8>) -> FrozenRes<R> {
+    let detail = res.default_message();
+    let err = FrozenErr::new(unsafe { MODULE_ID }, ERRDOMAIN, res as u16, detail, message);
+    Err(err)
+}
+
+#[inline]
+fn new_err_raw<E: std::fmt::Display>(res: FPErrRes, error: E) -> FrozenErr {
+    let detail = res.default_message();
+    FrozenErr::new(
+        unsafe { MODULE_ID },
+        ERRDOMAIN,
+        res as u16,
+        detail,
+        error.to_string().as_bytes().to_vec(),
+    )
 }
 
 /// NA
@@ -53,8 +68,8 @@ pub struct FrozenPipe {
 
 impl FrozenPipe {
     /// Create a new instance of [`FrozenPipe`]
-    pub fn new(cfg: FPCfg) -> FrozenRes<Self> {
-        let core = Core::new(cfg)?;
+    pub fn new(file: ffile::FrozenFile, pool: bpool::BufPool, flush_duration: time::Duration) -> FrozenRes<Self> {
+        let core = Core::new(file, pool, flush_duration)?;
         let tx = Core::spawn_tx(core.clone())?;
 
         Ok(Self { core, tx: Some(tx) })
@@ -63,7 +78,7 @@ impl FrozenPipe {
     /// Submit a write request
     #[inline(always)]
     pub fn write(&self, buf: &[u8], index: usize) -> FrozenRes<u64> {
-        let chunk_size = self.core.cfg.chunk_size;
+        let chunk_size = self.core.chunk_size;
         let chunks = (buf.len() + chunk_size - 1) / chunk_size;
 
         let _lock = self.core.acquire_io_lock()?;
@@ -101,8 +116,7 @@ impl FrozenPipe {
 
         let mut guard = match self.core.durable_lock.lock() {
             Ok(g) => g,
-            // Err(e) => return Err(new_err_raw(FMMapErrRes::Lpn, e)),
-            _ => panic!(),
+            Err(e) => return Err(new_err_raw(FPErrRes::Lpn, e)),
         };
 
         loop {
@@ -116,8 +130,7 @@ impl FrozenPipe {
 
             guard = match self.core.durable_cv.wait(guard) {
                 Ok(g) => g,
-                // Err(e) => return Err(new_err_raw(FMMapErrRes::Lpn, e)),
-                _ => panic!(),
+                Err(e) => return Err(new_err_raw(FPErrRes::Lpn, e)),
             };
         }
     }
@@ -135,7 +148,7 @@ impl Drop for FrozenPipe {
 
 #[derive(Debug)]
 struct Core {
-    cfg: FPCfg,
+    chunk_size: usize,
     cv: sync::Condvar,
     pool: bpool::BufPool,
     lock: sync::Mutex<()>,
@@ -145,30 +158,29 @@ struct Core {
     durable_cv: sync::Condvar,
     closed: atomic::AtomicBool,
     durable_lock: sync::Mutex<()>,
+    flush_duration: time::Duration,
     mpscq: mpscq::MPSCQueue<WriteReq>,
     error: atomic::AtomicPtr<FrozenErr>,
 }
 
 impl Core {
-    fn new(cfg: FPCfg) -> FrozenRes<sync::Arc<Self>> {
-        let file = ffile::FrozenFile::new(ffile::FFCfg {
-            mid: cfg.mid,
-            path: cfg.path.clone(),
-            chunk_size: cfg.chunk_size,
-            initial_chunk_amount: cfg.initial_chunk_amount,
-        })?;
-        let pool = bpool::BufPool::new(bpool::BPCfg {
-            mid: cfg.mid,
-            chunk_size: cfg.chunk_size,
-            backend: bpool::BPBackend::Prealloc {
-                capacity: cfg.pool_capacity,
-            },
-        });
+    fn new(
+        file: ffile::FrozenFile,
+        pool: bpool::BufPool,
+        flush_duration: time::Duration,
+    ) -> FrozenRes<sync::Arc<Self>> {
+        let cfg = file.cfg();
+        let chunk_size = cfg.chunk_size;
+
+        // NOTE: we only set it the module_id once, hence it'll be only set once per instance
+        // and is only used for error logging
+        unsafe { MODULE_ID = cfg.mid };
 
         Ok(sync::Arc::new(Self {
-            cfg,
             file,
             pool,
+            chunk_size,
+            flush_duration,
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
             io_lock: sync::RwLock::new(()),
@@ -183,18 +195,12 @@ impl Core {
 
     #[inline]
     fn acquire_io_lock(&self) -> FrozenRes<sync::RwLockReadGuard<'_, ()>> {
-        self.io_lock.read().map_err(|e| {
-            // new_err_raw(FMMapErrRes::Lpn, e)
-            panic!()
-        })
+        self.io_lock.read().map_err(|e| new_err_raw(FPErrRes::Lpn, e))
     }
 
     #[inline]
     fn acquire_exclusive_io_lock(&self) -> FrozenRes<sync::RwLockWriteGuard<'_, ()>> {
-        self.io_lock.write().map_err(|e| {
-            // new_err_raw(FMMapErrRes::Lpn, e)
-            panic!()
-        })
+        self.io_lock.write().map_err(|e| new_err_raw(FPErrRes::Lpn, e))
     }
 
     #[inline]
@@ -244,7 +250,7 @@ impl Core {
             Err(error) => {
                 let mut error = error.to_string().as_bytes().to_vec();
                 error.extend_from_slice(b"Failed to spawn flush thread for FrozenMMap");
-                panic!("{:?}", error); // NOTE: just a placeholder for now
+                new_err(FPErrRes::Hcf, error)
             }
         }
     }
@@ -256,24 +262,24 @@ impl Core {
             Err(error) => {
                 let mut message = error.to_string().as_bytes().to_vec();
                 message.extend_from_slice(b"Flush thread died before init could be completed for FrozenMMap");
-                // let error = FrozenErr::new(
-                //     unsafe { MODULE_ID },
-                //     ERRDOMAIN,
-                //     FMMapErrRes::Lpn as u16,
-                //     FMMapErrRes::Lpn.default_message(),
-                //     message,
-                // );
-                // core.set_sync_error(error);
+                let error = FrozenErr::new(
+                    unsafe { MODULE_ID },
+                    ERRDOMAIN,
+                    FPErrRes::Lpn as u16,
+                    FPErrRes::Lpn.default_message(),
+                    message,
+                );
+                core.set_sync_error(error);
                 return;
             }
         };
 
         // sync loop w/ non-busy waiting
         loop {
-            guard = match core.cv.wait_timeout(guard, core.cfg.flush_duration) {
+            guard = match core.cv.wait_timeout(guard, core.flush_duration) {
                 Ok((g, _)) => g,
                 Err(e) => {
-                    // core.set_sync_error(new_err_raw(FMMapErrRes::Txe, e));
+                    core.set_sync_error(new_err_raw(FPErrRes::Txe, e));
                     return;
                 }
             };
@@ -298,7 +304,7 @@ impl Core {
             let io_lock = match core.acquire_exclusive_io_lock() {
                 Ok(lock) => lock,
                 Err(e) => {
-                    // core.set_sync_error(new_err_raw(FMMapErrRes::Lpn, e));
+                    core.set_sync_error(new_err_raw(FPErrRes::Lpn, e));
                     return;
                 }
             };
@@ -323,7 +329,7 @@ impl Core {
                     let _g = match core.durable_lock.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            // core.set_sync_error(new_err_raw(FMMapErrRes::Lpn, e));
+                            core.set_sync_error(new_err_raw(FPErrRes::Lpn, e));
                             return;
                         }
                     };
@@ -338,7 +344,7 @@ impl Core {
             guard = match core.lock.lock() {
                 Ok(g) => g,
                 Err(e) => {
-                    // core.set_sync_error(new_err_raw(FMMapErrRes::Lpn, e));
+                    core.set_sync_error(new_err_raw(FPErrRes::Lpn, e));
                     return;
                 }
             };
@@ -351,13 +357,11 @@ unsafe impl Sync for Core {}
 
 #[derive(Debug)]
 struct WriteReq {
-    index: usize,
-    chunks: usize,
-    alloc: bpool::Allocation,
+    _alloc: bpool::Allocation,
 }
 
 impl WriteReq {
     fn new(index: usize, chunks: usize, alloc: bpool::Allocation) -> Self {
-        Self { index, chunks, alloc }
+        Self { _alloc: alloc }
     }
 }
