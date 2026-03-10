@@ -41,7 +41,6 @@ pub struct FPCfg {
 #[derive(Debug)]
 pub struct FrozenPipe {
     cfg: FPCfg,
-    pool: bpool::BPool,
     file: ffile::FrozenFile,
     mpscq: mpscq::MPSCQueue<WriteReq>,
     epoch: atomic::AtomicUsize,
@@ -52,11 +51,9 @@ impl FrozenPipe {
     /// NA
     pub fn new(cfg: FPCfg) -> FrozenRes<Self> {
         let file = ffile::FrozenFile::new(Self::prep_ff_cfg(&cfg))?;
-        let pool = bpool::BPool::new(cfg.chunk_size, cfg.pool_capacity, cfg.mid);
 
         Ok(Self {
             cfg,
-            pool,
             file,
             epoch: atomic::AtomicUsize::new(0),
             mpscq: mpscq::MPSCQueue::default(),
@@ -66,7 +63,9 @@ impl FrozenPipe {
 
     /// NA
     #[inline(always)]
-    pub fn write(&self, bufs: &[u8], index: usize) {}
+    pub fn write(&self, bufs: &[u8], index: usize) -> usize {
+        todo!()
+    }
 
     fn prep_ff_cfg(cfg: &FPCfg) -> ffile::FFCfg {
         ffile::FFCfg {
@@ -87,5 +86,12 @@ impl Drop for FrozenPipe {
 #[derive(Debug)]
 struct WriteReq {
     index: usize,
+    chunks: usize,
     alloc: bpool::Allocation,
+}
+
+impl WriteReq {
+    fn new(index: usize, chunks: usize, alloc: bpool::Allocation) -> Self {
+        Self { index, chunks, alloc }
+    }
 }
