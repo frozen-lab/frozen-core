@@ -51,6 +51,12 @@ pub struct MPSCQueue<T> {
 }
 
 impl<T> MPSCQueue<T> {
+    /// Check if the [`MPSCQueue`] is currently empty
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.head.load(atomic::Ordering::Acquire).is_null()
+    }
+
     /// Push an entry into the [`MPSCQueue`]
     ///
     /// ## Ordering
@@ -194,6 +200,34 @@ mod tests {
             let q: MPSCQueue<usize> = MPSCQueue::default();
             let batch = q.drain();
             assert!(batch.is_empty());
+        }
+    }
+
+    mod empty {
+        use super::*;
+
+        #[test]
+        fn ok_is_empty_true_on_init() {
+            let q: MPSCQueue<usize> = MPSCQueue::default();
+            assert!(q.is_empty());
+        }
+
+        #[test]
+        fn ok_is_empty_false_after_push() {
+            let q = MPSCQueue::default();
+            q.push(1);
+            assert!(!q.is_empty());
+        }
+
+        #[test]
+        fn ok_is_empty_true_after_drain() {
+            let q = MPSCQueue::default();
+
+            q.push(1);
+            q.push(2);
+
+            let _ = q.drain();
+            assert!(q.is_empty());
         }
     }
 

@@ -122,6 +122,29 @@ impl FrozenPipe {
         self.internal_wait(epoch)
     }
 
+    /// Grow the underlying [`FrozenFile`] by given `count`
+    pub fn grow(&self, count: usize) -> FrozenRes<()> {
+        loop {
+            // NOTE: we must make sure there are no remaining items in the queue left for sync
+            let epoch = self.core.epoch.load(atomic::Ordering::Acquire);
+            self.force_durability(epoch)?;
+
+            // we acquire an exclusive lock to block write, read and sync ops
+            let lock = self.core.acquire_exclusive_io_lock()?;
+
+            // NOTE: it is possible that a write could sneak in between the sync and lock acquire, if so we must
+            // make sure that it has synced
+
+            if self.core.mpscq.is_empty() {
+                self.core.file.grow(count)?;
+                drop(lock);
+                return Ok(());
+            }
+
+            drop(lock);
+        }
+    }
+
     fn internal_wait(&self, epoch: u64) -> FrozenRes<()> {
         if hints::unlikely(self.core.epoch.load(atomic::Ordering::Acquire) > epoch) {
             return Ok(());
