@@ -525,3 +525,347 @@ impl Drop for AllocationGuard {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::TEST_MID;
+
+    const CAP: usize = 0x20;
+    const SIZE: usize = 0x0A;
+
+    fn new_pool_prealloc(capacity: usize) -> BufPool {
+        BufPool::new(BPCfg {
+            mid: TEST_MID,
+            chunk_size: SIZE,
+            backend: BPBackend::Prealloc { capacity },
+        })
+    }
+
+    fn new_pool_dynamic() -> BufPool {
+        BufPool::new(BPCfg {
+            mid: TEST_MID,
+            chunk_size: SIZE,
+            backend: BPBackend::Dynamic,
+        })
+    }
+
+    mod utils {
+        use super::*;
+
+        #[test]
+        fn pack_unpack_cycle() {
+            let pack_id = pack_pool_idx(0x20, 0x0A);
+            let (idx, tag) = unpack_pool_idx(pack_id);
+
+            assert_eq!(idx, 0x20);
+            assert_eq!(tag, 0x0A);
+        }
+    }
+
+    mod pre_allocs {
+        use super::*;
+
+        #[test]
+        fn ok_alloc_works() {
+            let pool = new_pool_prealloc(CAP);
+            let alloc = pool.allocate(1).unwrap();
+
+            assert_eq!(alloc.count, 1);
+            assert_eq!(alloc.slots().len(), 1);
+        }
+
+        #[test]
+        fn ok_alloc_exact_cap_as_requested() {
+            let pool = new_pool_prealloc(CAP);
+            let alloc = pool.allocate(CAP).unwrap();
+
+            assert_eq!(alloc.count, CAP);
+            assert_eq!(alloc.slots().len(), CAP);
+        }
+
+        #[test]
+        fn ok_alloc_all_even_when_exhausted() {
+            let pool = new_pool_prealloc(CAP);
+
+            let a1 = pool.allocate(CAP - 1).unwrap();
+            assert_eq!(a1.count, CAP - 1);
+            drop(a1);
+
+            let a2 = pool.allocate(CAP).unwrap();
+            assert_eq!(a2.count, CAP);
+            drop(a2);
+
+            let a3 = pool.allocate(1).unwrap();
+            assert_eq!(a3.count, 1);
+        }
+
+        #[test]
+        fn ok_alloc_all_when_requested_larger_then_cap() {
+            let pool = new_pool_prealloc(CAP);
+
+            let a1 = pool.allocate(CAP * 2).unwrap();
+            assert_eq!(a1.count, CAP * 2);
+        }
+
+        #[test]
+        fn ok_no_duplicate_slots_in_single_alloc() {
+            let pool = new_pool_prealloc(CAP);
+
+            let alloc = pool.allocate(CAP).unwrap();
+            let mut ptrs: Vec<TBPPtr> = alloc.slots().iter().map(|s| *s).collect();
+
+            // remove duplicates if any
+            ptrs.sort();
+            ptrs.dedup();
+
+            assert_eq!(ptrs.len(), CAP);
+        }
+
+        #[test]
+        fn ok_large_allocation_with_pre_alloc() {
+            let pool = new_pool_prealloc(0x100);
+
+            for i in 0..0x100 {
+                let a = pool.allocate(i).unwrap();
+                assert_eq!(a.slots().len(), i);
+            }
+
+            let final_alloc = pool.allocate(0x10).unwrap();
+            assert_eq!(final_alloc.count, 0x10);
+        }
+    }
+
+    mod dynamic_allocs {
+        use super::*;
+
+        #[test]
+        fn ok_dynamic_alloc() {
+            let pool = new_pool_dynamic();
+            let alloc = pool.allocate(CAP).unwrap();
+
+            assert_eq!(alloc.count, CAP);
+            assert_eq!(alloc.slots().len(), CAP);
+        }
+
+        #[test]
+        fn ok_no_duplicate_slots_in_single_dynamic_alloc() {
+            let pool = new_pool_dynamic();
+
+            let alloc = pool.allocate(CAP).unwrap();
+            let mut ptrs: Vec<TBPPtr> = alloc.slots().iter().map(|s| *s).collect();
+
+            // remove duplicates if any
+            ptrs.sort();
+            ptrs.dedup();
+
+            assert_eq!(ptrs.len(), CAP);
+        }
+
+        #[test]
+        fn ok_large_allocation_with_dynamic_alloc() {
+            let pool = new_pool_dynamic();
+            let alloc = pool.allocate(0x400).unwrap();
+
+            assert_eq!(alloc.count, 0x400);
+            assert_eq!(alloc.slots().len(), 0x400);
+        }
+    }
+
+    mod raii_safety {
+        use super::*;
+
+        #[test]
+        fn ok_pre_alloc_auto_free_on_drop() {
+            let pool = new_pool_prealloc(CAP);
+
+            {
+                let alloc = pool.allocate(CAP).unwrap();
+                assert_eq!(alloc.count, CAP);
+            }
+
+            // validate free on drop
+            assert_eq!(pool.active.load(atomic::Ordering::Acquire), 0);
+
+            let alloc2 = pool.allocate(CAP).unwrap();
+            assert_eq!(alloc2.count, CAP);
+        }
+
+        #[test]
+        fn ok_dynamic_alloc_auto_free_on_drop() {
+            let pool = new_pool_dynamic();
+
+            {
+                let alloc = pool.allocate(CAP).unwrap();
+                assert_eq!(alloc.count, CAP);
+            }
+
+            // validate free on drop
+            assert_eq!(pool.active.load(atomic::Ordering::Acquire), 0);
+        }
+    }
+
+    mod concurrency {
+        use super::*;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        #[test]
+        fn ok_concurrent_alloc() {
+            const THREADS: usize = 8;
+            const ITERS: usize = 0x1000;
+
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let pool = Arc::new(new_pool_prealloc(CAP * 0x0A));
+
+            let mut handles = Vec::new();
+            for _ in 0..THREADS {
+                let pool = pool.clone();
+                let barrier = barrier.clone();
+
+                handles.push(thread::spawn(move || {
+                    barrier.wait();
+
+                    for _ in 0..ITERS {
+                        let mut n = CAP / 2;
+                        while n != 0 {
+                            let alloc = pool.allocate(n).unwrap();
+                            n -= alloc.count;
+                        }
+                    }
+                }));
+            }
+
+            for h in handles {
+                assert!(h.join().is_ok());
+            }
+
+            let final_alloc = pool.allocate(CAP).unwrap();
+            assert_eq!(final_alloc.count, CAP);
+        }
+
+        #[test]
+        fn ok_concurrent_dynamic_alloc() {
+            const THREADS: usize = 8;
+            const ITERS: usize = 0x200;
+
+            let pool = Arc::new(new_pool_dynamic());
+
+            let mut handles = Vec::new();
+            for _ in 0..THREADS {
+                let pool = pool.clone();
+
+                handles.push(thread::spawn(move || {
+                    for _ in 0..ITERS {
+                        let alloc = pool.allocate(0x10).unwrap();
+                        assert_eq!(alloc.count, 0x10);
+                    }
+                }));
+            }
+
+            for h in handles {
+                assert!(h.join().is_ok());
+            }
+
+            assert_eq!(pool.active.load(atomic::Ordering::Acquire), 0);
+
+            // pool should still function correctly
+            let alloc = pool.allocate(CAP).unwrap();
+            assert_eq!(alloc.count, CAP);
+        }
+    }
+
+    mod polling {
+        use super::*;
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn ok_pre_alloc_blocks_until_buffers_freed() {
+            let pool = Arc::new(new_pool_prealloc(1));
+            let a = pool.allocate(1).unwrap();
+
+            let pool2 = pool.clone();
+            let h1 = thread::spawn(move || {
+                let start = Instant::now();
+                let alloc = pool2.allocate(1).expect("alloc failed");
+                let elapsed = start.elapsed();
+
+                assert!(elapsed >= Duration::from_millis(20));
+                assert_eq!(alloc.count, 1);
+            });
+
+            let h2 = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(30));
+                drop(a);
+            });
+
+            assert!(h1.join().is_ok());
+            assert!(h2.join().is_ok());
+        }
+    }
+
+    mod shutdown_safety {
+        use super::*;
+        use std::sync::Arc;
+
+        #[test]
+        fn drop_waits_for_active_pre_allocations() {
+            let pool = Arc::new(new_pool_prealloc(CAP * 0x0A));
+            let pool2 = pool.clone();
+
+            let handle = std::thread::spawn(move || {
+                let alloc = pool2.allocate(4).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(0x32));
+                drop(alloc);
+            });
+
+            std::thread::sleep(std::time::Duration::from_millis(0x0A)); // give the other thread time to allocate
+            drop(pool); // this must block until alloc is dropped
+
+            assert!(handle.join().is_ok());
+        }
+
+        #[test]
+        fn drop_waits_for_active_dynamic_allocations() {
+            let pool = Arc::new(new_pool_prealloc(CAP * 0x0A));
+            let pool2 = pool.clone();
+
+            let handle = std::thread::spawn(move || {
+                let alloc = pool2.allocate(4).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(0x32));
+                drop(alloc);
+            });
+
+            std::thread::sleep(std::time::Duration::from_millis(0x0A)); // give the other thread time to allocate
+            drop(pool); // this must block until alloc is dropped
+
+            assert!(handle.join().is_ok());
+        }
+
+        #[test]
+        fn ok_cross_thread_drop() {
+            let pool = Arc::new(new_pool_prealloc(0x0C));
+            let alloc = pool.allocate(0x0C).unwrap();
+
+            let h1 = {
+                std::thread::spawn(move || {
+                    drop(alloc);
+                })
+            };
+
+            let h2 = {
+                let pool = pool.clone();
+
+                std::thread::spawn(move || {
+                    let a = pool.allocate(8).unwrap();
+                    assert_eq!(a.count, 8);
+                })
+            };
+
+            assert!(h1.join().is_ok());
+            assert!(h2.join().is_ok());
+        }
+    }
+}
