@@ -18,7 +18,7 @@ const ERRDOMAIN: u8 = 0x13;
 
 /// Error codes for [`FrozenPipe`]
 #[repr(u16)]
-pub enum FPErrRes {
+pub enum FPError {
     /// (1024) internal fuck up (hault and catch fire)
     Hcf = 0x400,
 
@@ -29,7 +29,7 @@ pub enum FPErrRes {
     Lpn = 0x402,
 }
 
-impl FPErrRes {
+impl FPError {
     #[inline]
     fn default_message(&self) -> &'static [u8] {
         match self {
@@ -41,14 +41,14 @@ impl FPErrRes {
 }
 
 #[inline]
-fn new_err<R>(res: FPErrRes, message: Vec<u8>) -> FrozenRes<R> {
+fn new_err<R>(res: FPError, message: Vec<u8>) -> FrozenRes<R> {
     let detail = res.default_message();
     let err = FrozenErr::new(unsafe { MODULE_ID }, ERRDOMAIN, res as u16, detail, message);
     Err(err)
 }
 
 #[inline]
-fn new_err_raw<E: std::fmt::Display>(res: FPErrRes, error: E) -> FrozenErr {
+fn new_err_raw<E: std::fmt::Display>(res: FPError, error: E) -> FrozenErr {
     let detail = res.default_message();
     FrozenErr::new(
         unsafe { MODULE_ID },
@@ -81,8 +81,13 @@ impl FrozenPipe {
         let chunk_size = self.core.chunk_size;
         let chunks = (buf.len() + chunk_size - 1) / chunk_size;
 
-        let _lock = self.core.acquire_io_lock()?;
         let alloc = self.core.pool.allocate(chunks)?;
+
+        // NOTE: Read lock prevents torn syncs by ensuring the flusher_tx cannot acquire an exclusive lock unitl the
+        // write ops is submited, while this lock must be acquired after pool allocations as `BufPool::allocate` may
+        // block while waiting for chunks, otherwise the wait would delay the flusher from obtaining the lock, and
+        // potentially stalling the durability progress for the entire `FrozenPipe`
+        let _lock = self.core.acquire_io_lock()?;
 
         let mut src_off = 0usize;
         for ptr in alloc.slots() {
@@ -105,18 +110,30 @@ impl FrozenPipe {
 
     /// Blocks until given `epoch` becomes durable
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
+        self.internal_wait(epoch)
+    }
+
+    /// Force instant durability for the current batch
+    pub fn force_durability(&self, epoch: u64) -> FrozenRes<()> {
+        let guard = self.core.lock.lock().map_err(|e| new_err_raw(FPError::Lpn, e))?;
+        self.core.cv.notify_one();
+        drop(guard);
+
+        self.internal_wait(epoch)
+    }
+
+    fn internal_wait(&self, epoch: u64) -> FrozenRes<()> {
+        if hints::unlikely(self.core.epoch.load(atomic::Ordering::Acquire) > epoch) {
+            return Ok(());
+        }
+
         if let Some(sync_err) = self.core.get_sync_error() {
             return Err(sync_err);
         }
 
-        let durable_epoch = self.core.epoch.load(atomic::Ordering::Acquire);
-        if durable_epoch == 0 || durable_epoch > epoch {
-            return Ok(());
-        }
-
         let mut guard = match self.core.durable_lock.lock() {
             Ok(g) => g,
-            Err(e) => return Err(new_err_raw(FPErrRes::Lpn, e)),
+            Err(e) => return Err(new_err_raw(FPError::Lpn, e)),
         };
 
         loop {
@@ -130,7 +147,7 @@ impl FrozenPipe {
 
             guard = match self.core.durable_cv.wait(guard) {
                 Ok(g) => g,
-                Err(e) => return Err(new_err_raw(FPErrRes::Lpn, e)),
+                Err(e) => return Err(new_err_raw(FPError::Lpn, e)),
             };
         }
     }
@@ -139,9 +156,22 @@ impl FrozenPipe {
 impl Drop for FrozenPipe {
     fn drop(&mut self) {
         self.core.closed.store(true, atomic::Ordering::Release);
+        self.core.cv.notify_one(); // notify flusher tx to shut
 
         if let Some(handle) = self.tx.take() {
             let _ = handle.join();
+        }
+
+        // INFO: we must acquire an exclusive lock, to prevent dropping while sync,
+        // growing or any read/write ops
+        let _io_lock = self.core.acquire_exclusive_io_lock();
+
+        // free up the boxed error (if any)
+        let ptr = self.core.error.swap(std::ptr::null_mut(), atomic::Ordering::AcqRel);
+        if !ptr.is_null() {
+            unsafe {
+                drop(Box::from_raw(ptr));
+            }
         }
     }
 }
@@ -195,12 +225,12 @@ impl Core {
 
     #[inline]
     fn acquire_io_lock(&self) -> FrozenRes<sync::RwLockReadGuard<'_, ()>> {
-        self.io_lock.read().map_err(|e| new_err_raw(FPErrRes::Lpn, e))
+        self.io_lock.read().map_err(|e| new_err_raw(FPError::Lpn, e))
     }
 
     #[inline]
     fn acquire_exclusive_io_lock(&self) -> FrozenRes<sync::RwLockWriteGuard<'_, ()>> {
-        self.io_lock.write().map_err(|e| new_err_raw(FPErrRes::Lpn, e))
+        self.io_lock.write().map_err(|e| new_err_raw(FPError::Lpn, e))
     }
 
     #[inline]
@@ -241,6 +271,29 @@ impl Core {
         self.epoch.fetch_add(1, atomic::Ordering::Release);
     }
 
+    fn write_batch(&self, batch: Vec<WriteReq>) -> FrozenRes<(usize, usize)> {
+        let mut max_index = 0usize;
+        let mut min_index = usize::MAX;
+
+        for req in &batch {
+            match req.chunks {
+                1 => {
+                    let buf = req.alloc.slots();
+                    self.file.write(buf[0].ptr, req.index)?;
+                }
+                _ => {
+                    let bufs: Vec<*mut u8> = req.alloc.slots().iter().map(|p| p.ptr).collect();
+                    self.file.pwritev(&bufs, req.index)?;
+                }
+            }
+
+            min_index = min_index.min(req.index);
+            max_index = max_index.max(req.index + req.chunks);
+        }
+
+        Ok((min_index, max_index))
+    }
+
     fn spawn_tx(core: sync::Arc<Self>) -> FrozenRes<thread::JoinHandle<()>> {
         match thread::Builder::new()
             .name("fpipe-flush-tx".into())
@@ -249,8 +302,8 @@ impl Core {
             Ok(tx) => Ok(tx),
             Err(error) => {
                 let mut error = error.to_string().as_bytes().to_vec();
-                error.extend_from_slice(b"Failed to spawn flush thread for FrozenMMap");
-                new_err(FPErrRes::Hcf, error)
+                error.extend_from_slice(b"Failed to spawn flush thread for FrozenPipe");
+                new_err(FPError::Hcf, error)
             }
         }
     }
@@ -261,12 +314,12 @@ impl Core {
             Ok(g) => g,
             Err(error) => {
                 let mut message = error.to_string().as_bytes().to_vec();
-                message.extend_from_slice(b"Flush thread died before init could be completed for FrozenMMap");
+                message.extend_from_slice(b"Flush thread died before init could be completed for FrozenPipe");
                 let error = FrozenErr::new(
                     unsafe { MODULE_ID },
                     ERRDOMAIN,
-                    FPErrRes::Lpn as u16,
-                    FPErrRes::Lpn.default_message(),
+                    FPError::Lpn as u16,
+                    FPError::Lpn.default_message(),
                     message,
                 );
                 core.set_sync_error(error);
@@ -279,32 +332,7 @@ impl Core {
             guard = match core.cv.wait_timeout(guard, core.flush_duration) {
                 Ok((g, _)) => g,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(FPErrRes::Txe, e));
-                    return;
-                }
-            };
-
-            // NOTE: we must read values of close brodcast before acquire exclusive lock,
-            // if done otherwise, we impose serious deadlock sort of situation for the the flusher tx
-
-            // we must close the thread when [`FrozenMMap`] is closed
-            if hints::unlikely(core.closed.load(atomic::Ordering::Acquire)) {
-                return;
-            }
-
-            // QUESTION: Should we drain after or before acquiring the exclusive lock
-            let req_batch = core.mpscq.drain();
-            if hints::unlikely(req_batch.len() == 0) {
-                continue;
-            }
-
-            // INFO: we must acquire an exclusive IO lock for sync, hence no write, read or
-            // grow could kick in while sync is in progress
-
-            let io_lock = match core.acquire_exclusive_io_lock() {
-                Ok(lock) => lock,
-                Err(e) => {
-                    core.set_sync_error(new_err_raw(FPErrRes::Lpn, e));
+                    core.set_sync_error(new_err_raw(FPError::Txe, e));
                     return;
                 }
             };
@@ -313,6 +341,57 @@ impl Core {
             // the mutex while the syscall takes place is not a good idea, while we drop the mutex
             // and acqurie it again, in-between other process could acquire it and use it
             drop(guard);
+
+            // NOTE: we must read values of close brodcast before acquire exclusive lock,
+            // if done otherwise, we impose serious deadlock sort of situation for the the flusher tx
+
+            let req_batch = core.mpscq.drain();
+            let closing = core.closed.load(atomic::Ordering::Acquire);
+
+            if req_batch.is_empty() {
+                if closing {
+                    return;
+                }
+
+                guard = match core.lock.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        core.set_sync_error(new_err_raw(FPError::Lpn, e));
+                        return;
+                    }
+                };
+
+                continue;
+            }
+
+            // INFO: we must acquire an exclusive IO lock for sync, hence no write/read ops are allowed
+            // while sync is in progress
+
+            let io_lock = match core.acquire_exclusive_io_lock() {
+                Ok(lock) => lock,
+                Err(e) => {
+                    core.set_sync_error(new_err_raw(FPError::Lpn, e));
+                    return;
+                }
+            };
+
+            let (_min, _max) = match core.write_batch(req_batch) {
+                Ok(res) => res,
+                Err(err) => {
+                    core.set_sync_error(err);
+                    drop(io_lock);
+
+                    guard = match core.lock.lock() {
+                        Ok(g) => g,
+                        Err(e) => {
+                            core.set_sync_error(new_err_raw(FPError::Lpn, e));
+                            return;
+                        }
+                    };
+
+                    continue;
+                }
+            };
 
             // NOTE:
             //
@@ -323,13 +402,13 @@ impl Core {
             //   guarenty for the old data as well
 
             match core.file.sync() {
-                Ok(_) => {
+                Err(err) => core.set_sync_error(err),
+                Ok(()) => {
                     core.incr_epoch();
-
                     let _g = match core.durable_lock.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            core.set_sync_error(new_err_raw(FPErrRes::Lpn, e));
+                            core.set_sync_error(new_err_raw(FPError::Lpn, e));
                             return;
                         }
                     };
@@ -337,14 +416,13 @@ impl Core {
                     core.durable_cv.notify_all();
                     core.clear_sync_error();
                 }
-                Err(err) => core.set_sync_error(err),
             }
 
             drop(io_lock);
             guard = match core.lock.lock() {
                 Ok(g) => g,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(FPErrRes::Lpn, e));
+                    core.set_sync_error(new_err_raw(FPError::Lpn, e));
                     return;
                 }
             };
@@ -357,11 +435,13 @@ unsafe impl Sync for Core {}
 
 #[derive(Debug)]
 struct WriteReq {
-    _alloc: bpool::Allocation,
+    index: usize,
+    chunks: usize,
+    alloc: bpool::Allocation,
 }
 
 impl WriteReq {
     fn new(index: usize, chunks: usize, alloc: bpool::Allocation) -> Self {
-        Self { _alloc: alloc }
+        Self { alloc, index, chunks }
     }
 }
