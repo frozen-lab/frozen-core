@@ -1,4 +1,45 @@
-//! NA
+//! Asynchronous write pipeline for batch IO ops
+//!
+//! `FrozenPipe` batches write requests and flushes them in the background, providing durability guarantees via epochs
+//!
+//! ## Features
+//!
+//! - Batched IO
+//! - Background durability
+//! - Backpressure via [`BufPool`]
+//! - Crash-safe durability semantics
+//!
+//! ## Example
+//!
+//! ```
+//! use frozen_core::fpipe::FrozenPipe;
+//! use frozen_core::ffile::{FrozenFile, FFCfg};
+//! use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+//! use std::time::Duration;
+//!
+//! let dir = tempfile::tempdir().unwrap();
+//! let path = dir.path().join("tmp_pipe");
+//!
+//! let file = FrozenFile::new(FFCfg {
+//!     path,
+//!     mid: 0,
+//!     chunk_size: 0x20,
+//!     initial_chunk_amount: 4,
+//! }).unwrap();
+//!
+//! let pool = BufPool::new(BPCfg {
+//!     mid: 0,
+//!     chunk_size: 0x20,
+//!     backend: BPBackend::Prealloc { capacity: 0x10 },
+//! });
+//!
+//! let pipe = FrozenPipe::new(file, pool, Duration::from_micros(0x3A)).unwrap();
+//!
+//! let buf = vec![1u8; 0x20];
+//! let epoch = pipe.write(&buf, 0).unwrap();
+//!
+//! pipe.wait_for_durability(epoch).unwrap();
+//! ```
 
 use crate::{
     bpool,
@@ -76,6 +117,44 @@ impl FrozenPipe {
     }
 
     /// Submit a write request
+    ///
+    /// Returns the epoch representing the durability window of the write
+    ///
+    /// ## Working
+    ///
+    /// The buffer is split into `chunk_size` sized segments and staged using [`BufPool`] before being
+    /// written by the background flusher
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::FrozenPipe;
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    /// use std::time::Duration;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_pipe_write");
+    ///
+    /// let file = FrozenFile::new(FFCfg {
+    ///     mid: 0,
+    ///     path,
+    ///     chunk_size: 0x20,
+    ///     initial_chunk_amount: 2,
+    /// }).unwrap();
+    ///
+    /// let pool = BufPool::new(BPCfg {
+    ///     mid: 0,
+    ///     chunk_size: 0x20,
+    ///     backend: BPBackend::Dynamic,
+    /// });
+    ///
+    /// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(0x0A)).unwrap();
+    ///
+    /// let buf = vec![0x3Bu8; 0x20];
+    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// pipe.wait_for_durability(epoch).unwrap();
+    /// ```
     #[inline(always)]
     pub fn write(&self, buf: &[u8], index: usize) -> FrozenRes<u64> {
         let chunk_size = self.core.chunk_size;
@@ -109,11 +188,79 @@ impl FrozenPipe {
     }
 
     /// Blocks until given `epoch` becomes durable
+    ///
+    /// Durability epochs increase when the background flusher successfully syncs the underlying [`FrozenFile`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::FrozenPipe;
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    /// use std::time::Duration;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_wait");
+    ///
+    /// let file = FrozenFile::new(FFCfg {
+    ///     mid: 0,
+    ///     path,
+    ///     chunk_size: 0x20,
+    ///     initial_chunk_amount: 2,
+    /// }).unwrap();
+    ///
+    /// let pool = BufPool::new(BPCfg {
+    ///     mid: 0,
+    ///     chunk_size: 0x20,
+    ///     backend: BPBackend::Dynamic,
+    /// });
+    ///
+    /// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(10)).unwrap();
+    ///
+    /// let buf = vec![1u8; 0x20];
+    /// let epoch = pipe.write(&buf, 0).unwrap();
+    ///
+    /// pipe.wait_for_durability(epoch).unwrap();
+    /// ```
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
         self.internal_wait(epoch)
     }
 
     /// Force instant durability for the current batch
+    ///
+    /// This wakes the flusher thread and waits for the durability epoch
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::FrozenPipe;
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    /// use std::time::Duration;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_force");
+    ///
+    /// let file = FrozenFile::new(FFCfg {
+    ///     mid: 0,
+    ///     path,
+    ///     chunk_size: 0x20,
+    ///     initial_chunk_amount: 2,
+    /// }).unwrap();
+    ///
+    /// let pool = BufPool::new(BPCfg {
+    ///     mid: 0,
+    ///     chunk_size: 0x20,
+    ///     backend: BPBackend::Dynamic,
+    /// });
+    ///
+    /// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(10)).unwrap();
+    ///
+    /// let buf = vec![0x0Au8; 0x20];
+    /// let epoch = pipe.write(&buf, 0).unwrap();
+    ///
+    /// pipe.force_durability(epoch).unwrap();
+    /// ```
     pub fn force_durability(&self, epoch: u64) -> FrozenRes<()> {
         let guard = self.core.lock.lock().map_err(|e| new_err_raw(FPErr::Lpn, e))?;
         self.core.cv.notify_one();
@@ -123,6 +270,36 @@ impl FrozenPipe {
     }
 
     /// Grow the underlying [`FrozenFile`] by given `count`
+    ///
+    /// The pipeline waits until all pending writes are flushed before extending the file
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::FrozenPipe;
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    /// use std::time::Duration;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_grow");
+    ///
+    /// let file = FrozenFile::new(FFCfg {
+    ///     mid: 0,
+    ///     path,
+    ///     chunk_size: 0x20,
+    ///     initial_chunk_amount: 2,
+    /// }).unwrap();
+    ///
+    /// let pool = BufPool::new(BPCfg {
+    ///     mid: 0,
+    ///     chunk_size: 0x20,
+    ///     backend: BPBackend::Dynamic,
+    /// });
+    ///
+    /// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(10)).unwrap();
+    /// pipe.grow(4).unwrap();
+    /// ```
     pub fn grow(&self, count: usize) -> FrozenRes<()> {
         loop {
             // NOTE: we must make sure there are no remaining items in the queue left for sync
