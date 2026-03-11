@@ -79,7 +79,7 @@ impl FrozenPipe {
     #[inline(always)]
     pub fn write(&self, buf: &[u8], index: usize) -> FrozenRes<u64> {
         let chunk_size = self.core.chunk_size;
-        let chunks = (buf.len() + chunk_size - 1) / chunk_size;
+        let chunks = buf.len().div_ceil(chunk_size);
 
         let alloc = self.core.pool.allocate(chunks)?;
 
@@ -98,7 +98,7 @@ impl FrozenPipe {
             let remaining = buf.len() - src_off;
             let copy = remaining.min(chunk_size);
 
-            unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr().add(src_off), ptr.ptr, copy) };
+            unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr().add(src_off), *ptr, copy) };
             src_off += copy;
         }
 
@@ -276,14 +276,13 @@ impl Core {
         let mut min_index = usize::MAX;
 
         for req in &batch {
+            let slots = req.alloc.slots();
             match req.chunks {
                 1 => {
-                    let buf = req.alloc.slots();
-                    self.file.write(buf[0].ptr, req.index)?;
+                    self.file.pwrite(slots[0], req.index)?;
                 }
                 _ => {
-                    let bufs: Vec<*mut u8> = req.alloc.slots().iter().map(|p| p.ptr).collect();
-                    self.file.pwritev(&bufs, req.index)?;
+                    self.file.pwritev(slots, req.index)?;
                 }
             }
 

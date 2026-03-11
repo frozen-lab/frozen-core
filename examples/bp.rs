@@ -37,3 +37,5 @@
 //         h.join().unwrap();
 //     }
 // }
+
+fn main() {}

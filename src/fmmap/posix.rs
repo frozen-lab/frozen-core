@@ -1,4 +1,4 @@
-use super::{new_err, FMMapErrRes, ObjectInterface};
+use super::{new_err, FMMapErr, ObjectInterface};
 use crate::{error::FrozenRes, hints};
 use core::{ffi::CStr, ptr};
 use libc::{
@@ -83,12 +83,12 @@ unsafe fn mmap_raw(fd: i32, length: size_t) -> FrozenRes<TPtr> {
 
         match errno {
             // invalid fd, invalid fd type, invalid length, etc.
-            EINVAL | EBADF | EACCES | EOVERFLOW => return new_err(FMMapErrRes::Hcf, err_msg),
+            EINVAL | EBADF | EACCES | EOVERFLOW => return new_err(FMMapErr::Hcf, err_msg),
 
             // no more memory available
-            ENOMEM => return new_err(FMMapErrRes::Nmm, err_msg),
+            ENOMEM => return new_err(FMMapErr::Nmm, err_msg),
 
-            _ => return new_err(FMMapErrRes::Unk, err_msg),
+            _ => return new_err(FMMapErr::Unk, err_msg),
         };
     }
 
@@ -106,9 +106,9 @@ unsafe fn munmap_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
 
     match errno {
         // invalid/unaligned ptr or address range is not mapped
-        EINVAL | ENOMEM => new_err(FMMapErrRes::Hcf, err_msg),
+        EINVAL | ENOMEM => new_err(FMMapErr::Hcf, err_msg),
 
-        _ => new_err(FMMapErrRes::Unk, err_msg),
+        _ => new_err(FMMapErr::Unk, err_msg),
     }
 }
 
@@ -140,19 +140,19 @@ unsafe fn msync_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
 
                 // NOTE: sync error indicates that retries exhausted and durability is broken
                 // in the current/last window/batch
-                return new_err(FMMapErrRes::Syn, err_msg);
+                return new_err(FMMapErr::Syn, err_msg);
             }
 
             // fatal error, i.e. no sync for writes in recent window/batch
-            EIO => return new_err(FMMapErrRes::Syn, err_msg),
+            EIO => return new_err(FMMapErr::Syn, err_msg),
 
             // invalid fd or lack of support for sync
-            EINVAL => return new_err(FMMapErrRes::Hcf, err_msg),
+            EINVAL => return new_err(FMMapErr::Hcf, err_msg),
 
             // no-more memory available
-            ENOMEM => return new_err(FMMapErrRes::Nmm, err_msg),
+            ENOMEM => return new_err(FMMapErr::Nmm, err_msg),
 
-            _ => return new_err(FMMapErrRes::Unk, err_msg),
+            _ => return new_err(FMMapErr::Unk, err_msg),
         }
     }
 }
@@ -242,7 +242,7 @@ mod tests {
 
             unsafe {
                 let err = POSIXMMap::new(file.fd(), 0).unwrap_err();
-                assert!(err.compare(FMMapErrRes::Hcf as u16));
+                assert!(err.compare(FMMapErr::Hcf as u16));
             }
         }
 
@@ -252,7 +252,7 @@ mod tests {
 
             unsafe {
                 let err = POSIXMMap::new(-1, LENGTH).unwrap_err();
-                assert!(err.compare(FMMapErrRes::Hcf as u16));
+                assert!(err.compare(FMMapErr::Hcf as u16));
             }
         }
 
@@ -263,7 +263,7 @@ mod tests {
             unsafe {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
                 let err = mmap.unmap(0).unwrap_err();
-                assert!(err.compare(FMMapErrRes::Hcf as u16));
+                assert!(err.compare(FMMapErr::Hcf as u16));
             }
         }
     }

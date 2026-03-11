@@ -42,7 +42,7 @@ fn write_mode(cfg: FFCfg) -> FrozenRes<()> {
     assert_eq!(file.length().unwrap(), INIT_LEN);
 
     let mut data = DATA.to_vec();
-    file.write(data.as_mut_ptr(), 0)?;
+    file.pwrite(data.as_mut_ptr(), 0)?;
     file.sync()
 }
 
@@ -51,7 +51,7 @@ fn read_mode(cfg: FFCfg) -> FrozenRes<()> {
     assert_eq!(file.length().unwrap(), INIT_LEN);
 
     let mut buf = vec![0u8; DATA.len()];
-    file.read(buf.as_mut_ptr(), 0)?;
+    file.pread(buf.as_mut_ptr(), 0)?;
     assert_eq!(&buf, DATA);
 
     file.delete()

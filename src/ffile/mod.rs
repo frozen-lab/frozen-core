@@ -19,11 +19,11 @@
 //! assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
 //!
 //! let mut data = vec![1u8; 0x10];
-//! assert!(file.write(data.as_mut_ptr(), 0).is_ok());
+//! assert!(file.pwrite(data.as_mut_ptr(), 0).is_ok());
 //! assert!(file.sync().is_ok());
 //!
 //! let mut buf = vec![0u8; data.len()];
-//! assert!(file.read(buf.as_mut_ptr(), 0).is_ok());
+//! assert!(file.pread(buf.as_mut_ptr(), 0).is_ok());
 //! assert_eq!(buf, data);
 //!
 //! assert!(FrozenFile::new(cfg.clone()).is_err());
@@ -55,7 +55,7 @@ static mut MODULE_ID: u8 = 0;
 
 /// Error codes for [`FrozenFile`]
 #[repr(u16)]
-pub enum FFileErrRes {
+pub enum FFileErr {
     /// (256) internal fuck up (hault and catch fire)
     Hcf = 0x100,
 
@@ -87,7 +87,7 @@ pub enum FFileErrRes {
     Lex = 0x109,
 }
 
-impl FFileErrRes {
+impl FFileErr {
     #[inline]
     fn default_message(&self) -> &'static [u8] {
         match self {
@@ -106,14 +106,14 @@ impl FFileErrRes {
 }
 
 #[inline]
-pub(in crate::ffile) fn new_err<R>(res: FFileErrRes, message: Vec<u8>) -> FrozenRes<R> {
+pub(in crate::ffile) fn new_err<R>(res: FFileErr, message: Vec<u8>) -> FrozenRes<R> {
     let detail = res.default_message();
     let err = FrozenErr::new(unsafe { MODULE_ID }, ERRDOMAIN, res as u16, detail, message);
     Err(err)
 }
 
 #[inline]
-pub(in crate::ffile) fn new_err_default<R>(res: FFileErrRes) -> FrozenRes<R> {
+pub(in crate::ffile) fn new_err_default<R>(res: FFileErr) -> FrozenRes<R> {
     let detail = res.default_message();
     let err = FrozenErr::new(
         unsafe { MODULE_ID },
@@ -170,11 +170,11 @@ pub struct FFCfg {
 /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
 ///
 /// let mut data = vec![1u8; 0x10];
-/// assert!(file.write(data.as_mut_ptr(), 0).is_ok());
+/// assert!(file.pwrite(data.as_mut_ptr(), 0).is_ok());
 /// assert!(file.sync().is_ok());
 ///
 /// let mut buf = vec![0u8; data.len()];
-/// assert!(file.read(buf.as_mut_ptr(), 0).is_ok());
+/// assert!(file.pread(buf.as_mut_ptr(), 0).is_ok());
 /// assert_eq!(buf, data);
 ///
 /// assert!(FrozenFile::new(cfg.clone()).is_err());
@@ -234,7 +234,7 @@ impl FrozenFile {
     ///
     /// We acquire an exclusive lock for the entire file, this protects against operating with
     /// multiple simultenious instance of [`FrozenFile`], when trying to call [`FrozenFile::new`]
-    /// when already called, [`FFileErrRes::Lck`] error will be thrown
+    /// when already called, [`FFileErr::Lck`] error will be thrown
     ///
     /// ## Example
     ///
@@ -287,7 +287,7 @@ impl FrozenFile {
                     // - close the file to avoid resource leaks
                     // - we supress the close error, as we are already in an errored state
                     let _ = unsafe { file.close() };
-                    return new_err_default(FFileErrRes::Cpt);
+                    return new_err_default(FFileErr::Cpt);
                 }
             }
         }
@@ -373,7 +373,7 @@ impl FrozenFile {
     #[inline(always)]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn read(&self, buf: *mut u8, index: usize) -> FrozenRes<()> {
+    pub fn pread(&self, buf: *mut u8, index: usize) -> FrozenRes<()> {
         let offset = self.cfg.chunk_size * index;
         let file = self.get_file();
 
@@ -384,7 +384,7 @@ impl FrozenFile {
     #[inline(always)]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn write(&self, buf: *mut u8, index: usize) -> FrozenRes<()> {
+    pub fn pwrite(&self, buf: *mut u8, index: usize) -> FrozenRes<()> {
         let offset = self.cfg.chunk_size * index;
         let file = self.get_file();
 
@@ -503,7 +503,7 @@ mod tests {
             cfg.chunk_size *= 2;
 
             let err = FrozenFile::new(cfg).unwrap_err();
-            assert!(err.compare(FFileErrRes::Cpt as u16));
+            assert!(err.compare(FFileErr::Cpt as u16));
         }
 
         #[test]
@@ -546,7 +546,7 @@ mod tests {
             file.delete().unwrap();
 
             let err = file.delete().unwrap_err();
-            assert!(err.compare(FFileErrRes::Inv as u16));
+            assert!(err.compare(FFileErr::Inv as u16));
         }
 
         #[test]
@@ -556,7 +556,7 @@ mod tests {
 
             {
                 let file = FrozenFile::new(cfg.clone()).unwrap();
-                file.write(data.as_mut_ptr(), 0).unwrap();
+                file.pwrite(data.as_mut_ptr(), 0).unwrap();
                 drop(file);
             }
 
@@ -564,7 +564,7 @@ mod tests {
                 let reopened = FrozenFile::new(cfg).unwrap();
                 let mut buf = [0u8; CHUNK_SIZE];
 
-                reopened.read(buf.as_mut_ptr(), 0).unwrap();
+                reopened.pread(buf.as_mut_ptr(), 0).unwrap();
                 assert_eq!(buf, data);
             }
         }
@@ -579,7 +579,7 @@ mod tests {
             let file = FrozenFile::new(cfg.clone()).unwrap();
 
             let err = FrozenFile::new(cfg).unwrap_err();
-            assert!(err.compare(FFileErrRes::Lck as u16));
+            assert!(err.compare(FFileErr::Lck as u16));
 
             drop(file);
         }
@@ -643,7 +643,7 @@ mod tests {
             file.delete().unwrap();
 
             let err = file.sync().unwrap_err();
-            assert!(err.compare(FFileErrRes::Hcf as u16));
+            assert!(err.compare(FFileErr::Hcf as u16));
         }
     }
 
@@ -657,11 +657,11 @@ mod tests {
 
             let mut data = [0x0Bu8; CHUNK_SIZE];
 
-            file.write(data.as_mut_ptr(), 4).unwrap();
+            file.pwrite(data.as_mut_ptr(), 4).unwrap();
             file.sync().unwrap();
 
             let mut buf = [0u8; CHUNK_SIZE];
-            file.read(buf.as_mut_ptr(), 4).unwrap();
+            file.pread(buf.as_mut_ptr(), 4).unwrap();
             assert_eq!(buf, data);
         }
 
@@ -695,7 +695,7 @@ mod tests {
                 let f = file.clone();
                 handles.push(std::thread::spawn(move || {
                     let mut data = [i as u8; CHUNK_SIZE];
-                    f.write(data.as_mut_ptr(), i).unwrap();
+                    f.pwrite(data.as_mut_ptr(), i).unwrap();
                 }));
             }
 
@@ -707,7 +707,7 @@ mod tests {
 
             for i in 0..0x0A {
                 let mut buf = [0u8; CHUNK_SIZE];
-                file.read(buf.as_mut_ptr(), i).unwrap();
+                file.pread(buf.as_mut_ptr(), i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
         }
@@ -722,7 +722,7 @@ mod tests {
                 std::thread::spawn(move || {
                     for i in 0..INIT_CHUNKS {
                         let mut data = [i as u8; CHUNK_SIZE];
-                        f.write(data.as_mut_ptr(), i).unwrap();
+                        f.pwrite(data.as_mut_ptr(), i).unwrap();
                     }
                 })
             };
@@ -743,7 +743,7 @@ mod tests {
 
             for i in 0..INIT_CHUNKS {
                 let mut buf = [0u8; CHUNK_SIZE];
-                file.read(buf.as_mut_ptr(), i).unwrap();
+                file.pread(buf.as_mut_ptr(), i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
         }
@@ -758,7 +758,7 @@ mod tests {
                 std::thread::spawn(move || {
                     for i in 0..INIT_CHUNKS {
                         let mut data = [i as u8; CHUNK_SIZE];
-                        f.write(data.as_mut_ptr(), i).unwrap();
+                        f.pwrite(data.as_mut_ptr(), i).unwrap();
                     }
                 })
             };
@@ -779,7 +779,7 @@ mod tests {
 
             for i in 0..INIT_CHUNKS {
                 let mut buf = [0; CHUNK_SIZE];
-                file.read(buf.as_mut_ptr(), i).unwrap();
+                file.pread(buf.as_mut_ptr(), i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
         }
@@ -791,8 +791,8 @@ mod tests {
 
             // index > curr_chunks
             let mut buf = [0; CHUNK_SIZE];
-            let err = file.read(buf.as_mut_ptr(), 0x100).unwrap_err();
-            assert!(err.compare(FFileErrRes::Hcf as u16));
+            let err = file.pread(buf.as_mut_ptr(), 0x100).unwrap_err();
+            assert!(err.compare(FFileErr::Hcf as u16));
         }
     }
 }

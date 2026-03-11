@@ -1,4 +1,4 @@
-use super::{new_err, new_err_default, FFId, FFileErrRes};
+use super::{new_err, new_err_default, FFId, FFileErr};
 use crate::{error::FrozenRes, hints};
 use libc::{
     access, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite, pwritev,
@@ -81,7 +81,7 @@ impl POSIXFile {
     ///
     /// We use `flock(fd)`, which provides advisory locking only, the kernel does not prevent
     /// other processes from calling `open()`, but any cooperating process attempting
-    /// to acquire the same exclusive lock will fail with `EWOULDBLOCK` i.e. [`FFileErrRes::Lck`]
+    /// to acquire the same exclusive lock will fail with `EWOULDBLOCK` i.e. [`FFileErr::Lck`]
     ///
     /// ## Why do we retry?
     ///
@@ -95,7 +95,7 @@ impl POSIXFile {
     ///
     /// This function is idempotent, hence it prevents close-on-close errors
     ///
-    /// ## Sync Error (`FFileErrRes::Syn`)
+    /// ## Sync Error (`FFileErr::Syn`)
     ///
     /// In POSIX systems, kernel may report delayed write/sync failures when closing, this are
     /// durability errors, fatal for us
@@ -104,7 +104,7 @@ impl POSIXFile {
     /// guaranties right after the write ops, and making sure they are completed without errors
     ///
     /// this provides strong durability for the storage engine, and if `EIO` occurs, anyhow,
-    /// we treat it as `FFileErrRes::Hcf` i.e. impl failure
+    /// we treat it as `FFileErr::Hcf` i.e. impl failure
     pub(super) unsafe fn close(&self) -> FrozenRes<()> {
         let fd = self.0.swap(CLOSED_FD, atomic::Ordering::AcqRel);
         if fd == CLOSED_FD {
@@ -133,19 +133,19 @@ impl POSIXFile {
 
         match errno {
             // missing file or invalid path
-            ENOENT | ENOTDIR => new_err(FFileErrRes::Inv, err_msg),
+            ENOENT | ENOTDIR => new_err(FFileErr::Inv, err_msg),
 
             // lack of permission or read only fs
-            EACCES | EPERM | EROFS => new_err(FFileErrRes::Prm, err_msg),
+            EACCES | EPERM | EROFS => new_err(FFileErr::Prm, err_msg),
 
             // NOTE: In POSIX systems, kernel may report delayed io failures on `unlink`,
             // this are fatal errors, and can not be retried
             //
             // We protect this by enforcing hard durability right after write ops, so the
             // occurrence of this error is an implementation failure
-            EIO => new_err(FFileErrRes::Hcf, err_msg),
+            EIO => new_err(FFileErr::Hcf, err_msg),
 
-            _ => new_err(FFileErrRes::Unk, err_msg),
+            _ => new_err(FFileErr::Unk, err_msg),
         }
     }
 
@@ -160,10 +160,10 @@ impl POSIXFile {
 
             // bad or invalid fd
             if errno == EBADF || errno == EFAULT {
-                return new_err(FFileErrRes::Hcf, err_msg);
+                return new_err(FFileErr::Hcf, err_msg);
             }
 
-            return new_err(FFileErrRes::Unk, err_msg);
+            return new_err(FFileErr::Unk, err_msg);
         }
 
         Ok(st.st_size as usize)
@@ -288,7 +288,7 @@ impl POSIXFile {
             if res == 0 {
                 // NOTE: we treat this as `Hcf` error cause, this only occurs when we tried to read
                 // beyound current length of the file, which is result of invalid impl
-                return new_err_default(FFileErrRes::Hcf);
+                return new_err_default(FFileErr::Hcf);
             }
 
             if hints::unlikely(res < 0) {
@@ -300,12 +300,12 @@ impl POSIXFile {
                     EINTR | EAGAIN => continue,
 
                     // permission denied
-                    EACCES | EPERM => return new_err(FFileErrRes::Prm, err_msg),
+                    EACCES | EPERM => return new_err(FFileErr::Prm, err_msg),
 
                     // invalid fd, invalid fd type, bad pointer, etc.
-                    EINVAL | EBADF | EFAULT | ESPIPE => return new_err(FFileErrRes::Hcf, err_msg),
+                    EINVAL | EBADF | EFAULT | ESPIPE => return new_err(FFileErr::Hcf, err_msg),
 
-                    _ => return new_err(FFileErrRes::Unk, err_msg),
+                    _ => return new_err(FFileErr::Unk, err_msg),
                 }
             }
 
@@ -331,7 +331,7 @@ impl POSIXFile {
 
             // unexpected EOF
             if res == 0 {
-                return new_err_default(FFileErrRes::Hcf);
+                return new_err_default(FFileErr::Hcf);
             }
 
             if hints::unlikely(res < 0) {
@@ -343,12 +343,12 @@ impl POSIXFile {
                     EINTR | EAGAIN => continue,
 
                     // permission denied or read-only file
-                    EACCES | EPERM | EROFS => return new_err(FFileErrRes::Prm, err_msg),
+                    EACCES | EPERM | EROFS => return new_err(FFileErr::Prm, err_msg),
 
                     // invalid fd, invalid fd type, bad pointer, etc.
-                    EINVAL | EBADF | EFAULT | ESPIPE => return new_err(FFileErrRes::Hcf, err_msg),
+                    EINVAL | EBADF | EFAULT | ESPIPE => return new_err(FFileErr::Hcf, err_msg),
 
-                    _ => return new_err(FFileErrRes::Unk, err_msg),
+                    _ => return new_err(FFileErr::Unk, err_msg),
                 }
             }
 
@@ -392,7 +392,7 @@ impl POSIXFile {
             if res == 0 {
                 // NOTE: we treat this as `Hcf` error cause, this only occurs when we tried to read
                 // beyound current length of the file, which is result of invalid impl
-                return new_err_default(FFileErrRes::Hcf);
+                return new_err_default(FFileErr::Hcf);
             }
 
             if res < 0 {
@@ -403,12 +403,12 @@ impl POSIXFile {
                     EINTR | EAGAIN => continue,
 
                     // permission denied
-                    EACCES | EPERM => return new_err(FFileErrRes::Prm, err_msg),
+                    EACCES | EPERM => return new_err(FFileErr::Prm, err_msg),
 
                     // invalid fd, bad pointer, illegal seek, etc.
-                    EINVAL | EBADF | EFAULT | ESPIPE | EMSGSIZE => return new_err(FFileErrRes::Hcf, err_msg),
+                    EINVAL | EBADF | EFAULT | ESPIPE | EMSGSIZE => return new_err(FFileErr::Hcf, err_msg),
 
-                    _ => return new_err(FFileErrRes::Unk, err_msg),
+                    _ => return new_err(FFileErr::Unk, err_msg),
                 }
             }
 
@@ -474,7 +474,7 @@ impl POSIXFile {
 
             // unexpected EOF
             if res == 0 {
-                return new_err_default(FFileErrRes::Hcf);
+                return new_err_default(FFileErr::Hcf);
             }
 
             if res < 0 {
@@ -485,12 +485,12 @@ impl POSIXFile {
                     EINTR | EAGAIN => continue,
 
                     // permission denied
-                    EACCES | EPERM => return new_err(FFileErrRes::Prm, err_msg),
+                    EACCES | EPERM => return new_err(FFileErr::Prm, err_msg),
 
                     // invalid fd, bad pointer, illegal seek, etc.
-                    EINVAL | EBADF | EFAULT | ESPIPE | EMSGSIZE => return new_err(FFileErrRes::Hcf, err_msg),
+                    EINVAL | EBADF | EFAULT | ESPIPE | EMSGSIZE => return new_err(FFileErr::Hcf, err_msg),
 
-                    _ => return new_err(FFileErrRes::Unk, err_msg),
+                    _ => return new_err(FFileErr::Unk, err_msg),
                 }
             }
 
@@ -571,18 +571,18 @@ unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenRes<FFId> {
                 EINTR => continue,
 
                 // no space available on disk
-                ENOSPC => return new_err(FFileErrRes::Nsp, err_msg),
+                ENOSPC => return new_err(FFileErr::Nsp, err_msg),
 
                 // path is a dir (hcf)
-                EISDIR => return new_err(FFileErrRes::Hcf, err_msg),
+                EISDIR => return new_err(FFileErr::Hcf, err_msg),
 
                 // invalid path (missing sub dir's)
-                ENOENT | ENOTDIR => return new_err(FFileErrRes::Inv, err_msg),
+                ENOENT | ENOTDIR => return new_err(FFileErr::Inv, err_msg),
 
                 // permission denied or read-only fs
-                EACCES | EPERM | EROFS => return new_err(FFileErrRes::Prm, err_msg),
+                EACCES | EPERM | EROFS => return new_err(FFileErr::Prm, err_msg),
 
-                _ => return new_err(FFileErrRes::Unk, err_msg),
+                _ => return new_err(FFileErr::Unk, err_msg),
             }
         }
 
@@ -609,10 +609,10 @@ unsafe fn close_raw(fd: FFId) -> FrozenRes<()> {
     // We protect this by enforcing hard durability right after write ops, so the
     // occurrence of this error is an implementation failure
     if errno == EIO {
-        return new_err(FFileErrRes::Hcf, err_msg);
+        return new_err(FFileErr::Hcf, err_msg);
     }
 
-    new_err(FFileErrRes::Unk, err_msg)
+    new_err(FFileErr::Unk, err_msg)
 }
 
 #[cfg(target_os = "linux")]
@@ -628,13 +628,13 @@ unsafe fn fdatasync_raw(fd: FFId) -> FrozenRes<()> {
 
         match errno {
             // invalid fd or lack of support for sync
-            EINVAL | EBADF => return new_err(FFileErrRes::Hcf, err_msg),
+            EINVAL | EBADF => return new_err(FFileErr::Hcf, err_msg),
 
             // read-only file (can also be caused by TOCTOU)
-            EROFS => return new_err(FFileErrRes::Prm, err_msg),
+            EROFS => return new_err(FFileErr::Prm, err_msg),
 
             // fatal error, i.e. no sync for writes in recent window/batch
-            EIO => return new_err(FFileErrRes::Syn, err_msg),
+            EIO => return new_err(FFileErr::Syn, err_msg),
 
             // IO interrupt or fatal error, i.e. no sync for writes in recent window/batch
             //
@@ -649,10 +649,10 @@ unsafe fn fdatasync_raw(fd: FFId) -> FrozenRes<()> {
 
                 // NOTE: sync error indicates that retries exhausted and durability is broken
                 // in the current/last window/batch
-                return new_err(FFileErrRes::Syn, err_msg);
+                return new_err(FFileErr::Syn, err_msg);
             }
 
-            _ => return new_err(FFileErrRes::Unk, err_msg),
+            _ => return new_err(FFileErr::Unk, err_msg),
         }
     }
 }
@@ -678,22 +678,22 @@ unsafe fn f_fullsync_raw(fd: FFId) -> FrozenRes<()> {
 
                 // NOTE: sync error indicates that retries exhausted and durability is broken
                 // in the current/last window/batch
-                return new_err(FFileErrRes::Syn, err_msg);
+                return new_err(FFileErr::Syn, err_msg);
             }
 
             // lack of support for `F_FULLSYNC`
             libc::ENOTSUP | EOPNOTSUPP => break,
 
             // invalid fd or bad impl
-            EINVAL | EBADF => return new_err(FFileErrRes::Hcf, err_msg),
+            EINVAL | EBADF => return new_err(FFileErr::Hcf, err_msg),
 
             // read-only file (can also be caused by TOCTOU)
-            EROFS => return new_err(FFileErrRes::Prm, err_msg),
+            EROFS => return new_err(FFileErr::Prm, err_msg),
 
             // fatal error, i.e. no sync for writes in recent window/batch
-            EIO => return new_err(FFileErrRes::Syn, err_msg),
+            EIO => return new_err(FFileErr::Syn, err_msg),
 
-            _ => return new_err(FFileErrRes::Unk, err_msg),
+            _ => return new_err(FFileErr::Unk, err_msg),
         }
     }
 
@@ -726,19 +726,19 @@ unsafe fn fsync_raw(fd: FFId) -> FrozenRes<()> {
 
                     // NOTE: sync error indicates that retries exhausted and durability is broken
                     // in the current/last window/batch
-                    return new_err(FFileErrRes::Syn, err_msg);
+                    return new_err(FFileErr::Syn, err_msg);
                 }
 
                 // invalid fd or lack of support for sync
-                EBADF | EINVAL => return new_err(FFileErrRes::Hcf, err_msg),
+                EBADF | EINVAL => return new_err(FFileErr::Hcf, err_msg),
 
                 // read-only file (can also be caused by TOCTOU)
-                EROFS => return new_err(FFileErrRes::Prm, err_msg),
+                EROFS => return new_err(FFileErr::Prm, err_msg),
 
                 // fatal error, i.e. no sync for writes in recent window/batch
-                EIO => return new_err(FFileErrRes::Syn, err_msg),
+                EIO => return new_err(FFileErr::Syn, err_msg),
 
-                _ => return new_err(FFileErrRes::Unk, err_msg),
+                _ => return new_err(FFileErr::Unk, err_msg),
             }
         }
 
@@ -770,17 +770,17 @@ unsafe fn sync_file_range_raw(fd: FFId, offset: usize, len: usize) -> FrozenRes<
 
                 // NOTE: sync error indicates that retries exhausted and durability is broken
                 // in the current/last window/batch
-                return new_err(FFileErrRes::Syn, err_msg);
+                return new_err(FFileErr::Syn, err_msg);
             }
 
             // invalid fd or lack of support for sync
-            EBADF | EINVAL => return new_err(FFileErrRes::Hcf, err_msg),
+            EBADF | EINVAL => return new_err(FFileErr::Hcf, err_msg),
 
             // read-only file (can also be caused by TOCTOU)
-            EROFS => return new_err(FFileErrRes::Prm, err_msg),
+            EROFS => return new_err(FFileErr::Prm, err_msg),
 
             // fatal error, i.e. no sync for writes in recent window/batch
-            EIO => return new_err(FFileErrRes::Syn, err_msg),
+            EIO => return new_err(FFileErr::Syn, err_msg),
 
             // NOTE: on many fs mainly ones w/o local journaling, and older kernels does not support
             // `sync_file_range(SYNC_FILE_RANGE_WRITE)`, also as the use of this is only to hint the
@@ -788,7 +788,7 @@ unsafe fn sync_file_range_raw(fd: FFId, offset: usize, len: usize) -> FrozenRes<
             // kind of errors
             EOPNOTSUPP | libc::ENOSYS => return Ok(()),
 
-            _ => return new_err(FFileErrRes::Unk, err_msg),
+            _ => return new_err(FFileErr::Unk, err_msg),
         }
     }
 }
@@ -830,24 +830,24 @@ unsafe fn fallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenR
                     continue;
                 }
 
-                return new_err(FFileErrRes::Grw, err_msg);
+                return new_err(FFileErr::Grw, err_msg);
             }
 
             // invalid fd
-            EBADF | EINVAL => return new_err(FFileErrRes::Hcf, err_msg),
+            EBADF | EINVAL => return new_err(FFileErr::Hcf, err_msg),
 
             // read-only fs (can also be caused by TOCTOU)
-            EROFS => return new_err(FFileErrRes::Prm, err_msg),
+            EROFS => return new_err(FFileErr::Prm, err_msg),
 
             // no space available on disk to grow
-            ENOSPC => return new_err(FFileErrRes::Nsp, err_msg),
+            ENOSPC => return new_err(FFileErr::Nsp, err_msg),
 
             // NOTE: on many fs `fallocate()` may not be supported due to old kernel or fs
             // limitations, as use of this is only to hint the fs (for perf gains while
             // writes), we simply let go of this and do not elivate any kind of errors
             EOPNOTSUPP | libc::ENOSYS => return Ok(()),
 
-            _ => return new_err(FFileErrRes::Unk, err_msg),
+            _ => return new_err(FFileErr::Unk, err_msg),
         }
     }
 }
@@ -878,19 +878,19 @@ unsafe fn ftruncate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenR
                     continue;
                 }
 
-                return new_err(FFileErrRes::Grw, err_msg);
+                return new_err(FFileErr::Grw, err_msg);
             }
 
             // invalid fd or lack of support for sync
-            EINVAL | EBADF => return new_err(FFileErrRes::Hcf, err_msg),
+            EINVAL | EBADF => return new_err(FFileErr::Hcf, err_msg),
 
             // read-only fs (can also be caused by TOCTOU)
-            EROFS => return new_err(FFileErrRes::Prm, err_msg),
+            EROFS => return new_err(FFileErr::Prm, err_msg),
 
             // no space available on disk to grow
-            ENOSPC => return new_err(FFileErrRes::Nsp, err_msg),
+            ENOSPC => return new_err(FFileErr::Nsp, err_msg),
 
-            _ => return new_err(FFileErrRes::Unk, err_msg),
+            _ => return new_err(FFileErr::Unk, err_msg),
         }
     }
 }
@@ -954,7 +954,7 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
                     continue;
                 }
 
-                return new_err(FFileErrRes::Grw, err_msg);
+                return new_err(FFileErr::Grw, err_msg);
             }
 
             // no space available on disk to grow
@@ -967,7 +967,7 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
                     continue;
                 }
 
-                return new_err(FFileErrRes::Nsp, err_msg);
+                return new_err(FFileErr::Nsp, err_msg);
             }
 
             // NOTE: on many fs `fcntl(F_PREALLOCATE)` may not be supported due to old kernel
@@ -979,12 +979,12 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
             EINVAL => return Ok(()), // same reason as above to not elivate the error
 
             // invalid fd
-            EBADF => return new_err(FFileErrRes::Hcf, err_msg),
+            EBADF => return new_err(FFileErr::Hcf, err_msg),
 
             // read-only fs
-            EROFS => return new_err(FFileErrRes::Prm, err_msg),
+            EROFS => return new_err(FFileErr::Prm, err_msg),
 
-            _ => return new_err(FFileErrRes::Unk, err_msg),
+            _ => return new_err(FFileErr::Unk, err_msg),
         }
     }
 }
@@ -1002,7 +1002,7 @@ unsafe fn flock_raw(fd: FFId) -> FrozenRes<()> {
         match errno {
             // another process already holds the lock
             EWOULDBLOCK => {
-                return new_err(FFileErrRes::Lck, err_msg);
+                return new_err(FFileErr::Lck, err_msg);
             }
 
             // IO interrupt
@@ -1012,16 +1012,16 @@ unsafe fn flock_raw(fd: FFId) -> FrozenRes<()> {
                     continue;
                 }
 
-                return new_err(FFileErrRes::Lck, err_msg);
+                return new_err(FFileErr::Lck, err_msg);
             }
 
             // invalid fd or lack of support
-            EBADF | EINVAL => return new_err(FFileErrRes::Hcf, err_msg),
+            EBADF | EINVAL => return new_err(FFileErr::Hcf, err_msg),
 
             // os or fs, out of locks, i.e. lock exhaustion, may happen only on nfs
-            ENOLCK => return new_err(FFileErrRes::Lex, err_msg),
+            ENOLCK => return new_err(FFileErr::Lex, err_msg),
 
-            _ => return new_err(FFileErrRes::Unk, err_msg),
+            _ => return new_err(FFileErr::Unk, err_msg),
         }
     }
 }
@@ -1079,7 +1079,7 @@ const fn prep_flags() -> c_int {
 fn path_to_cstring(path: &std::path::Path) -> FrozenRes<std::ffi::CString> {
     match std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
         Ok(cs) => Ok(cs),
-        Err(e) => new_err(FFileErrRes::Inv, e.into_vec()),
+        Err(e) => new_err(FFileErr::Inv, e.into_vec()),
     }
 }
 
@@ -1185,7 +1185,7 @@ mod tests {
             unsafe {
                 let missing = path.join("missing/file");
                 let err = POSIXFile::new(&missing).unwrap_err();
-                assert!(err.compare(FFileErrRes::Inv as u16))
+                assert!(err.compare(FFileErr::Inv as u16))
             }
         }
     }
@@ -1215,7 +1215,7 @@ mod tests {
                 file.unlink(&path).unwrap();
 
                 let err = file.unlink(&path).unwrap_err();
-                assert!(err.compare(FFileErrRes::Inv as u16));
+                assert!(err.compare(FFileErr::Inv as u16));
             }
         }
     }
@@ -1246,7 +1246,7 @@ mod tests {
                 let file2 = POSIXFile::new(&path).unwrap();
                 let err = file2.flock().unwrap_err();
 
-                assert!(err.compare(FFileErrRes::Lck as u16));
+                assert!(err.compare(FFileErr::Lck as u16));
 
                 file1.close().unwrap();
                 file2.close().unwrap();
@@ -1733,7 +1733,7 @@ mod tests {
                 file.close().unwrap();
 
                 let err = file.length().unwrap_err();
-                assert!(err.compare(FFileErrRes::Hcf as u16));
+                assert!(err.compare(FFileErr::Hcf as u16));
             }
         }
 
@@ -1748,7 +1748,7 @@ mod tests {
 
                 let mut buf = vec![0u8; 8];
                 let err = file.pread(buf.as_mut_ptr(), 0, buf.len()).unwrap_err();
-                assert!(err.compare(FFileErrRes::Hcf as u16));
+                assert!(err.compare(FFileErr::Hcf as u16));
             }
         }
 
@@ -1763,7 +1763,7 @@ mod tests {
 
                 let mut data = b"dead".to_vec();
                 let err = file.pwrite(data.as_mut_ptr(), 0, data.len()).unwrap_err();
-                assert!(err.compare(FFileErrRes::Hcf as u16));
+                assert!(err.compare(FFileErr::Hcf as u16));
             }
         }
 
@@ -1776,7 +1776,7 @@ mod tests {
                 file.close().unwrap();
 
                 let err = file.sync().unwrap_err();
-                assert!(err.compare(FFileErrRes::Hcf as u16));
+                assert!(err.compare(FFileErr::Hcf as u16));
             }
         }
 
@@ -1789,7 +1789,7 @@ mod tests {
                 file.close().unwrap();
 
                 let err = file.grow(0, 0x100).unwrap_err();
-                assert!(err.compare(FFileErrRes::Hcf as u16));
+                assert!(err.compare(FFileErr::Hcf as u16));
             }
         }
 
@@ -1804,7 +1804,7 @@ mod tests {
                 assert!(!path.exists());
 
                 let err = file.unlink(&path).unwrap_err();
-                assert!(err.compare(FFileErrRes::Inv as u16));
+                assert!(err.compare(FFileErr::Inv as u16));
             }
         }
     }

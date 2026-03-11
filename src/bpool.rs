@@ -31,9 +31,6 @@ pub struct BPCfg {
     pub backend: BPBackend,
 }
 
-unsafe impl Send for BPCfg {}
-unsafe impl Sync for BPCfg {}
-
 /// Available allocation backends for [`BufPool`]
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BPBackend {
@@ -56,9 +53,6 @@ pub enum BPBackend {
         capacity: usize,
     },
 }
-
-unsafe impl Send for BPBackend {}
-unsafe impl Sync for BPBackend {}
 
 /// Lock-free buffer pool used for staging IO buffers
 ///
@@ -136,7 +130,7 @@ impl Drop for BufPool {
 
             // NOTE: We re-construct original allocation from the stored pointer! This builds up the vecotor
             // as it was created, which than is dropped by Rust destructor's automatically!
-            let _ = unsafe { Vec::from_raw_parts(state.base_ptr.ptr, pool_size, pool_size) };
+            let _ = unsafe { Vec::from_raw_parts(state.base_ptr, pool_size, pool_size) };
         }
     }
 }
@@ -159,7 +153,7 @@ impl BackendState {
 #[derive(Debug)]
 struct PreallocState {
     capacity: usize,
-    base_ptr: BPPtr,
+    base_ptr: TBPPtr,
     head: atomic::AtomicUsize,
     next: Box<[atomic::AtomicUsize]>,
 }
@@ -169,7 +163,7 @@ impl PreallocState {
         let pool_size = capacity * cfg.chunk_size;
 
         let mut pool = Vec::<u8>::with_capacity(pool_size);
-        let base_ptr = BPPtr { ptr: pool.as_mut_ptr() };
+        let base_ptr = pool.as_mut_ptr();
 
         // NOTE: `Vec::with_capacity(N)` allocates memory but keeps the len at 0, we use raw pointers to access
         // the slots, if the len stays at 0, it'd be UB while the reconstruction of the slice from the pointer
@@ -259,11 +253,15 @@ impl PreallocState {
             {
                 Err(h) => head = h,
                 Ok(_) => {
-                    let slots = out.slots.slots();
-                    let mut cur = idx;
+                    let base = self.base_ptr;
+                    let chunk = pool.cfg.chunk_size;
 
+                    let slots = out.slots.slots();
+                    slots.reserve(count);
+
+                    let mut cur = idx;
                     for _ in 0..count {
-                        slots.push(self.base_ptr.add((cur * pool.cfg.chunk_size) as u64));
+                        slots.push(unsafe { base.add(cur * chunk) });
                         cur = self.next[cur].load(atomic::Ordering::Relaxed);
                     }
 
@@ -323,8 +321,8 @@ impl PreallocState {
     }
 
     #[inline(always)]
-    fn free(&self, ptr: &BPPtr, pool: &BufPool) {
-        let offset = self.base_ptr.offset_from(ptr);
+    fn free(&self, ptr: TBPPtr, pool: &BufPool) {
+        let offset = unsafe { ptr.offset_from(self.base_ptr) } as usize;
         let idx = offset / pool.cfg.chunk_size;
 
         let mut head = self.head.load(atomic::Ordering::Acquire);
@@ -391,30 +389,8 @@ fn unpack_pool_idx(id: usize) -> (usize, usize) {
     (id & POOL_IDX_MASK, id >> POOL_IDX_BITS)
 }
 
-type TBPPtr = *mut u8;
-
 /// Pointer to buffer allocated by [`BufPool::allocate`]
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BPPtr {
-    /// Raw pointer to the start of a buffer owned by the pool, where the valid memory range is `[ptr, ptr + buf_size)`
-    pub ptr: TBPPtr,
-}
-
-unsafe impl Send for BPPtr {}
-
-impl BPPtr {
-    #[inline]
-    fn add(&self, count: u64) -> Self {
-        Self {
-            ptr: unsafe { self.ptr.add(count as usize) },
-        }
-    }
-
-    #[inline]
-    fn offset_from(&self, ptr: &Self) -> usize {
-        unsafe { ptr.ptr.offset_from(self.ptr) as usize }
-    }
-}
+pub type TBPPtr = *mut u8;
 
 /// Buffer allocations allocated by [`BufPool::allocate`]
 #[derive(Debug)]
@@ -434,7 +410,7 @@ unsafe impl Send for Allocation {}
 impl Allocation {
     /// Get a referenced vector containing raw buffer pointers
     #[inline]
-    pub fn slots(&self) -> &Vec<BPPtr> {
+    pub fn slots(&self) -> &Vec<TBPPtr> {
         match &self.slots {
             AllocSlotType::Pool(slots) => slots,
             AllocSlotType::Dynamic(slots) => slots,
@@ -448,7 +424,7 @@ impl Allocation {
         Self {
             count: 0,
             guard: AllocationGuard(ptr::NonNull::from(pool)),
-            slots: AllocSlotType::Pool(Vec::<BPPtr>::with_capacity(cap)),
+            slots: AllocSlotType::Pool(Vec::<TBPPtr>::with_capacity(cap)),
         }
     }
 
@@ -465,8 +441,8 @@ impl Allocation {
         // would be invalid as well
         unsafe { slice.set_len(total) };
 
-        // NOTE: Here, when `slice` goes out of scope, the `drop(pool)` will be called by the compiler, which
-        // would drop the allocated memory, which for us must be pinned, to avoid this, we tell the compiler
+        // NOTE: Here, when `slice` goes out of scope, the `drop(allocation)` will be called by the compiler,
+        // which would drop the allocated memory, which for us must be pinned, to avoid this, we tell the compiler
         // to not call the drop, i.e. simply forget that the `pool` exists, while we also make sure to drop
         // this allocated memory pool manually when the [`BufPool`] itself is dropped
         std::mem::forget(slice);
@@ -474,7 +450,7 @@ impl Allocation {
         let mut ptrs = Vec::with_capacity(count);
         for i in 0..count {
             let p = unsafe { base_ptr.add(i * pool.cfg.chunk_size) };
-            ptrs.push(BPPtr { ptr: p });
+            ptrs.push(p);
         }
 
         Self {
@@ -493,7 +469,7 @@ impl Drop for Allocation {
             AllocSlotType::Pool(slots) => match &pool.state {
                 BackendState::Prealloc(state) => {
                     for ptr in slots {
-                        state.free(ptr, pool);
+                        state.free(*ptr, pool);
                     }
                 }
 
@@ -511,7 +487,7 @@ impl Drop for Allocation {
 
                 let buf_size = pool.cfg.chunk_size;
                 let total = buf_size * slots.len();
-                let base = slots[0].ptr;
+                let base = slots[0];
 
                 let _ = unsafe { Vec::from_raw_parts(base, total, total) };
             }
@@ -521,12 +497,12 @@ impl Drop for Allocation {
 
 #[derive(Debug)]
 enum AllocSlotType {
-    Pool(Vec<BPPtr>),
-    Dynamic(Vec<BPPtr>),
+    Pool(Vec<TBPPtr>),
+    Dynamic(Vec<TBPPtr>),
 }
 
 impl AllocSlotType {
-    fn slots(&mut self) -> &mut Vec<BPPtr> {
+    fn slots(&mut self) -> &mut Vec<TBPPtr> {
         match self {
             Self::Pool(slots) => slots,
             Self::Dynamic(slots) => slots,
