@@ -567,13 +567,8 @@ where
         // growing or any read/write ops
         let _io_lock = self.core.acquire_exclusive_io_lock();
 
-        // sync if dirty
-        if not_unmapped && self.core.dirty.swap(false, atomic::Ordering::AcqRel) {
-            let _ = self.core.sync();
-        }
-
         // free up the boxed error (if any)
-        let ptr = self.core.error.load(atomic::Ordering::Acquire);
+        let ptr = self.core.error.swap(std::ptr::null_mut(), atomic::Ordering::AcqRel);
         if !ptr.is_null() {
             unsafe {
                 drop(Box::from_raw(ptr));
@@ -701,7 +696,7 @@ impl Core {
     fn spawn_tx(core: sync::Arc<Self>) -> FrozenRes<thread::JoinHandle<()>> {
         match thread::Builder::new()
             .name("fm-flush-tx".into())
-            .spawn(move || Self::tx_thread(core))
+            .spawn(move || Self::flush_tx(core))
         {
             Ok(tx) => Ok(tx),
             Err(error) => {
@@ -712,7 +707,7 @@ impl Core {
         }
     }
 
-    fn tx_thread(core: sync::Arc<Self>) {
+    fn flush_tx(core: sync::Arc<Self>) {
         // init phase (acquiring locks)
         let mut guard = match core.lock.lock() {
             Ok(g) => g,
@@ -741,16 +736,17 @@ impl Core {
                 }
             };
 
-            // NOTE: we must read values of close and dirty brodcast before acquire exclusive lock,
+            // NOTE: we must read values of close brodcast before acquire exclusive lock,
             // if done otherwise, we impose serious deadlock sort of situation for the the flusher tx
 
-            // we must close the thread when [`FrozenMMap`] is closed
-            if hints::unlikely(core.closed.load(atomic::Ordering::Acquire)) {
-                return;
-            }
+            let dirty = core.dirty.swap(false, atomic::Ordering::AcqRel);
+            let closing = core.closed.load(atomic::Ordering::Acquire);
 
-            // this helps us avoid sync when no data is updated
-            if hints::likely(!core.dirty.swap(false, atomic::Ordering::AcqRel)) {
+            if !dirty {
+                if closing {
+                    return;
+                }
+
                 continue;
             }
 

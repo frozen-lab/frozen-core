@@ -18,7 +18,7 @@ const ERRDOMAIN: u8 = 0x13;
 
 /// Error codes for [`FrozenPipe`]
 #[repr(u16)]
-pub enum FPError {
+pub enum FPErr {
     /// (1024) internal fuck up (hault and catch fire)
     Hcf = 0x400,
 
@@ -29,7 +29,7 @@ pub enum FPError {
     Lpn = 0x402,
 }
 
-impl FPError {
+impl FPErr {
     #[inline]
     fn default_message(&self) -> &'static [u8] {
         match self {
@@ -41,14 +41,14 @@ impl FPError {
 }
 
 #[inline]
-fn new_err<R>(res: FPError, message: Vec<u8>) -> FrozenRes<R> {
+fn new_err<R>(res: FPErr, message: Vec<u8>) -> FrozenRes<R> {
     let detail = res.default_message();
     let err = FrozenErr::new(unsafe { MODULE_ID }, ERRDOMAIN, res as u16, detail, message);
     Err(err)
 }
 
 #[inline]
-fn new_err_raw<E: std::fmt::Display>(res: FPError, error: E) -> FrozenErr {
+fn new_err_raw<E: std::fmt::Display>(res: FPErr, error: E) -> FrozenErr {
     let detail = res.default_message();
     FrozenErr::new(
         unsafe { MODULE_ID },
@@ -115,7 +115,7 @@ impl FrozenPipe {
 
     /// Force instant durability for the current batch
     pub fn force_durability(&self, epoch: u64) -> FrozenRes<()> {
-        let guard = self.core.lock.lock().map_err(|e| new_err_raw(FPError::Lpn, e))?;
+        let guard = self.core.lock.lock().map_err(|e| new_err_raw(FPErr::Lpn, e))?;
         self.core.cv.notify_one();
         drop(guard);
 
@@ -133,7 +133,7 @@ impl FrozenPipe {
 
         let mut guard = match self.core.durable_lock.lock() {
             Ok(g) => g,
-            Err(e) => return Err(new_err_raw(FPError::Lpn, e)),
+            Err(e) => return Err(new_err_raw(FPErr::Lpn, e)),
         };
 
         loop {
@@ -147,7 +147,7 @@ impl FrozenPipe {
 
             guard = match self.core.durable_cv.wait(guard) {
                 Ok(g) => g,
-                Err(e) => return Err(new_err_raw(FPError::Lpn, e)),
+                Err(e) => return Err(new_err_raw(FPErr::Lpn, e)),
             };
         }
     }
@@ -225,12 +225,12 @@ impl Core {
 
     #[inline]
     fn acquire_io_lock(&self) -> FrozenRes<sync::RwLockReadGuard<'_, ()>> {
-        self.io_lock.read().map_err(|e| new_err_raw(FPError::Lpn, e))
+        self.io_lock.read().map_err(|e| new_err_raw(FPErr::Lpn, e))
     }
 
     #[inline]
     fn acquire_exclusive_io_lock(&self) -> FrozenRes<sync::RwLockWriteGuard<'_, ()>> {
-        self.io_lock.write().map_err(|e| new_err_raw(FPError::Lpn, e))
+        self.io_lock.write().map_err(|e| new_err_raw(FPErr::Lpn, e))
     }
 
     #[inline]
@@ -302,7 +302,7 @@ impl Core {
             Err(error) => {
                 let mut error = error.to_string().as_bytes().to_vec();
                 error.extend_from_slice(b"Failed to spawn flush thread for FrozenPipe");
-                new_err(FPError::Hcf, error)
+                new_err(FPErr::Hcf, error)
             }
         }
     }
@@ -317,8 +317,8 @@ impl Core {
                 let error = FrozenErr::new(
                     unsafe { MODULE_ID },
                     ERRDOMAIN,
-                    FPError::Lpn as u16,
-                    FPError::Lpn.default_message(),
+                    FPErr::Lpn as u16,
+                    FPErr::Lpn.default_message(),
                     message,
                 );
                 core.set_sync_error(error);
@@ -331,7 +331,7 @@ impl Core {
             guard = match core.cv.wait_timeout(guard, core.flush_duration) {
                 Ok((g, _)) => g,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(FPError::Txe, e));
+                    core.set_sync_error(new_err_raw(FPErr::Txe, e));
                     return;
                 }
             };
@@ -355,7 +355,7 @@ impl Core {
                 guard = match core.lock.lock() {
                     Ok(g) => g,
                     Err(e) => {
-                        core.set_sync_error(new_err_raw(FPError::Lpn, e));
+                        core.set_sync_error(new_err_raw(FPErr::Lpn, e));
                         return;
                     }
                 };
@@ -369,7 +369,7 @@ impl Core {
             let io_lock = match core.acquire_exclusive_io_lock() {
                 Ok(lock) => lock,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(FPError::Lpn, e));
+                    core.set_sync_error(new_err_raw(FPErr::Lpn, e));
                     return;
                 }
             };
@@ -383,7 +383,7 @@ impl Core {
                     guard = match core.lock.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            core.set_sync_error(new_err_raw(FPError::Lpn, e));
+                            core.set_sync_error(new_err_raw(FPErr::Lpn, e));
                             return;
                         }
                     };
@@ -407,7 +407,7 @@ impl Core {
                     let _g = match core.durable_lock.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            core.set_sync_error(new_err_raw(FPError::Lpn, e));
+                            core.set_sync_error(new_err_raw(FPErr::Lpn, e));
                             return;
                         }
                     };
@@ -421,7 +421,7 @@ impl Core {
             guard = match core.lock.lock() {
                 Ok(g) => g,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(FPError::Lpn, e));
+                    core.set_sync_error(new_err_raw(FPErr::Lpn, e));
                     return;
                 }
             };
