@@ -422,8 +422,8 @@ where
     /// let path = dir.path().join("tmp_grow_mmap");
     ///
     /// let cfg = FMCfg {
-    ///     mid: 0u8,
     ///     path,
+    ///     mid: 0u8,
     ///     initial_count: 0x02,
     ///     flush_duration: std::time::Duration::from_micros(100),
     /// };

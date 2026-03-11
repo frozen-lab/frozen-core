@@ -24,12 +24,12 @@
 //! });
 //!
 //! {
-//!     let alloc = pool.allocate(4).expect("allocation failed");
+//!     let alloc = pool.allocate(4).unwrap();
 //!     assert_eq!(alloc.count, 4);
 //!     // `alloc` is dropped here
 //! }
 //!
-//! let alloc2 = pool.allocate(4).expect("allocation failed");
+//! let alloc2 = pool.allocate(4).unwrap();
 //! assert_eq!(alloc2.count, 4);
 //! ```
 
@@ -131,7 +131,7 @@ impl BufPool {
     ///     backend: BPBackend::Prealloc { capacity: 0x10 },
     /// });
     ///
-    /// let alloc = pool.allocate(4).expect("allocation failed");
+    /// let alloc = pool.allocate(4).unwrap();
     /// assert_eq!(alloc.count, 4);
     /// ```
     pub fn new(cfg: BPCfg) -> Self {
@@ -174,7 +174,7 @@ impl BufPool {
     ///     backend: BPBackend::Prealloc { capacity: 0x10 },
     /// });
     ///
-    /// let alloc = pool.allocate(2).expect("allocation failed");
+    /// let alloc = pool.allocate(2).unwrap();
     /// assert_eq!(alloc.count, 2);
     /// assert_eq!(alloc.slots().len(), 2);
     /// ```
@@ -490,7 +490,7 @@ impl Allocation {
     ///     backend: BPBackend::Prealloc { capacity: 0x10 },
     /// });
     ///
-    /// let alloc = pool.allocate(2).expect("allocation failed");
+    /// let alloc = pool.allocate(2).unwrap();
     ///
     /// for ptr in alloc.slots() {
     ///     assert!(!ptr.is_null());
