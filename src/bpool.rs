@@ -6,9 +6,32 @@
 //! - *Graceful Shutdown*
 //! - *Lock-free fast path*
 //!
-//! ## Pooling for allocations
+//! ## Polling
 //!
-//! NA
+//! The use of [`BufPool::allocate`] guarantees that the requested number of chunks are allocatated and stored
+//! in [`Allocation`], but if the choosen `backend` is [`BPBackend::Prealloc`], the call blocks internally
+//! when not enough chunks are available, generally till the previous [`Allocation`] are dropped
+//!
+//! ## Example
+//!
+//! ```
+//! use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+//!
+//! let pool = BufPool::new(BPCfg {
+//!     mid: 0,
+//!     chunk_size: 0x20,
+//!     backend: BPBackend::Prealloc { capacity: 4 },
+//! });
+//!
+//! {
+//!     let alloc = pool.allocate(4).expect("allocation failed");
+//!     assert_eq!(alloc.count, 4);
+//!     // `alloc` is dropped here
+//! }
+//!
+//! let alloc2 = pool.allocate(4).expect("allocation failed");
+//! assert_eq!(alloc2.count, 4);
+//! ```
 
 use crate::error::{FrozenErr, FrozenRes};
 use std::{
@@ -36,6 +59,12 @@ pub struct BPCfg {
 pub enum BPBackend {
     /// All slots are dynamically constructed at runtime, avoids waiting for slot availablity under high contention
     /// at cost of runtime allocations
+    ///
+    /// ## When to use
+    ///
+    /// - burst workloads
+    /// - low-contention code paths
+    /// - requests that may exceed the configured pool capacity
     Dynamic,
 
     /// Uses a pre-allocated freelist w/ the given `capacity`
@@ -43,13 +72,22 @@ pub enum BPBackend {
     /// All the chunks are allocated upfront, avoiding runtime allocations, while providing lower and more
     /// predicatble latency compared to [`BPBackend::Dynamic`]
     ///
-    /// If a request asks for more chunks then the `capacity`, [`BPBackend::Dynamic`] is used as a fallback
+    /// ## When to use
     ///
-    /// ## Polling
+    /// - hot IO paths
+    /// - write pipelines
+    /// - storage engines
+    /// - workloads where allocation latency must remain stable
     ///
-    /// TODO: Add notes
+    /// If all buffers are currently in use, [`BufPool::allocate`] blocks until another [`Allocation`]
+    /// is dropped and buffers return to the pool
+    ///
+    /// ## Fallback
+    ///
+    /// For [`BPBackend::Prealloc`] backend, f `n` exceeds the pool capacity, the allocation is performed using the
+    /// [`BPBackend::Dynamic`]
     Prealloc {
-        /// Bumber of chunks to pre-allocate in memory
+        /// Number of chunks to pre-allocate in memory
         capacity: usize,
     },
 }
@@ -80,7 +118,22 @@ unsafe impl Send for BufPool {}
 unsafe impl Sync for BufPool {}
 
 impl BufPool {
-    /// Create a new instance of [`BufPool`]
+    /// Create a new [`BufPool`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    ///
+    /// let pool = BufPool::new(BPCfg {
+    ///     mid: 0,
+    ///     chunk_size: 0x20,
+    ///     backend: BPBackend::Prealloc { capacity: 0x10 },
+    /// });
+    ///
+    /// let alloc = pool.allocate(4).expect("allocation failed");
+    /// assert_eq!(alloc.count, 4);
+    /// ```
     pub fn new(cfg: BPCfg) -> Self {
         let state = BackendState::new(&cfg);
         Self {
@@ -93,13 +146,39 @@ impl BufPool {
         }
     }
 
-    /// Allocates `n` chunks for staging IO ops
+    /// Allocate `n` buffers
     ///
-    /// ## RAII Safe
+    /// ## Blocking
     ///
-    /// The [`Allocation`] is RAII safe, as the allocated buffers are automatically reused or freed from memory w/
-    /// respect to the backend used, as the caller drops reference to the [`Allocation`]
-    #[inline]
+    /// For [`BPBackend::Prealloc`] backend, if the pool does not currently contain enough chunks, call is blocked
+    /// until all required chunks are allocated
+    ///
+    /// ## Fallback to [`BPBackend::Dynamic`]
+    ///
+    /// For [`BPBackend::Prealloc`] backend, f `n` exceeds the pool capacity, the allocation is performed using the
+    /// [`BPBackend::Dynamic`]
+    ///
+    /// ## RAII
+    ///
+    /// The [`Allocation`] is RAII safe, as the allocated buffers are automatically reused (or free'ed from memory w/
+    /// respect to the backend used) as the caller drops reference to the [`Allocation`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    ///
+    /// let pool = BufPool::new(BPCfg {
+    ///     mid: 0,
+    ///     chunk_size: 0x20,
+    ///     backend: BPBackend::Prealloc { capacity: 0x10 },
+    /// });
+    ///
+    /// let alloc = pool.allocate(2).expect("allocation failed");
+    /// assert_eq!(alloc.count, 2);
+    /// assert_eq!(alloc.slots().len(), 2);
+    /// ```
+    #[inline(always)]
     pub fn allocate(&self, n: usize) -> FrozenRes<Allocation> {
         match &self.state {
             BackendState::Dynamic => Ok(Allocation::new_dynamic(self, n)),
@@ -216,13 +295,14 @@ impl PreallocState {
         loop {
             let (idx, tag) = unpack_pool_idx(head);
 
-            // NOTE: If we reach the last entry (i.e. invalid ptr), we return early, despite not
+            // NOTE:
+            //
+            // - If we reach the last entry (i.e. invalid ptr), we return early, despite not
             // allocating all the required buffers
-            //
-            // This allows caller to process allocated buffers, and avoid busy waiting for
+            // - This allows caller to process allocated buffers, and avoid busy waiting for
             // more buffers
-            //
-            // The caller should poll to allocate, till all required bufs are allocated
+            // - The caller should poll to allocate, till all required bufs are allocated
+
             if idx == INVALID_POOL_SLOT {
                 return 0;
             }
@@ -276,19 +356,6 @@ impl PreallocState {
     ///
     /// This function is intended to be used when [`BufPool::allocate`] returns less than requested bufs,
     /// i.e. when pool is exhausted
-    ///
-    /// ## Polling
-    ///
-    /// The typical allocation pattern is,
-    ///
-    /// - Attempt allocation w/ [`BufPool::allocate`]
-    /// - If less than requested bufs are allocated, call [`BufPool::wait`]
-    /// - Retry the allocation; all within a loop
-    ///
-    /// ## Notes
-    ///
-    /// - The caller must retry [`BufPool::allocate`] after calling [`BufPool::wait`]
-    /// - Only threads waiting for buffers are blocked, the allocation fast path remains lock-free
     #[inline]
     fn wait(&self, pool: &BufPool) -> FrozenRes<()> {
         if self.has_free() {
@@ -408,7 +475,27 @@ pub struct Allocation {
 unsafe impl Send for Allocation {}
 
 impl Allocation {
-    /// Get a referenced vector containing raw buffer pointers
+    /// Returns the raw buffer pointers belonging to this allocation
+    ///
+    /// Each pointer references a contiguous memory region of size `BufPool::chunk_size`
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    ///
+    /// let pool = BufPool::new(BPCfg {
+    ///     mid: 0,
+    ///     chunk_size: 0x20,
+    ///     backend: BPBackend::Prealloc { capacity: 0x10 },
+    /// });
+    ///
+    /// let alloc = pool.allocate(2).expect("allocation failed");
+    ///
+    /// for ptr in alloc.slots() {
+    ///     assert!(!ptr.is_null());
+    /// }
+    /// ```
     #[inline]
     pub fn slots(&self) -> &Vec<TBPPtr> {
         match &self.slots {
