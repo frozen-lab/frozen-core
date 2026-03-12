@@ -700,7 +700,7 @@ mod tests {
             let pool = new_pool_prealloc(CAP);
 
             let alloc = pool.allocate(CAP).unwrap();
-            let mut ptrs: Vec<TBPPtr> = alloc.slots().iter().map(|s| *s).collect();
+            let mut ptrs: Vec<TBPPtr> = alloc.slots().to_vec();
 
             // remove duplicates if any
             ptrs.sort();
@@ -740,7 +740,7 @@ mod tests {
             let pool = new_pool_dynamic();
 
             let alloc = pool.allocate(CAP).unwrap();
-            let mut ptrs: Vec<TBPPtr> = alloc.slots().iter().map(|s| *s).collect();
+            let mut ptrs: Vec<TBPPtr> = alloc.slots().to_vec();
 
             // remove duplicates if any
             ptrs.sort();

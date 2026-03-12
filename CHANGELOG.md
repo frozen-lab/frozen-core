@@ -5,6 +5,7 @@
 - Impl of `mpscq` module
 - Impl of dynamic allocations in `BPool` (via `BPool::allocate_dynamic`)
 - Yanked use of lifetimes from `bpool::Allocation` object, w/ use of raw pointer internally
+- Impl of `fpipe` module for batch io ops
 
 ## `0.0.9`
 
