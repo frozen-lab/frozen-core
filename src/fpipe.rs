@@ -272,9 +272,12 @@ impl FrozenPipe {
     /// ```
     #[inline(always)]
     pub fn read_single(&self, index: usize) -> FrozenRes<Vec<u8>> {
+        let _lock = self.core.acquire_io_lock()?;
+
         let mut slice = vec![0u8; self.core.chunk_size];
         self.core.file.pread(slice.as_mut_ptr(), index)?;
 
+        drop(_lock);
         Ok(slice)
     }
 
@@ -317,6 +320,8 @@ impl FrozenPipe {
     /// ```
     #[inline(always)]
     pub fn read(&self, index: usize, count: usize) -> FrozenRes<Vec<u8>> {
+        let _lock = self.core.acquire_io_lock()?;
+
         match count {
             2 => self.read_2x(index),
             4 => self.read_4x(index),
