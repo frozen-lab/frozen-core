@@ -69,26 +69,30 @@ jobs:
           key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
       - run: cargo test --release -- --nocapture
 
-      - name: Example (FF)
+      - name: Example (FrozenFile)
         run: |
           cargo run --release --example ff w
           cargo run --release --example ff r
           
-      - name: Example (FM)
+      - name: Example (FrozenMMap)
         run: |
-          cargo run --release --example fm        
+          cargo run --release --example fm  
           
       - name: Example (Crc32)
         run: |
           cargo run --release --example crc
-
+        
       - name: Example (BPool)
         run: |
-          cargo run --release --example bp
+          cargo run --release --example bp          
           
       - name: Example (MPSCQ)
         run: |
           cargo run --release --example mq
+          
+      - name: Example (FrozenPipe)
+        run: |
+          cargo run --release --example fp
 
   macos:
     needs: lints
@@ -113,19 +117,19 @@ jobs:
           key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
       - run: cargo test --release -- --nocapture
 
-      - name: Example (FF)
+      - name: Example (FrozenFile)
         run: |
           cargo run --release --example ff w
           cargo run --release --example ff r
           
-      - name: Example (FM)
+      - name: Example (FrozenMMap)
         run: |
-          cargo run --release --example fm
+          cargo run --release --example fm  
           
       - name: Example (Crc32)
         run: |
           cargo run --release --example crc
-          
+        
       - name: Example (BPool)
         run: |
           cargo run --release --example bp          
@@ -133,3 +137,7 @@ jobs:
       - name: Example (MPSCQ)
         run: |
           cargo run --release --example mq
+          
+      - name: Example (FrozenPipe)
+        run: |
+          cargo run --release --example fp

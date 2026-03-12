@@ -76,12 +76,12 @@ jobs:
           key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
           cache-on-failure: true
 
-      - name: FrozenFile
+      - name: Example (FrozenFile)
         run: |
           cargo run --release --example ff w
           cargo run --release --example ff r
           
-      - name: FrozenMMap
+      - name: Example (FrozenMMap)
         run: |
           cargo run --release --example fm  
           
@@ -96,6 +96,10 @@ jobs:
       - name: Example (MPSCQ)
         run: |
           cargo run --release --example mq
+          
+      - name: Example (FrozenPipe)
+        run: |
+          cargo run --release --example fp
 
   release:
     needs: examples
