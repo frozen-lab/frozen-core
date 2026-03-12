@@ -1,12 +1,8 @@
 [![License](https://img.shields.io/github/license/frozen-lab/frozen_core?logo=open-source-initiative&logoColor=white)](https://github.com/frozen-lab/frozen_core/blob/master/LICENSE)
 [![Latest Version](https://img.shields.io/crates/v/frozen_core.svg)](https://crates.io/crates/frozen_core)
 [![Tests](https://github.com/frozen-lab/frozen_core/actions/workflows/tests.yaml/badge.svg)](https://github.com/frozen-lab/frozen_core/actions/workflows/tests.yaml)
-[![Release](https://github.com/frozen-lab/frozen-core/actions/workflows/release.yaml/badge.svg?branch=master)](https://github.com/frozen-lab/frozen-core/actions/workflows/release.yaml)
-
-[![Last Commits](https://img.shields.io/github/last-commit/frozen-lab/frozen_core?logo=git&logoColor=white)](https://github.com/frozen-lab/frozen_core/commits/main)
 [![Pull Requests](https://img.shields.io/github/issues-pr/frozen-lab/frozen_core?logo=github&logoColor=white)](https://github.com/frozen-lab/frozen_core/pulls)
 [![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/frozen-lab/frozen_core?logo=github&logoColor=white)](https://github.com/frozen-lab/frozen_core/issues)
-[![Commits](https://img.shields.io/github/commit-activity/t/frozen-lab/frozen_core?logo=git&logoColor=white)](https://github.com/frozen-lab/frozen_core/commits)
 
 # FrozenCore
 
