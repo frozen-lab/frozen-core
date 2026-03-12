@@ -40,9 +40,9 @@ mod posix;
 
 use crate::error::{FrozenErr, FrozenRes};
 
-/// file descriptor for [`FrozenFile`]
+/// File descriptor for [`FrozenFile`]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub type FFId = libc::c_int;
+pub type TFileId = libc::c_int;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 type TFile = posix::POSIXFile;

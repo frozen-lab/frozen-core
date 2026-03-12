@@ -1,4 +1,4 @@
-use super::{new_err, new_err_default, FFId, FFileErr};
+use super::{new_err, new_err_default, FFileErr, TFileId};
 use crate::{error::FrozenRes, hints};
 use libc::{
     access, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite, pwritev,
@@ -14,7 +14,7 @@ use std::{
 static IOV_MAX_CACHE: OnceLock<usize> = OnceLock::new();
 
 /// placeholder value for when current fd is closed
-pub(in crate::ffile) const CLOSED_FD: FFId = FFId::MIN;
+pub(in crate::ffile) const CLOSED_FD: TFileId = TFileId::MIN;
 
 /// max allowed retries for `EINTR` errors
 const MAX_RETRIES: usize = 0x0A;
@@ -32,7 +32,7 @@ unsafe impl Sync for POSIXFile {}
 impl POSIXFile {
     /// Read file descriptor of [`POSIXFile`]
     #[inline]
-    pub(super) fn fd(&self) -> FFId {
+    pub(super) fn fd(&self) -> TFileId {
         self.0.load(atomic::Ordering::Acquire)
     }
 
@@ -63,6 +63,11 @@ impl POSIXFile {
     /// durability we need
     pub(super) unsafe fn new(path: &std::path::Path) -> FrozenRes<Self> {
         let fd = open_raw(path, prep_flags())?;
+
+        // best-effort call to provide a hint to the kernel that the file will be accessed in a random pattern
+        #[cfg(target_os = "linux")]
+        f_advise_raw(fd)?;
+
         Ok(Self(atomic::AtomicI32::new(fd)))
     }
 
@@ -85,8 +90,8 @@ impl POSIXFile {
     ///
     /// ## Why do we retry?
     ///
-    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
-    /// is guaranteed, so the syscall must be retried
+    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
+    /// guaranteed, so the syscall must be retried
     pub(super) unsafe fn flock(&self) -> FrozenRes<()> {
         flock_raw(self.fd())
     }
@@ -208,8 +213,8 @@ impl POSIXFile {
     ///
     /// ## Why do we retry?
     ///
-    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
-    /// is guaranteed, so the syscall must be retried
+    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
+    /// guaranteed, so the syscall must be retried
     ///
     /// ## `F_FULLFSYNC` vs `fsync`
     ///
@@ -236,8 +241,8 @@ impl POSIXFile {
     ///
     /// ## Why do we retry?
     ///
-    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
-    /// is guaranteed, so the syscall must be retried
+    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
+    /// guaranteed, so the syscall must be retried
     ///
     /// ## `fsync` vs `fdatasync`
     ///
@@ -263,8 +268,8 @@ impl POSIXFile {
     ///
     /// ## Why do we retry?
     ///
-    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
-    /// is guaranteed, so the syscall must be retried
+    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
+    /// guaranteed, so the syscall must be retried
     #[cfg(target_os = "linux")]
     pub(super) unsafe fn sync_range(&self, offset: usize, len: usize) -> FrozenRes<()> {
         sync_file_range_raw(self.fd(), offset, len)
@@ -536,7 +541,7 @@ impl POSIXFile {
 ///
 /// To remain sane across ownership models, containers, and shared filesystems,
 /// we explicitly retry the `open()` w/o `O_NOATIME` when `EPERM` is encountered
-unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenRes<FFId> {
+unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenRes<TFileId> {
     let cpath = path_to_cstring(path)?;
 
     // write + read permissions
@@ -590,7 +595,7 @@ unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenRes<FFId> {
     }
 }
 
-unsafe fn close_raw(fd: FFId) -> FrozenRes<()> {
+unsafe fn close_raw(fd: TFileId) -> FrozenRes<()> {
     if close(fd) == 0 {
         return Ok(());
     }
@@ -616,7 +621,7 @@ unsafe fn close_raw(fd: FFId) -> FrozenRes<()> {
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn fdatasync_raw(fd: FFId) -> FrozenRes<()> {
+unsafe fn fdatasync_raw(fd: TFileId) -> FrozenRes<()> {
     let mut retries = 0; // only for EIO & EINTR errors
     loop {
         if hints::likely(libc::fdatasync(fd) == 0) {
@@ -658,7 +663,7 @@ unsafe fn fdatasync_raw(fd: FFId) -> FrozenRes<()> {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn f_fullsync_raw(fd: FFId) -> FrozenRes<()> {
+unsafe fn f_fullsync_raw(fd: TFileId) -> FrozenRes<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
         if hints::likely(libc::fcntl(fd, libc::F_FULLFSYNC) == 0) {
@@ -707,9 +712,9 @@ unsafe fn f_fullsync_raw(fd: FFId) -> FrozenRes<()> {
 ///
 /// ## Why do we retry?
 ///
-/// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
-/// is guaranteed, so the syscall must be retried
-unsafe fn fsync_raw(fd: FFId) -> FrozenRes<()> {
+/// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
+/// guaranteed, so the syscall must be retried
+unsafe fn fsync_raw(fd: TFileId) -> FrozenRes<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
         if hints::unlikely(libc::fsync(fd) != 0) {
@@ -747,7 +752,7 @@ unsafe fn fsync_raw(fd: FFId) -> FrozenRes<()> {
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn sync_file_range_raw(fd: FFId, offset: usize, len: usize) -> FrozenRes<()> {
+unsafe fn sync_file_range_raw(fd: TFileId, offset: usize, len: usize) -> FrozenRes<()> {
     let flag = libc::SYNC_FILE_RANGE_WRITE;
     let mut retries = 0; // only for EINTR errors
 
@@ -809,10 +814,10 @@ unsafe fn sync_file_range_raw(fd: FFId, offset: usize, len: usize) -> FrozenRes<
 ///
 /// ## Why do we retry?
 ///
-/// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
-/// is guaranteed, so the syscall must be retried
+/// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
+/// guaranteed, so the syscall must be retried
 #[cfg(target_os = "linux")]
-unsafe fn fallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
+unsafe fn fallocate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
         if hints::likely(libc::fallocate(fd, 0, curr_len as off_t, len_to_add as off_t) == 0) {
@@ -856,9 +861,9 @@ unsafe fn fallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenR
 ///
 /// ## Why do we retry?
 ///
-/// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
-/// is guaranteed, so the syscall must be retried
-unsafe fn ftruncate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
+/// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
+/// guaranteed, so the syscall must be retried
+unsafe fn ftruncate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
     let new_len = (curr_len + len_to_add) as off_t;
     let mut retries = 0; // only for EINTR errors
 
@@ -923,10 +928,10 @@ unsafe fn ftruncate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenR
 ///
 /// ## Why do we retry?
 ///
-/// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
-/// is guaranteed, so the syscall must be retried
+/// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
+/// guaranteed, so the syscall must be retried
 #[cfg(target_os = "macos")]
-unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
+unsafe fn f_preallocate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
     let mut retries = 0; // only for EINTR errors
 
     // NOTE: by default we try w/ contiguous allocations for optimal perf, when not available,
@@ -989,7 +994,7 @@ unsafe fn f_preallocate_raw(fd: FFId, curr_len: usize, len_to_add: usize) -> Fro
     }
 }
 
-unsafe fn flock_raw(fd: FFId) -> FrozenRes<()> {
+unsafe fn flock_raw(fd: TFileId) -> FrozenRes<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
         if flock(fd, LOCK_EX | LOCK_NB) == 0 {
@@ -1122,6 +1127,53 @@ fn extract_parent_dir(path: &std::path::Path) -> std::path::PathBuf {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => std::path::Path::new(".").to_path_buf(),
+    }
+}
+
+/// Provide access pattern hint using `posix_fadvise(POSIX_FADV_RANDOM)`
+///
+/// ## Semantics
+///
+/// This syscall provides a hint to the kernel that the file will be accessed
+/// in a random pattern. The kernel may disable read-ahead heuristics for the file.
+///
+/// ## Best-effort behavior
+///
+/// This call is purely advisory. If the kernel or filesystem does not support
+/// the hint, we silently ignore the error and proceed.
+///
+/// ## Why do we retry?
+///
+/// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
+/// guaranteed, so the syscall must be retried
+#[inline]
+#[cfg(target_os = "linux")]
+unsafe fn f_advise_raw(fd: TFileId) -> FrozenRes<()> {
+    let mut retries = 0;
+    loop {
+        let res = libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_RANDOM);
+        if res == 0 {
+            return Ok(());
+        }
+
+        let err_msg = err_msg(res);
+        match res {
+            EINTR => {
+                if retries < MAX_RETRIES {
+                    retries += 1;
+                    continue;
+                }
+
+                return new_err(FFileErr::Unk, err_msg);
+            }
+
+            // invalid fd
+            EBADF | libc::ENOSYS | EINVAL => return new_err(FFileErr::Hcf, err_msg),
+
+            // as this is an best-effort call, we simply ignore if the call failed or advisory
+            // hint is not supported
+            _ => return Ok(()),
+        }
     }
 }
 
@@ -1879,6 +1931,17 @@ mod tests {
                     file.sync().unwrap();
                     file.close().unwrap();
                 }
+            }
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn ok_f_advice_random() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                f_advise_raw(file.fd()).unwrap();
             }
         }
     }
