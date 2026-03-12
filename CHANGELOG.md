@@ -1,5 +1,10 @@
 # Changelog
 
+## `0.0.11`
+
+- Impl of `f_advise_raw` (linux only best effort syscall) for `FrozenFile`
+- Use of _io_lock_ in `FrozenPipe`
+
 ## `0.0.10`
 
 - Impl of `mpscq` module
