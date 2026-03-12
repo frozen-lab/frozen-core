@@ -828,3 +828,546 @@ impl WriteReq {
         Self { alloc, index, chunks }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        bpool::{BPBackend, BPCfg, BufPool},
+        error::TEST_MID,
+        ffile::{FFCfg, FrozenFile},
+    };
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const CHUNK: usize = 0x20;
+    const INIT: usize = 0x20;
+    const FLUSH: Duration = Duration::from_micros(10);
+
+    fn new_env() -> (tempfile::TempDir, FrozenPipe) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tmp_pipe");
+
+        let file = FrozenFile::new(FFCfg {
+            mid: TEST_MID,
+            path,
+            chunk_size: CHUNK,
+            initial_chunk_amount: INIT,
+        })
+        .unwrap();
+        let pool = BufPool::new(BPCfg {
+            mid: TEST_MID,
+            chunk_size: CHUNK,
+            backend: BPBackend::Prealloc { capacity: 0x100 },
+        });
+
+        let pipe = FrozenPipe::new(file, pool, FLUSH).unwrap();
+
+        (dir, pipe)
+    }
+
+    mod lifecycle {
+        use super::*;
+
+        #[test]
+        fn ok_new() {
+            let (_dir, pipe) = new_env();
+            assert_eq!(pipe.core.epoch.load(atomic::Ordering::Acquire), 0);
+        }
+
+        #[test]
+        fn ok_drop() {
+            let (_dir, pipe) = new_env();
+            drop(pipe);
+        }
+    }
+
+    mod fp_write {
+        use super::*;
+
+        #[test]
+        fn ok_write_and_wait() {
+            let (_dir, pipe) = new_env();
+
+            let buf = vec![0xAB; CHUNK];
+            let epoch = pipe.write(&buf, 0).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+        }
+
+        #[test]
+        fn ok_write_multiple_chunks() {
+            let (_dir, pipe) = new_env();
+
+            let buf = vec![0xAA; CHUNK * 4];
+            let epoch = pipe.write(&buf, 0).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+        }
+
+        #[test]
+        fn ok_force_durability() {
+            let (_dir, pipe) = new_env();
+
+            let buf = vec![1u8; CHUNK];
+            let epoch = pipe.write(&buf, 0).unwrap();
+            pipe.force_durability(epoch).unwrap();
+        }
+
+        #[test]
+        fn ok_write_epoch_monotonic() {
+            let (_dir, pipe) = new_env();
+            let buf = vec![1u8; CHUNK];
+
+            let e1 = pipe.write(&buf, 0).unwrap();
+            pipe.wait_for_durability(e1).unwrap();
+
+            let e2 = pipe.write(&buf, 1).unwrap();
+            pipe.wait_for_durability(e2).unwrap();
+
+            assert!(e2 >= e1);
+        }
+
+        #[test]
+        fn ok_write_large() {
+            let (_dir, pipe) = new_env();
+            let buf = vec![0xAB; CHUNK * 0x80];
+
+            let epoch = pipe.write(&buf, 0).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+        }
+
+        #[test]
+        fn ok_write_large_batch() {
+            let (_dir, pipe) = new_env();
+
+            for i in 0..0x100 {
+                let buf = vec![i as u8; CHUNK];
+                let epoch = pipe.write(&buf, i).unwrap();
+                pipe.wait_for_durability(epoch).unwrap();
+            }
+        }
+
+        #[test]
+        fn ok_write_is_blocked_at_pool_exhaustion_for_prealloc_backend() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("tmp_pipe");
+
+            let file = FrozenFile::new(FFCfg {
+                mid: TEST_MID,
+                path,
+                chunk_size: CHUNK,
+                initial_chunk_amount: INIT,
+            })
+            .unwrap();
+
+            let pool = BufPool::new(BPCfg {
+                mid: TEST_MID,
+                chunk_size: CHUNK,
+                backend: BPBackend::Prealloc { capacity: 1 },
+            });
+
+            let pipe = Arc::new(FrozenPipe::new(file, pool, FLUSH).unwrap());
+
+            let p2 = pipe.clone();
+            let t = thread::spawn(move || {
+                let buf = vec![1u8; CHUNK];
+                let epoch = p2.write(&buf, 0).unwrap();
+                p2.wait_for_durability(epoch).unwrap();
+            });
+
+            thread::sleep(Duration::from_millis(0x0A));
+
+            let buf = vec![2u8; CHUNK];
+            let epoch = pipe.write(&buf, 1).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+
+            t.join().unwrap();
+        }
+    }
+
+    mod fp_read {
+        use super::*;
+
+        #[test]
+        fn ok_read_single_after_write() {
+            let (_dir, pipe) = new_env();
+
+            let buf = vec![0xAB; CHUNK];
+            let epoch = pipe.write(&buf, 0).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+
+            let read = pipe.read_single(0).unwrap();
+            assert_eq!(read, buf);
+        }
+
+        #[test]
+        fn ok_read_2x() {
+            let (_dir, pipe) = new_env();
+
+            let buf = vec![0xAA; CHUNK * 2];
+            let epoch = pipe.write(&buf, 0).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+
+            let read = pipe.read(0, 2).unwrap();
+            assert_eq!(read, buf);
+        }
+
+        #[test]
+        fn ok_read_4x() {
+            let (_dir, pipe) = new_env();
+
+            let buf = vec![0xBB; CHUNK * 4];
+            let epoch = pipe.write(&buf, 0).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+
+            let read = pipe.read(0, 4).unwrap();
+            assert_eq!(read, buf);
+        }
+
+        #[test]
+        fn ok_read_multi_generic() {
+            let (_dir, pipe) = new_env();
+
+            let buf = vec![0xCC; CHUNK * 6];
+            let epoch = pipe.write(&buf, 0).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+
+            let read = pipe.read(0, 6).unwrap();
+            assert_eq!(read, buf);
+        }
+
+        #[test]
+        fn ok_read_multiple_indices() {
+            let (_dir, pipe) = new_env();
+
+            for i in 0..8 {
+                let buf = vec![i as u8; CHUNK];
+                let epoch = pipe.write(&buf, i).unwrap();
+                pipe.wait_for_durability(epoch).unwrap();
+            }
+
+            for i in 0..8 {
+                let read = pipe.read_single(i).unwrap();
+                assert_eq!(read, vec![i as u8; CHUNK]);
+            }
+        }
+
+        #[test]
+        fn ok_overwrite_same_index() {
+            let (_dir, pipe) = new_env();
+
+            let buf1 = vec![0xAA; CHUNK];
+            let e1 = pipe.write(&buf1, 0).unwrap();
+            pipe.wait_for_durability(e1).unwrap();
+
+            let buf2 = vec![0xBB; CHUNK];
+            let e2 = pipe.write(&buf2, 0).unwrap();
+            pipe.wait_for_durability(e2).unwrap();
+
+            let read = pipe.read_single(0).unwrap();
+            assert_eq!(read, buf2);
+        }
+
+        #[test]
+        fn ok_large_read_multi() {
+            let (_dir, pipe) = new_env();
+
+            let buf = vec![0x7A; CHUNK * 0x10];
+            let epoch = pipe.write(&buf, 0).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+
+            let read = pipe.read(0, 0x10).unwrap();
+            assert_eq!(read, buf);
+        }
+
+        #[test]
+        fn ok_read_concurrent() {
+            const THREADS: usize = 8;
+
+            let (_dir, pipe) = new_env();
+            let pipe = Arc::new(pipe);
+
+            for i in 0..THREADS {
+                let buf = vec![i as u8; CHUNK];
+                let epoch = pipe.write(&buf, i).unwrap();
+                pipe.wait_for_durability(epoch).unwrap();
+            }
+
+            let mut handles = Vec::new();
+
+            for i in 0..THREADS {
+                let pipe = pipe.clone();
+
+                handles.push(thread::spawn(move || {
+                    let read = pipe.read_single(i).unwrap();
+                    assert_eq!(read, vec![i as u8; CHUNK]);
+                }));
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+        }
+
+        #[test]
+        fn ok_concurrent_read_write() {
+            let (_dir, pipe) = new_env();
+            let pipe = Arc::new(pipe);
+
+            let writer = {
+                let pipe = pipe.clone();
+                thread::spawn(move || {
+                    for i in 0..0x40 {
+                        let buf = vec![i as u8; CHUNK];
+                        let epoch = pipe.write(&buf, i).unwrap();
+                        pipe.wait_for_durability(epoch).unwrap();
+                    }
+                })
+            };
+
+            let reader = {
+                let pipe = pipe.clone();
+                thread::spawn(move || {
+                    for _ in 0..0x40 {
+                        let _ = pipe.read_single(0);
+                    }
+                })
+            };
+
+            writer.join().unwrap();
+            reader.join().unwrap();
+        }
+
+        #[test]
+        fn ok_read_after_grow() {
+            let (_dir, pipe) = new_env();
+
+            pipe.grow(8).unwrap();
+
+            let buf = vec![0x5A; CHUNK];
+            let epoch = pipe.write(&buf, INIT).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+
+            let read = pipe.read_single(INIT).unwrap();
+            assert_eq!(read, buf);
+        }
+    }
+
+    mod batching {
+        use super::*;
+
+        #[test]
+        fn ok_multiple_writes_single_batch() {
+            let (_dir, pipe) = new_env();
+
+            let mut epochs = Vec::new();
+            for i in 0..0x10 {
+                let buf = vec![i as u8; CHUNK];
+                epochs.push(pipe.write(&buf, i).unwrap());
+            }
+
+            for e in epochs {
+                pipe.wait_for_durability(e).unwrap();
+            }
+
+            assert!(pipe.core.epoch.load(atomic::Ordering::Acquire) > 0);
+        }
+    }
+
+    mod fp_grow {
+        use super::*;
+
+        #[test]
+        fn ok_grow_file() {
+            let (_dir, pipe) = new_env();
+            let curr_len = pipe.core.file.length().unwrap();
+
+            pipe.grow(0x10).unwrap();
+            let new_len = pipe.core.file.length().unwrap();
+
+            assert_eq!(new_len, curr_len + (0x10 * pipe.core.chunk_size));
+        }
+
+        #[test]
+        fn ok_write_after_grow() {
+            let (_dir, pipe) = new_env();
+            pipe.grow(0x10).unwrap();
+
+            let buf = vec![0xBB; CHUNK];
+            let epoch = pipe.write(&buf, INIT).unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+        }
+
+        #[test]
+        fn ok_grow_while_writing() {
+            let (_dir, pipe) = new_env();
+            let pipe = Arc::new(pipe);
+            let curr_len = pipe.core.file.length().unwrap();
+
+            let p2 = pipe.clone();
+            let writer = thread::spawn(move || {
+                for i in 0..INIT {
+                    let buf = vec![1u8; CHUNK];
+                    let epoch = p2.write(&buf, i).unwrap();
+                    p2.wait_for_durability(epoch).unwrap();
+                }
+            });
+
+            thread::sleep(Duration::from_millis(10));
+
+            pipe.grow(0x3A).unwrap();
+            writer.join().unwrap();
+
+            let new_len = pipe.core.file.length().unwrap();
+            assert_eq!(new_len, curr_len + (0x3A * pipe.core.chunk_size));
+        }
+    }
+
+    mod concurrency {
+        use super::*;
+
+        #[test]
+        fn ok_multi_writer() {
+            const THREADS: usize = 8;
+            const ITERS: usize = 0x100;
+
+            let (_dir, pipe) = new_env();
+            let pipe = Arc::new(pipe);
+
+            let mut handles = Vec::new();
+            for t in 0..THREADS {
+                let pipe = pipe.clone();
+
+                handles.push(thread::spawn(move || {
+                    for i in 0..ITERS {
+                        let buf = vec![t as u8; CHUNK];
+                        let epoch = pipe.write(&buf, i).unwrap();
+                        pipe.wait_for_durability(epoch).unwrap();
+                    }
+                }));
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+        }
+
+        #[test]
+        fn ok_barrier_start_parallel_writes() {
+            const THREADS: usize = 8;
+
+            let (_dir, pipe) = new_env();
+            let pipe = Arc::new(pipe);
+            let barrier = Arc::new(Barrier::new(THREADS));
+
+            let mut handles = Vec::new();
+
+            for i in 0..THREADS {
+                let pipe = pipe.clone();
+                let barrier = barrier.clone();
+
+                handles.push(thread::spawn(move || {
+                    barrier.wait();
+
+                    let buf = vec![i as u8; CHUNK];
+                    let epoch = pipe.write(&buf, i).unwrap();
+                    pipe.wait_for_durability(epoch).unwrap();
+                }));
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+        }
+    }
+
+    mod durability_wait {
+        use super::*;
+
+        #[test]
+        fn ok_wait_blocks_until_flush() {
+            let (_dir, pipe) = new_env();
+
+            let buf = vec![0x55; CHUNK];
+            let epoch = pipe.write(&buf, 0).unwrap();
+
+            let start = Instant::now();
+            pipe.wait_for_durability(epoch).unwrap();
+
+            assert!(start.elapsed() >= Duration::from_micros(1));
+        }
+
+        #[test]
+        fn ok_force_durability_concurrent() {
+            let (_dir, pipe) = new_env();
+            let pipe = Arc::new(pipe);
+
+            let mut handles = Vec::new();
+            for i in 0..0x0A {
+                let pipe = pipe.clone();
+
+                handles.push(thread::spawn(move || {
+                    let buf = vec![i as u8; CHUNK];
+                    let epoch = pipe.write(&buf, i).unwrap();
+                    pipe.force_durability(epoch).unwrap();
+                }));
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+        }
+    }
+
+    mod shutdown {
+        use super::*;
+
+        #[test]
+        fn ok_drop_with_pending_writes() {
+            let (_dir, pipe) = new_env();
+
+            let buf = vec![0xAA; CHUNK];
+            pipe.write(&buf, 0).unwrap();
+            drop(pipe);
+        }
+
+        #[test]
+        fn ok_drop_during_activity() {
+            let (_dir, pipe) = new_env();
+            let pipe = Arc::new(pipe);
+
+            let p2 = pipe.clone();
+
+            let handle = thread::spawn(move || {
+                let buf = vec![1u8; CHUNK];
+                let epoch = p2.write(&buf, 0).unwrap();
+                p2.wait_for_durability(epoch).unwrap();
+            });
+
+            thread::sleep(Duration::from_millis(10));
+            drop(pipe);
+
+            handle.join().unwrap();
+        }
+
+        #[test]
+        fn ok_drop_while_writer_waiting() {
+            let (_dir, pipe) = new_env();
+            let pipe = Arc::new(pipe);
+
+            let p2 = pipe.clone();
+            let handle = thread::spawn(move || {
+                for i in 0..0x80 {
+                    let buf = vec![1u8; CHUNK];
+                    let epoch = p2.write(&buf, i).unwrap();
+                    p2.wait_for_durability(epoch).unwrap();
+                }
+            });
+
+            thread::sleep(Duration::from_millis(0x0A));
+            drop(pipe);
+
+            handle.join().unwrap();
+        }
+    }
+}
