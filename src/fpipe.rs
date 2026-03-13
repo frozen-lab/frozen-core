@@ -202,6 +202,10 @@ impl FrozenPipe {
     /// ```
     #[inline(always)]
     pub fn write(&self, buf: &[u8], index: usize) -> FrozenRes<u64> {
+        if let Some(err) = self.core.get_sync_error() {
+            return Err(err);
+        }
+
         let chunk_size = self.core.chunk_size;
         let chunks = buf.len().div_ceil(chunk_size);
 
@@ -226,16 +230,16 @@ impl FrozenPipe {
             src_off += copy;
         }
 
+        let epoch = self.core.epoch.load(atomic::Ordering::Acquire);
         let req = WriteReq::new(index, chunks, alloc);
         self.core.mpscq.push(req);
 
-        Ok(self.core.epoch.load(atomic::Ordering::Acquire) + 1)
+        Ok(epoch)
     }
 
     /// Read a single chunk from the given `index`
     ///
     /// This function performs a blocking read operation
-    ///
     ///
     /// ## Example
     ///
@@ -492,8 +496,10 @@ impl FrozenPipe {
     pub fn grow(&self, count: usize) -> FrozenRes<()> {
         loop {
             // NOTE: we must make sure there are no remaining items in the queue left for sync
-            let epoch = self.core.epoch.load(atomic::Ordering::Acquire);
-            self.force_durability(epoch)?;
+            if hints::likely(!self.core.mpscq.is_empty()) {
+                let epoch = self.core.epoch.load(atomic::Ordering::Acquire);
+                self.force_durability(epoch)?;
+            }
 
             // we acquire an exclusive lock to block write, read and sync ops
             let lock = self.core.acquire_exclusive_io_lock()?;
@@ -512,7 +518,7 @@ impl FrozenPipe {
     }
 
     fn internal_wait(&self, epoch: u64) -> FrozenRes<()> {
-        if hints::unlikely(self.core.epoch.load(atomic::Ordering::Acquire) >= epoch) {
+        if hints::unlikely(self.core.epoch.load(atomic::Ordering::Acquire) > epoch) {
             return Ok(());
         }
 
@@ -530,7 +536,7 @@ impl FrozenPipe {
                 return Err(sync_err);
             }
 
-            if self.core.epoch.load(atomic::Ordering::Acquire) >= epoch {
+            if self.core.epoch.load(atomic::Ordering::Acquire) > epoch {
                 return Ok(());
             }
 
@@ -551,8 +557,7 @@ impl Drop for FrozenPipe {
             let _ = handle.join();
         }
 
-        // INFO: we must acquire an exclusive lock, to prevent dropping while sync,
-        // growing or any read/write ops
+        // we must acquire an exclusive lock, to prevent dropping while sync, growing or any io ops
         let _io_lock = self.core.acquire_exclusive_io_lock();
 
         // free up the boxed error (if any)

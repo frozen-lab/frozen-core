@@ -625,16 +625,14 @@ where
     T: Sized + Send + Sync,
 {
     fn drop(&mut self) {
-        // safeguard aginst `delete()` or drop-on-drop (if somehow its possible)
-        let not_unmapped = !self.core.closed.swap(true, atomic::Ordering::Release);
+        self.core.closed.store(true, atomic::Ordering::Release);
         self.core.cv.notify_one(); // notify flusher tx to shut
 
         if let Some(handle) = self.tx.take() {
             let _ = handle.join();
         }
 
-        // INFO: we must acquire an exclusive lock, to prevent dropping while sync,
-        // growing or any read/write ops
+        // we must acquire an exclusive lock, to prevent dropping while sync, growing or any io ops
         let _io_lock = self.core.acquire_exclusive_io_lock();
 
         // free up the boxed error (if any)
@@ -645,9 +643,7 @@ where
             }
         }
 
-        if not_unmapped {
-            let _ = self.munmap();
-        }
+        let _ = self.munmap();
     }
 }
 
