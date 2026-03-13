@@ -27,7 +27,7 @@ Add following to your `Cargo.toml`,
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.11", default-features = true }
+frozen-core = { version = "0.0.12", default-features = true }
 ```
 
 > [!TIP]
@@ -41,7 +41,7 @@ To use the `ffile` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.11", default-features = false, features = ["ffile"] }
+frozen-core = { version = "0.0.12", default-features = false, features = ["ffile"] }
 ```
 
 `FrozenFile` is currently available on the following platforms,
@@ -65,7 +65,7 @@ To use the `fmmap` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.11", default-features = false, features = ["fmmap"] }
+frozen-core = { version = "0.0.12", default-features = false, features = ["fmmap"] }
 ```
 
 `FrozenMMap` is currently available on the following platforms,
@@ -141,7 +141,7 @@ To use the `error` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.11", default-features = false, features = ["error"] }
+frozen-core = { version = "0.0.12", default-features = false, features = ["error"] }
 ```
 
 ## Hints
@@ -152,7 +152,7 @@ To use the `hints` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.11", default-features = false, features = ["hints"] }
+frozen-core = { version = "0.0.12", default-features = false, features = ["hints"] }
 ```
 
 ## Crc32
@@ -170,7 +170,7 @@ To use the `crc32` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.11", default-features = false, features = ["crc32"] }
+frozen-core = { version = "0.0.12", default-features = false, features = ["crc32"] }
 ```
 
 `Crc32C` is available on following architectures,
@@ -207,7 +207,7 @@ To use the `bpool` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.11", default-features = false, features = ["bpool"] }
+frozen-core = { version = "0.0.12", default-features = false, features = ["bpool"] }
 ```
 
 Read the example below for usage details,
@@ -250,7 +250,7 @@ To use the `mpscq` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.11", default-features = false, features = ["mpscq"] }
+frozen-core = { version = "0.0.12", default-features = false, features = ["mpscq"] }
 ```
 
 Read the example below for usage details,
@@ -283,7 +283,7 @@ To use the `fpipe` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.11", default-features = false, features = ["fpipe"] }
+frozen-core = { version = "0.0.12", default-features = false, features = ["fpipe"] }
 ```
 
 Read the example below for usage details,

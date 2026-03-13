@@ -1,5 +1,10 @@
 # Changelog
 
+## `0.0.12`
+
+- Impl of `write_sync` in `FrozenMMap`
+- Improved epoch handling for `FrozenPipe`
+
 ## `0.0.11`
 
 - Impl of `f_advise_raw` (linux only best effort syscall) for `FrozenFile`
