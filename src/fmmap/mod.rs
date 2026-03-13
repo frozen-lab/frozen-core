@@ -12,7 +12,7 @@
 //!     path,
 //!     mid: 0u8,
 //!     initial_count: 0x0A,
-//!     flush_duration: std::time::Duration::from_micros(100),
+//!     flush_duration: std::time::Duration::from_micros(0x96),
 //! };
 //!
 //! let mmap = FrozenMMap::<u64>::new(cfg.clone()).unwrap();
@@ -159,7 +159,7 @@ pub struct FMCfg {
 ///     path,
 ///     mid: 0u8,
 ///     initial_count: 0x0A,
-///     flush_duration: std::time::Duration::from_micros(100),
+///     flush_duration: std::time::Duration::from_micros(0x96),
 /// };
 ///
 /// let mmap = FrozenMMap::<u64>::new(cfg.clone()).unwrap();
@@ -279,16 +279,16 @@ where
     ///     path,
     ///     mid: 0u8,
     ///     initial_count: 0x04,
-    ///     flush_duration: std::time::Duration::from_micros(100),
+    ///     flush_duration: std::time::Duration::from_micros(0x60),
     /// };
     ///
     /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
     ///
-    /// let (_, epoch) = mmap.write(0, |v| *v = 123).unwrap();
+    /// let (_, epoch) = mmap.write(0, |v| *v = 0x8A).unwrap();
     /// mmap.wait_for_durability(epoch).unwrap();
     ///
     /// let val = mmap.read(0, |v| *v).unwrap();
-    /// assert_eq!(val, 123);
+    /// assert_eq!(val, 0x8A);
     /// ```
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
         if let Some(sync_err) = self.core.get_sync_error() {
@@ -296,7 +296,7 @@ where
         }
 
         let durable_epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
-        if durable_epoch == 0 || durable_epoch > epoch {
+        if durable_epoch > epoch {
             return Ok(());
         }
 
@@ -335,7 +335,7 @@ where
     ///     path,
     ///     mid: 0u8,
     ///     initial_count: 0x02,
-    ///     flush_duration: std::time::Duration::from_micros(100),
+    ///     flush_duration: std::time::Duration::from_micros(0x60),
     /// };
     ///
     /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
@@ -344,7 +344,7 @@ where
     /// let val = mmap.read(0, |v| *v).unwrap();
     /// assert_eq!(val, 0x0A);
     /// ```
-    #[inline]
+    #[inline(always)]
     pub fn read<R>(&self, index: usize, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
@@ -370,7 +370,7 @@ where
     ///     path,
     ///     mid: 0u8,
     ///     initial_count: 0x02,
-    ///     flush_duration: std::time::Duration::from_micros(100),
+    ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
     /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
@@ -381,8 +381,13 @@ where
     /// let val = mmap.read(1, |v| *v).unwrap();
     /// assert_eq!(val, 0x2B);
     /// ```
-    #[inline]
+    #[inline(always)]
     pub fn write<R>(&self, index: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
+        // propagate prev errors
+        if let Some(err) = self.core.get_sync_error() {
+            return Err(err);
+        }
+
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
 
@@ -394,6 +399,71 @@ where
         self.core.dirty.store(true, atomic::Ordering::Release);
 
         Ok((res, epoch))
+    }
+
+    /// Write/update a `T` at given `index` via callback (`f`) w/ instant durability
+    ///
+    /// This function performs a blocking hard-sync, unlike [`FrozenMMap::write`], the update is immediately
+    /// persisted to the underlying storage device
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_write_sync");
+    ///
+    /// let cfg = FMCfg {
+    ///     path,
+    ///     mid: 0u8,
+    ///     initial_count: 0x02,
+    ///     flush_duration: std::time::Duration::from_micros(0x96),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    /// let (_, epoch) = mmap.write_sync(0, |v| *v = 0xC0DE).unwrap();
+    ///
+    /// let val = mmap.read(0, |v| *v).unwrap();
+    /// assert_eq!(val, 0xC0DE);
+    /// ```
+    #[inline(always)]
+    pub fn write_sync<R>(&self, index: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
+        // propagate prev errors
+        if let Some(err) = self.core.get_sync_error() {
+            return Err(err);
+        }
+
+        let offset = Self::SLOT_SIZE * index;
+
+        // we use exlusive lock as we perform blocking hard sync
+        let _guard = self.core.acquire_exclusive_io_lock()?;
+
+        let slot = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
+        let _oi_guard = slot.lock();
+        let res = unsafe { f(slot.get_mut()) };
+
+        // blocking hard sync
+        self.core.sync()?;
+
+        // NOTE: we hard sync we flushed an entier batch, so we can skip the sync via flush_tx as the
+        // current batch is durable
+
+        let prev = self.core.dirty.swap(false, atomic::Ordering::AcqRel);
+        let prev_epoch = self.core.durable_epoch.fetch_add(1, atomic::Ordering::Release);
+
+        // NOTE: we must also notify cv's waiting for durability (we skip if there was no batch to sync)
+        if prev {
+            let _g = self
+                .core
+                .durable_lock
+                .lock()
+                .map_err(|e| new_err_raw(FMMapErr::Lpn, e))?;
+
+            self.core.durable_cv.notify_all();
+        }
+
+        Ok((res, prev_epoch))
     }
 
     /// Grow [`FrozenMMap`] by given `slot_count` of `T`, where each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`]
@@ -425,7 +495,7 @@ where
     ///     path,
     ///     mid: 0u8,
     ///     initial_count: 0x02,
-    ///     flush_duration: std::time::Duration::from_micros(100),
+    ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
     /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
@@ -502,7 +572,7 @@ where
     ///     mid: 0u8,
     ///     path: path.clone(),
     ///     initial_count: 0x04,
-    ///     flush_duration: std::time::Duration::from_micros(100),
+    ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
     /// let mut mmap = FrozenMMap::<u64>::new(cfg).unwrap();
@@ -658,7 +728,7 @@ impl Core {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn get_sync_error(&self) -> Option<FrozenErr> {
         let ptr = self.error.load(atomic::Ordering::Acquire);
         if hints::likely(ptr.is_null()) {
@@ -915,7 +985,9 @@ mod tests {
             assert!(mmap.core.error.load(atomic::Ordering::Acquire).is_null());
 
             // satisfies wait on epoch works
-            assert!(mmap.wait_for_durability(0).is_ok());
+            let (_, epoch) = mmap.write(0, |f| *f = 0x0A).unwrap();
+            assert_eq!(epoch, 0); // inits from 0
+            assert!(mmap.wait_for_durability(epoch).is_ok());
         }
 
         #[test]
@@ -1077,6 +1149,98 @@ mod tests {
             mmap.write(0, |ptr| *ptr = VAL).unwrap();
             let val = mmap.read(0, |ptr| *ptr).unwrap();
             assert_eq!(val, VAL);
+        }
+    }
+
+    mod fm_write_sync_read {
+        use super::*;
+
+        #[test]
+        fn ok_write_sync_read() {
+            let (_dir, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+
+            mmap.write_sync(0, |v| *v = 0x4C).unwrap();
+
+            let val = mmap.read(0, |v| *v).unwrap();
+            assert_eq!(val, 0x4C);
+        }
+
+        #[test]
+        fn ok_write_sync_wait_returns_immediately() {
+            let (_dir, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+
+            let (_, epoch) = mmap.write_sync(0, |v| *v = 0x6A).unwrap();
+
+            // already durable
+            mmap.wait_for_durability(epoch).unwrap();
+
+            let val = mmap.read(0, |v| *v).unwrap();
+            assert_eq!(val, 0x6A);
+        }
+
+        #[test]
+        fn ok_write_sync_epoch_progression() {
+            let (_dir, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+
+            let (_, e1) = mmap.write_sync(0, |v| *v = 1).unwrap();
+            let (_, e2) = mmap.write_sync(0, |v| *v = 2).unwrap();
+
+            assert!(e2 >= e1);
+
+            mmap.wait_for_durability(e1).unwrap();
+            mmap.wait_for_durability(e2).unwrap();
+        }
+
+        #[test]
+        fn ok_write_sync_followed_by_async_write() {
+            let (_dir, cfg) = new_tmp();
+
+            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+            mmap.write_sync(0, |v| *v = 0x0A).unwrap();
+
+            let (_, epoch) = mmap.write(0, |v| *v = 0x14).unwrap();
+            mmap.wait_for_durability(epoch).unwrap();
+
+            let val = mmap.read(0, |v| *v).unwrap();
+            assert_eq!(val, 0x14);
+        }
+
+        #[test]
+        fn ok_write_sync_makes_prev_batch_durable() {
+            let (_dir, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+
+            let (_, async_epoch) = mmap.write(0, |v| *v = 1).unwrap();
+            mmap.write_sync(1, |v| *v = 2).unwrap();
+            mmap.wait_for_durability(async_epoch).unwrap();
+
+            let v1 = mmap.read(0, |v| *v).unwrap();
+            let v2 = mmap.read(1, |v| *v).unwrap();
+
+            assert_eq!(v1, 1);
+            assert_eq!(v2, 2);
+        }
+
+        #[test]
+        fn ok_write_sync_persists_across_reopen() {
+            let (dir, cfg) = new_tmp();
+            const VAL: u64 = 0x1000;
+
+            {
+                let mmap = FrozenMMap::<u64>::new(cfg.clone()).unwrap();
+                mmap.write_sync(0, |v| *v = VAL).unwrap();
+            }
+
+            {
+                let mmap = FrozenMMap::<u64>::new(cfg.clone()).unwrap();
+                let val = mmap.read(0, |v| *v).unwrap();
+                assert_eq!(val, VAL);
+            }
+
+            drop(dir);
         }
     }
 
