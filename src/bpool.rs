@@ -33,7 +33,7 @@
 //! assert_eq!(alloc2.count, 4);
 //! ```
 
-use crate::error::{FrozenErr, FrozenRes};
+use crate::error::{ErrCode, FrozenErr, FrozenRes};
 use std::{
     ptr,
     sync::{self, atomic},
@@ -413,15 +413,15 @@ impl PreallocState {
 const ERRDOMAIN: u8 = 0x13;
 
 mod err_code {
-    pub struct ErrCode(pub u16, pub &'static str);
+    use super::ErrCode;
 
     /// (768) Lock error (failed or poisoned)
-    pub const LPN: ErrCode = ErrCode(0x300, "lock poisoned while waiting");
+    pub const LPN: ErrCode = ErrCode::new(0x300, "lock poisoned while waiting");
 }
 
 #[inline]
-fn new_err<E: std::fmt::Display>(code: err_code::ErrCode, error: E, mid: u8) -> FrozenErr {
-    FrozenErr::new_raw(mid, ERRDOMAIN, code.0, code.1, error)
+fn new_err<E: std::fmt::Display>(code: ErrCode, error: E, mid: u8) -> FrozenErr {
+    FrozenErr::new_raw(mid, ERRDOMAIN, code, error)
 }
 
 const POOL_IDX_BITS: usize = 0x20;
