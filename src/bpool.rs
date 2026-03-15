@@ -362,10 +362,7 @@ impl PreallocState {
             return Ok(());
         }
 
-        let mut guard = pool
-            .lock
-            .lock()
-            .map_err(|e| new_err_raw(BufPoolErrRes::Lpn, e, pool.cfg.mid))?;
+        let mut guard = pool.lock.lock().map_err(|e| new_err(err_code::LPN, e, pool.cfg.mid))?;
 
         if self.has_free() {
             return Ok(());
@@ -375,7 +372,7 @@ impl PreallocState {
             guard = pool
                 .wait_cv
                 .wait(guard)
-                .map_err(|e| new_err_raw(BufPoolErrRes::Lpn, e, pool.cfg.mid))?;
+                .map_err(|e| new_err(err_code::LPN, e, pool.cfg.mid))?;
         }
 
         Ok(())
@@ -415,32 +412,16 @@ impl PreallocState {
 /// Domain Id for [`BufPool`] is **19**
 const ERRDOMAIN: u8 = 0x13;
 
-/// Error codes for [`BufPool`]
-#[repr(u16)]
-pub enum BufPoolErrRes {
-    /// (768) lock error (failed or poisoned)
-    Lpn = 0x300,
-}
+mod err_code {
+    pub struct ErrCode(pub u16, pub &'static str);
 
-impl BufPoolErrRes {
-    #[inline]
-    fn default_message(&self) -> &'static [u8] {
-        match self {
-            Self::Lpn => b"lock poisoned while waiting for BufPool",
-        }
-    }
+    /// (768) Lock error (failed or poisoned)
+    pub const LPN: ErrCode = ErrCode(0x300, "lock poisoned while waiting");
 }
 
 #[inline]
-fn new_err_raw<E: std::fmt::Display>(res: BufPoolErrRes, error: E, mid: u8) -> FrozenErr {
-    let detail = res.default_message();
-    FrozenErr::new(
-        mid,
-        ERRDOMAIN,
-        res as u16,
-        detail,
-        error.to_string().as_bytes().to_vec(),
-    )
+fn new_err<E: std::fmt::Display>(code: err_code::ErrCode, error: E, mid: u8) -> FrozenErr {
+    FrozenErr::new_raw(mid, ERRDOMAIN, code.0, code.1, error)
 }
 
 const POOL_IDX_BITS: usize = 0x20;
@@ -616,14 +597,14 @@ impl Drop for AllocationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::TEST_MID;
 
     const CAP: usize = 0x20;
     const SIZE: usize = 0x0A;
+    const TEST_MOD_ID: u8 = 0;
 
     fn new_pool_prealloc(capacity: usize) -> BufPool {
         BufPool::new(BPCfg {
-            mid: TEST_MID,
+            mid: TEST_MOD_ID,
             chunk_size: SIZE,
             backend: BPBackend::Prealloc { capacity },
         })
@@ -631,7 +612,7 @@ mod tests {
 
     fn new_pool_dynamic() -> BufPool {
         BufPool::new(BPCfg {
-            mid: TEST_MID,
+            mid: TEST_MOD_ID,
             chunk_size: SIZE,
             backend: BPBackend::Dynamic,
         })
