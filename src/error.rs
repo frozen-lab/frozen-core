@@ -1,109 +1,112 @@
-//! Custom implementations for [`Result<T>`] and [`Err<T>`]
+//! Utilities for error propagation used across `[frozen_core]`
+//!
+//! This module provides,
+//!
+//! - [`FrozenErr`]: a structured error w/ 32-bit identifier
+//! - [`FrozenRes`]: a result alias using [`FrozenErr`]
+//!
+//! ## Id
+//!
+//! Each [`FrozenErr`] uses a 32-bit identifier encoded in following format,
+//!
+//! `| module:8 | domain:8 | reason:16 |`
+//!
+//! This id packs important context which aids in the debugging process
+//!
+//! ## Example
+//!
+//! ```
+//! use frozen_core::error::{FrozenErr, FrozenRes};
+//!
+//! fn read_file() -> FrozenRes<()> {
+//!     Err(FrozenErr::new(1, 2, 0x0033, b"io", b"read failed"))
+//! }
+//!
+//! let err = read_file().unwrap_err();
+//!
+//! assert_eq!(err.id, 0x0102_0033);
+//! assert!(err.context.contains("[io]"));
+//! ```
 
 /// Custom result type w/ [`FrozenErr`] as error type
 pub type FrozenRes<T> = Result<T, FrozenErr>;
 
-/// Custom error object used in [`FrozenRes`]
-#[derive(Clone, Eq, PartialEq)]
+/// Utilities for error propagation used across `[frozen_core]`
+#[derive(Debug, Clone)]
 pub struct FrozenErr {
-    module: u8,
-    domain: u8,
-    reason: u16,
-    detail: &'static [u8],
-    errmsg: Vec<u8>,
+    /// Encoded 32-bit unique identifier for [`FrozenErr`]
+    pub id: u32,
+
+    /// Error context for the [`FrozenErr`]
+    pub context: String,
 }
 
 impl FrozenErr {
-    /// Constrcut a new instance from raw id's
+    /// Construct a new [`FrozenErr`]
     ///
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::error::FrozenErr;
+    /// let err = frozen_core::error::FrozenErr::new(1, 2, 0x0033, b"io", b"failed to read file");
     ///
-    /// let err = FrozenErr::new(1, 2, 0x0033, b"io", b"failed".to_vec());
-    /// assert_eq!(err.compare(0x0033), true);
+    /// assert_eq!(err.id, 0x0102_0033);
+    /// assert!(err.context.contains("[io]"));
+    /// assert!(err.context.contains("failed to read file"));
     /// ```
-    #[inline]
-    pub fn new(module: u8, domain: u8, reason: u16, detail: &'static [u8], errmsg: Vec<u8>) -> Self {
+    #[inline(always)]
+    pub fn new(module: u8, domain: u8, reason: u16, detail: &'static [u8], errmsg: &[u8]) -> Self {
+        let detail_str = String::from_utf8_lossy(detail).to_string();
+        let errmsg_str = String::from_utf8_lossy(errmsg).to_string();
+
         Self {
-            module,
-            domain,
-            reason,
-            detail,
-            errmsg,
+            id: error_id(module, domain, reason),
+            context: format!("[{}] {}", detail_str, errmsg_str),
         }
     }
 
-    /// Compare [`Self::reason`] w/ given `reason` id
+    /// Construct a new [`FrozenErr`] from raw [`Error`] object
     ///
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::error::FrozenErr;
+    /// let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+    /// let err = frozen_core::error::FrozenErr::new_raw(1, 2, 0x0033, b"io", io_err);
     ///
-    /// let err = FrozenErr::new(1, 2, 42, b"test", Vec::new());
-    /// assert!(err.compare(42));
-    /// assert!(!err.compare(7));
+    /// assert_eq!(err.id, 0x0102_0033);
+    /// assert!(err.context.contains("[io]"));
+    /// assert!(err.context.contains("file missing"));
     /// ```
-    #[inline]
-    pub fn compare(&self, reason: u16) -> bool {
-        self.reason == reason
+    #[inline(always)]
+    pub fn new_raw<E: std::fmt::Display>(module: u8, domain: u8, reason: u16, detail: &'static [u8], err: E) -> Self {
+        let detail_str = String::from_utf8_lossy(detail).to_string();
+        let errmsg_str = err.to_string();
+
+        Self {
+            id: error_id(module, domain, reason),
+            context: format!("[{}] {}", detail_str, errmsg_str),
+        }
     }
 
-    /// Construct an `error_id` for [`FrozenErr`]
-    ///
-    /// ## Structure
-    ///
-    /// `| module:8 | domain:8 | reason:16 |`
+    /// Compare two errors by their encoded id's
     ///
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::error::FrozenErr;
+    /// let err1 = frozen_core::error::FrozenErr::new(0, 0, 0x30, b"test", b"something failed");
+    /// let err2 = frozen_core::error::FrozenErr::new(0, 0, 0x30, b"test", b"another message");
     ///
-    /// let err = FrozenErr::new(0x01, 0x02, 0x0033, b"io", Vec::new());
-    /// let eid = err.error_id();
-    ///
-    /// assert_eq!(eid, 0x0102_0033);
+    /// assert!(err1.compare_id(&err2));
     /// ```
-    #[inline]
-    pub const fn error_id(&self) -> u32 {
-        ((self.module as u32) << 24) | ((self.domain as u32) << 16) | (self.reason as u32)
+    #[inline(always)]
+    pub fn compare_id(&self, err: &FrozenErr) -> bool {
+        self.id == err.id
     }
 }
 
-impl core::fmt::Display for FrozenErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let detail = core::str::from_utf8(&self.errmsg).unwrap_or("<non-utf8>");
-        let errmsg = core::str::from_utf8(&self.errmsg).unwrap_or("<non-utf8>");
-
-        #[cfg(test)]
-        return write!(
-            f,
-            "[m={}, d={}, c={}] ({detail}) {errmsg}",
-            self.module, self.domain, self.reason
-        );
-
-        #[cfg(not(test))]
-        write!(f, "[{}] ({detail}) {errmsg}", self.error_id())
-    }
+#[inline(always)]
+const fn error_id(module: u8, domain: u8, reason: u16) -> u32 {
+    ((module as u32) << 0x18) | ((domain as u32) << 0x10) | (reason as u32)
 }
-
-impl core::fmt::Debug for FrozenErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "\n----------\n")?;
-        core::fmt::Display::fmt(self, f)?;
-        write!(f, "\n----------\n")
-    }
-}
-
-/// Default `module_id` for testing
-///
-/// It's only available inside test module across tests, and is never made available outside,
-/// even when `cfg(test)` holds true, rust makes this possible for us ;)
-#[cfg(test)]
-pub const TEST_MID: u8 = 0x00;
 
 #[cfg(test)]
 mod tests {
@@ -114,41 +117,93 @@ mod tests {
         let module = ((eid >> 24) & 0xff) as u8;
         let domain = ((eid >> 16) & 0xff) as u8;
         let reason = (eid & 0xffff) as u16;
+
         (module, domain, reason)
     }
 
     #[test]
+    fn ok_context_exact_format() {
+        let err = FrozenErr::new(1, 2, 3, b"io", b"failure");
+        assert_eq!(err.context, "[io] failure");
+    }
+
+    #[test]
+    fn ok_empty_message() {
+        let err = FrozenErr::new(1, 2, 3, b"io", b"");
+        assert_eq!(err.context, "[io] ");
+    }
+
+    #[test]
+    fn ok_empty_detail() {
+        let err = FrozenErr::new(1, 2, 3, b"", b"failure");
+        assert_eq!(err.context, "[] failure");
+    }
+
+    #[test]
     fn ok_error_id_roundtrip_basic() {
-        let err = FrozenErr::new(0x01, 0x02, 0x0033, b"io", Vec::new());
-        let eid = err.error_id();
+        let err = FrozenErr::new(0x01, 0x02, 0x0033, b"io", b"read failed");
+        let (m, d, r) = from_error_id(err.id);
 
-        assert_eq!(eid, 0x0102_0033);
+        assert_eq!(err.id, 0x0102_0033);
+        assert_eq!((m, d, r), (0x01, 0x02, 0x0033));
+    }
 
-        let (m, d, r) = from_error_id(eid);
-        assert_eq!(m, 0x01);
-        assert_eq!(d, 0x02);
-        assert_eq!(r, 0x0033);
+    #[test]
+    fn ok_new_and_new_raw_same_id() {
+        let e1 = FrozenErr::new(1, 2, 3, b"io", b"fail");
+
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "fail");
+        let e2 = FrozenErr::new_raw(1, 2, 3, b"io", io_err);
+
+        assert_eq!(e1.id, e2.id);
     }
 
     #[test]
     fn ok_error_id_roundtrip_edges() {
-        let err = FrozenErr::new(0xff, 0x00, 0xffff, b"edge", Vec::new());
-        let eid = err.error_id();
+        let err = FrozenErr::new(0xff, 0x00, 0xffff, b"edge", b"max values");
+        let (m, d, r) = from_error_id(err.id);
 
-        assert_eq!(eid, 0xff00_ffff);
-
-        let (m, d, r) = from_error_id(eid);
-        assert_eq!(m, 0xff);
-        assert_eq!(d, 0x00);
-        assert_eq!(r, 0xffff);
+        assert_eq!(err.id, 0xff00_ffff);
+        assert_eq!((m, d, r), (0xff, 0x00, 0xffff));
     }
 
     #[test]
     fn ok_error_id_reason_only_changes_low_bits() {
-        let e1 = FrozenErr::new(1, 2, 1, b"", Vec::new()).error_id();
-        let e2 = FrozenErr::new(1, 2, 2, b"", Vec::new()).error_id();
+        let e1 = FrozenErr::new(1, 2, 1, b"x", b"a");
+        let e2 = FrozenErr::new(1, 2, 2, b"x", b"a");
 
-        assert_eq!(e1 & 0xffff_0000, e2 & 0xffff_0000);
-        assert_ne!(e1 & 0x0000_ffff, e2 & 0x0000_ffff);
+        assert_eq!(e1.id & 0xffff_0000, e2.id & 0xffff_0000);
+        assert_ne!(e1.id & 0x0000_ffff, e2.id & 0x0000_ffff);
+    }
+
+    #[test]
+    fn ok_context_formatting() {
+        let err = FrozenErr::new(1, 1, 1, b"io", b"disk failure");
+        assert_eq!(err.context, "[io] disk failure");
+    }
+
+    #[test]
+    fn ok_new_raw_uses_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let err = FrozenErr::new_raw(1, 2, 3, b"io", io_err);
+
+        assert!(err.context.contains("[io]"));
+        assert!(err.context.contains("access denied"));
+    }
+
+    #[test]
+    fn ok_compare_same_id_different_context() {
+        let e1 = FrozenErr::new(1, 2, 3, b"io", b"a");
+        let e2 = FrozenErr::new(1, 2, 3, b"io", b"b");
+
+        assert!(e1.compare_id(&e2));
+    }
+
+    #[test]
+    fn ok_compare_different_id() {
+        let e1 = FrozenErr::new(1, 2, 3, b"io", b"a");
+        let e2 = FrozenErr::new(1, 2, 4, b"io", b"a");
+
+        assert!(!e1.compare_id(&e2));
     }
 }
