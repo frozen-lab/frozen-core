@@ -1,23 +1,41 @@
 [package]
-name = "frozen-core"
 edition = "2024"
-version = "0.0.12"
+name = "frozen_core"
+version = "0.0.13"
 exclude = ["shell.nix"]
+description = "Custom implementations and core utilities for frozen-lab crates"
+readme = "README.md"
+keywords = [
+    "frozen-lab",
+    "frozen-core",
+]
 license = "MIT OR Apache-2.0"
-keywords = ["frozen-lab", "frozen-core"]
 repository = "https://github.com/frozen-lab/frozen-core"
-description = "Custom implementations and core utilities for frozen codebases"
 
 [features]
+bpool = ["error"]
 crc32 = []
+default = []
 error = []
+ffile = [
+    "libc",
+    "error",
+    "hints",
+]
+fmmap = [
+    "libc",
+    "error",
+    "hints",
+    "ffile",
+]
+fpipe = [
+    "error",
+    "ffile",
+    "bpool",
+    "hints",
+]
 hints = []
 mpscq = []
-bpool = ["error"]
-ffile = ["libc", "error", "hints"]
-fmmap = ["libc", "error", "hints", "ffile"]
-fpipe = ["error", "ffile", "bpool", "hints"]
-default = ["crc32", "error", "hints", "ffile", "fmmap", "bpool", "fpipe", "mpscq"]
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.178", optional = true }
