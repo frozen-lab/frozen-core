@@ -68,6 +68,7 @@ jobs:
       - name: Draft Release
         uses: softprops/action-gh-release@v1
         with:
+          prerelease: true
           generate_release_notes: true
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
