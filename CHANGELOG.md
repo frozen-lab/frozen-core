@@ -4,6 +4,7 @@
 
 - Improved error handling for `ffile`, `fmmap`, `bpool` & `fpipe` modules
   - **BREAKING:** All error types are private
+- No features are available by default
 
 ## `0.0.12`
 
