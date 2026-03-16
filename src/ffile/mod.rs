@@ -53,9 +53,16 @@ type TFile = posix::POSIXFile;
 /// module id used for [`FrozenErr`]
 static MODULE_ID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 
+#[cfg(not(test))]
 #[inline(always)]
 fn mod_id() -> &'static u8 {
     MODULE_ID.get().unwrap()
+}
+
+#[cfg(test)]
+#[inline(always)]
+fn mod_id() -> &'static u8 {
+    MODULE_ID.get_or_init(|| 0)
 }
 
 /// Error codes for [`FrozenFile`]
@@ -422,356 +429,357 @@ impl core::fmt::Display for FrozenFile {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use std::sync::Arc;
-
-//     const CHUNK_SIZE: usize = 0x10;
-//     const INIT_CHUNKS: usize = 0x0A;
-
-//     fn tmp_path() -> (tempfile::TempDir, FFCfg) {
-//         let dir = tempfile::tempdir().unwrap();
-//         let path = dir.path().join("tmp_ff_file");
-//         let cfg = FFCfg {
-//             path,
-//             mid: TEST_MID,
-//             chunk_size: CHUNK_SIZE,
-//             initial_chunk_amount: INIT_CHUNKS,
-//         };
-
-//         (dir, cfg)
-//     }
-
-//     mod ff_lifecycle {
-//         use super::*;
-
-//         #[test]
-//         fn ok_new_with_init_len() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = FrozenFile::new(cfg).unwrap();
-
-//             let exists = file.exists().unwrap();
-//             assert!(exists);
-
-//             assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
-//         }
-
-//         #[test]
-//         fn ok_new_existing() {
-//             let (_dir, cfg) = tmp_path();
-
-//             let file = FrozenFile::new(cfg.clone()).unwrap();
-//             assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
-
-//             // must be dropped to release the exclusive lock
-//             drop(file);
-
-//             let reopened = FrozenFile::new(cfg.clone()).unwrap();
-//             assert_eq!(reopened.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
-//         }
-
-//         #[test]
-//         fn err_new_when_file_smaller_than_init_len() {
-//             let (_dir, mut cfg) = tmp_path();
-
-//             let file = FrozenFile::new(cfg.clone()).unwrap();
-//             drop(file);
-
-//             // updated cfg
-//             cfg.chunk_size *= 2;
-
-//             let err = FrozenFile::new(cfg).unwrap_err();
-//             assert!(err.compare(FFileErr::Cpt as u16));
-//         }
-
-//         #[test]
-//         fn ok_exists_true_when_exists() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = FrozenFile::new(cfg).unwrap();
-
-//             let exists = file.exists().unwrap();
-//             assert!(exists);
-//         }
-
-//         #[test]
-//         fn ok_exists_false_when_missing() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = FrozenFile::new(cfg).unwrap();
-//             file.delete().unwrap();
-
-//             let exists = file.exists().unwrap();
-//             assert!(!exists);
-//         }
-
-//         #[test]
-//         fn ok_delete_file() {
-//             let (_dir, cfg) = tmp_path();
-
-//             let file = FrozenFile::new(cfg).unwrap();
-//             let exists = file.exists().unwrap();
-//             assert!(exists);
-
-//             file.delete().unwrap();
-//             let exists = file.exists().unwrap();
-//             assert!(!exists);
-//         }
-
-//         #[test]
-//         fn err_delete_after_delete() {
-//             let (_dir, cfg) = tmp_path();
-
-//             let file = FrozenFile::new(cfg).unwrap();
-//             file.delete().unwrap();
-
-//             let err = file.delete().unwrap_err();
-//             assert!(err.compare(FFileErr::Inv as u16));
-//         }
-
-//         #[test]
-//         fn ok_drop_persists_without_explicit_sync() {
-//             let mut data = [0x0Bu8; CHUNK_SIZE];
-//             let (_dir, cfg) = tmp_path();
-
-//             {
-//                 let file = FrozenFile::new(cfg.clone()).unwrap();
-//                 file.pwrite(data.as_mut_ptr(), 0).unwrap();
-//                 drop(file);
-//             }
-
-//             {
-//                 let reopened = FrozenFile::new(cfg).unwrap();
-//                 let mut buf = [0u8; CHUNK_SIZE];
-
-//                 reopened.pread(buf.as_mut_ptr(), 0).unwrap();
-//                 assert_eq!(buf, data);
-//             }
-//         }
-//     }
-
-//     mod ff_lock {
-//         use super::*;
-
-//         #[test]
-//         fn err_new_when_already_open() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = FrozenFile::new(cfg.clone()).unwrap();
-
-//             let err = FrozenFile::new(cfg).unwrap_err();
-//             assert!(err.compare(FFileErr::Lck as u16));
-
-//             drop(file);
-//         }
-
-//         #[test]
-//         fn ok_drop_releases_exclusive_lock() {
-//             let (_dir, cfg) = tmp_path();
-
-//             let file = FrozenFile::new(cfg.clone()).unwrap();
-//             drop(file);
-
-//             let _ = FrozenFile::new(cfg).expect("must not fail after drop");
-//         }
-//     }
-
-//     mod ff_grow {
-//         use super::*;
-
-//         #[test]
-//         fn ok_grow_updates_length() {
-//             let (_dir, cfg) = tmp_path();
-
-//             let file = FrozenFile::new(cfg).unwrap();
-//             assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
-
-//             file.grow(0x20).unwrap();
-//             assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + 0x20));
-//         }
-
-//         #[test]
-//         fn ok_grow_sync_cycle() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = FrozenFile::new(cfg).unwrap();
-
-//             for _ in 0..0x0A {
-//                 file.grow(0x100).unwrap();
-//                 file.sync().unwrap();
-//             }
-
-//             assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + (0x0A * 0x100)));
-//         }
-//     }
-
-//     mod ff_sync {
-//         use super::*;
-
-//         #[test]
-//         fn ok_sync_after_sync() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = FrozenFile::new(cfg).unwrap();
-
-//             file.sync().unwrap();
-//             file.sync().unwrap();
-//             file.sync().unwrap();
-//         }
-
-//         #[test]
-//         fn err_sync_after_delete() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = FrozenFile::new(cfg).unwrap();
-//             file.delete().unwrap();
-
-//             let err = file.sync().unwrap_err();
-//             assert!(err.compare(FFileErr::Hcf as u16));
-//         }
-//     }
-
-//     mod ff_write_read {
-//         use super::*;
-
-//         #[test]
-//         fn ok_single_write_read_cycle() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = FrozenFile::new(cfg).unwrap();
-
-//             let mut data = [0x0Bu8; CHUNK_SIZE];
-
-//             file.pwrite(data.as_mut_ptr(), 4).unwrap();
-//             file.sync().unwrap();
-
-//             let mut buf = [0u8; CHUNK_SIZE];
-//             file.pread(buf.as_mut_ptr(), 4).unwrap();
-//             assert_eq!(buf, data);
-//         }
-
-//         #[test]
-//         fn ok_vectored_write_read_cycle() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = FrozenFile::new(cfg).unwrap();
-
-//             let mut bufs = [[1u8; CHUNK_SIZE], [2u8; CHUNK_SIZE]];
-//             let bufs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
-
-//             file.pwritev(&bufs, 0).unwrap();
-//             file.sync().unwrap();
-
-//             let mut read_bufs = [[0u8; CHUNK_SIZE], [0u8; CHUNK_SIZE]];
-//             let rbufs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
-//             file.preadv(&rbufs, 0).unwrap();
-
-//             assert!(read_bufs[0].iter().all(|b| *b == 1));
-//             assert!(read_bufs[1].iter().all(|b| *b == 2));
-//         }
-
-//         #[test]
-//         fn ok_write_concurrent_non_overlapping() {
-//             let (_dir, mut cfg) = tmp_path();
-//             cfg.initial_chunk_amount = 0x100;
-//             let file = Arc::new(FrozenFile::new(cfg).unwrap());
-
-//             let mut handles = vec![];
-//             for i in 0..0x0A {
-//                 let f = file.clone();
-//                 handles.push(std::thread::spawn(move || {
-//                     let mut data = [i as u8; CHUNK_SIZE];
-//                     f.pwrite(data.as_mut_ptr(), i).unwrap();
-//                 }));
-//             }
-
-//             for h in handles {
-//                 h.join().unwrap();
-//             }
-
-//             file.sync().unwrap();
-
-//             for i in 0..0x0A {
-//                 let mut buf = [0u8; CHUNK_SIZE];
-//                 file.pread(buf.as_mut_ptr(), i).unwrap();
-//                 assert!(buf.iter().all(|b| *b == i as u8));
-//             }
-//         }
-
-//         #[test]
-//         fn ok_concurrent_grow_and_write() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = Arc::new(FrozenFile::new(cfg).unwrap());
-
-//             let writer = {
-//                 let f = file.clone();
-//                 std::thread::spawn(move || {
-//                     for i in 0..INIT_CHUNKS {
-//                         let mut data = [i as u8; CHUNK_SIZE];
-//                         f.pwrite(data.as_mut_ptr(), i).unwrap();
-//                     }
-//                 })
-//             };
-
-//             let chunks_to_grow = 0x20;
-//             let grower = {
-//                 let f = file.clone();
-//                 std::thread::spawn(move || {
-//                     f.grow(chunks_to_grow).unwrap();
-//                 })
-//             };
-
-//             writer.join().unwrap();
-//             grower.join().unwrap();
-
-//             file.sync().unwrap();
-//             assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + chunks_to_grow));
-
-//             for i in 0..INIT_CHUNKS {
-//                 let mut buf = [0u8; CHUNK_SIZE];
-//                 file.pread(buf.as_mut_ptr(), i).unwrap();
-//                 assert!(buf.iter().all(|b| *b == i as u8));
-//             }
-//         }
-
-//         #[test]
-//         fn ok_concurrent_sync_and_write() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = Arc::new(FrozenFile::new(cfg).unwrap());
-
-//             let writer = {
-//                 let f = file.clone();
-//                 std::thread::spawn(move || {
-//                     for i in 0..INIT_CHUNKS {
-//                         let mut data = [i as u8; CHUNK_SIZE];
-//                         f.pwrite(data.as_mut_ptr(), i).unwrap();
-//                     }
-//                 })
-//             };
-
-//             let syncer = {
-//                 let f = file.clone();
-//                 std::thread::spawn(move || {
-//                     for _ in 0..0x0A {
-//                         f.sync().unwrap();
-//                     }
-//                 })
-//             };
-
-//             writer.join().unwrap();
-//             syncer.join().unwrap();
-
-//             file.sync().unwrap();
-
-//             for i in 0..INIT_CHUNKS {
-//                 let mut buf = [0; CHUNK_SIZE];
-//                 file.pread(buf.as_mut_ptr(), i).unwrap();
-//                 assert!(buf.iter().all(|b| *b == i as u8));
-//             }
-//         }
-
-//         #[test]
-//         fn err_read_hcf_for_eof() {
-//             let (_dir, cfg) = tmp_path();
-//             let file = FrozenFile::new(cfg).unwrap();
-
-//             // index > curr_chunks
-//             let mut buf = [0; CHUNK_SIZE];
-//             let err = file.pread(buf.as_mut_ptr(), 0x100).unwrap_err();
-//             assert!(err.compare(FFileErr::Hcf as u16));
-//         }
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    const CHUNK_SIZE: usize = 0x10;
+    const INIT_CHUNKS: usize = 0x0A;
+    const MOD_ID: u8 = 0;
+
+    fn tmp_path() -> (tempfile::TempDir, FFCfg) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tmp_ff_file");
+        let cfg = FFCfg {
+            path,
+            mid: MOD_ID,
+            chunk_size: CHUNK_SIZE,
+            initial_chunk_amount: INIT_CHUNKS,
+        };
+
+        (dir, cfg)
+    }
+
+    mod ff_lifecycle {
+        use super::*;
+
+        #[test]
+        fn ok_new_with_init_len() {
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
+
+            let exists = file.exists().unwrap();
+            assert!(exists);
+
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
+        }
+
+        #[test]
+        fn ok_new_existing() {
+            let (_dir, cfg) = tmp_path();
+
+            let file = FrozenFile::new(cfg.clone()).unwrap();
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
+
+            // must be dropped to release the exclusive lock
+            drop(file);
+
+            let reopened = FrozenFile::new(cfg.clone()).unwrap();
+            assert_eq!(reopened.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
+        }
+
+        #[test]
+        fn err_new_when_file_smaller_than_init_len() {
+            let (_dir, mut cfg) = tmp_path();
+
+            let file = FrozenFile::new(cfg.clone()).unwrap();
+            drop(file);
+
+            // updated cfg
+            cfg.chunk_size *= 2;
+
+            let err = FrozenFile::new(cfg).unwrap_err();
+            assert_eq!((err.id & 0xffff) as u16, err::CPT.reason);
+        }
+
+        #[test]
+        fn ok_exists_true_when_exists() {
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
+
+            let exists = file.exists().unwrap();
+            assert!(exists);
+        }
+
+        #[test]
+        fn ok_exists_false_when_missing() {
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
+            file.delete().unwrap();
+
+            let exists = file.exists().unwrap();
+            assert!(!exists);
+        }
+
+        #[test]
+        fn ok_delete_file() {
+            let (_dir, cfg) = tmp_path();
+
+            let file = FrozenFile::new(cfg).unwrap();
+            let exists = file.exists().unwrap();
+            assert!(exists);
+
+            file.delete().unwrap();
+            let exists = file.exists().unwrap();
+            assert!(!exists);
+        }
+
+        #[test]
+        fn err_delete_after_delete() {
+            let (_dir, cfg) = tmp_path();
+
+            let file = FrozenFile::new(cfg).unwrap();
+            file.delete().unwrap();
+
+            let err = file.delete().unwrap_err();
+            assert_eq!((err.id & 0xffff) as u16, err::INV.reason);
+        }
+
+        #[test]
+        fn ok_drop_persists_without_explicit_sync() {
+            let mut data = [0x0Bu8; CHUNK_SIZE];
+            let (_dir, cfg) = tmp_path();
+
+            {
+                let file = FrozenFile::new(cfg.clone()).unwrap();
+                file.pwrite(data.as_mut_ptr(), 0).unwrap();
+                drop(file);
+            }
+
+            {
+                let reopened = FrozenFile::new(cfg).unwrap();
+                let mut buf = [0u8; CHUNK_SIZE];
+
+                reopened.pread(buf.as_mut_ptr(), 0).unwrap();
+                assert_eq!(buf, data);
+            }
+        }
+    }
+
+    mod ff_lock {
+        use super::*;
+
+        #[test]
+        fn err_new_when_already_open() {
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg.clone()).unwrap();
+
+            let err = FrozenFile::new(cfg).unwrap_err();
+            assert_eq!((err.id & 0xffff) as u16, err::LCK.reason);
+
+            drop(file);
+        }
+
+        #[test]
+        fn ok_drop_releases_exclusive_lock() {
+            let (_dir, cfg) = tmp_path();
+
+            let file = FrozenFile::new(cfg.clone()).unwrap();
+            drop(file);
+
+            let _ = FrozenFile::new(cfg).expect("must not fail after drop");
+        }
+    }
+
+    mod ff_grow {
+        use super::*;
+
+        #[test]
+        fn ok_grow_updates_length() {
+            let (_dir, cfg) = tmp_path();
+
+            let file = FrozenFile::new(cfg).unwrap();
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
+
+            file.grow(0x20).unwrap();
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + 0x20));
+        }
+
+        #[test]
+        fn ok_grow_sync_cycle() {
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
+
+            for _ in 0..0x0A {
+                file.grow(0x100).unwrap();
+                file.sync().unwrap();
+            }
+
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + (0x0A * 0x100)));
+        }
+    }
+
+    mod ff_sync {
+        use super::*;
+
+        #[test]
+        fn ok_sync_after_sync() {
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
+
+            file.sync().unwrap();
+            file.sync().unwrap();
+            file.sync().unwrap();
+        }
+
+        #[test]
+        fn err_sync_after_delete() {
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
+            file.delete().unwrap();
+
+            let err = file.sync().unwrap_err();
+            assert_eq!((err.id & 0xffff) as u16, err::HCF.reason);
+        }
+    }
+
+    mod ff_write_read {
+        use super::*;
+
+        #[test]
+        fn ok_single_write_read_cycle() {
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
+
+            let mut data = [0x0Bu8; CHUNK_SIZE];
+
+            file.pwrite(data.as_mut_ptr(), 4).unwrap();
+            file.sync().unwrap();
+
+            let mut buf = [0u8; CHUNK_SIZE];
+            file.pread(buf.as_mut_ptr(), 4).unwrap();
+            assert_eq!(buf, data);
+        }
+
+        #[test]
+        fn ok_vectored_write_read_cycle() {
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
+
+            let mut bufs = [[1u8; CHUNK_SIZE], [2u8; CHUNK_SIZE]];
+            let bufs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+
+            file.pwritev(&bufs, 0).unwrap();
+            file.sync().unwrap();
+
+            let mut read_bufs = [[0u8; CHUNK_SIZE], [0u8; CHUNK_SIZE]];
+            let rbufs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+            file.preadv(&rbufs, 0).unwrap();
+
+            assert!(read_bufs[0].iter().all(|b| *b == 1));
+            assert!(read_bufs[1].iter().all(|b| *b == 2));
+        }
+
+        #[test]
+        fn ok_write_concurrent_non_overlapping() {
+            let (_dir, mut cfg) = tmp_path();
+            cfg.initial_chunk_amount = 0x100;
+            let file = Arc::new(FrozenFile::new(cfg).unwrap());
+
+            let mut handles = vec![];
+            for i in 0..0x0A {
+                let f = file.clone();
+                handles.push(std::thread::spawn(move || {
+                    let mut data = [i as u8; CHUNK_SIZE];
+                    f.pwrite(data.as_mut_ptr(), i).unwrap();
+                }));
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            file.sync().unwrap();
+
+            for i in 0..0x0A {
+                let mut buf = [0u8; CHUNK_SIZE];
+                file.pread(buf.as_mut_ptr(), i).unwrap();
+                assert!(buf.iter().all(|b| *b == i as u8));
+            }
+        }
+
+        #[test]
+        fn ok_concurrent_grow_and_write() {
+            let (_dir, cfg) = tmp_path();
+            let file = Arc::new(FrozenFile::new(cfg).unwrap());
+
+            let writer = {
+                let f = file.clone();
+                std::thread::spawn(move || {
+                    for i in 0..INIT_CHUNKS {
+                        let mut data = [i as u8; CHUNK_SIZE];
+                        f.pwrite(data.as_mut_ptr(), i).unwrap();
+                    }
+                })
+            };
+
+            let chunks_to_grow = 0x20;
+            let grower = {
+                let f = file.clone();
+                std::thread::spawn(move || {
+                    f.grow(chunks_to_grow).unwrap();
+                })
+            };
+
+            writer.join().unwrap();
+            grower.join().unwrap();
+
+            file.sync().unwrap();
+            assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + chunks_to_grow));
+
+            for i in 0..INIT_CHUNKS {
+                let mut buf = [0u8; CHUNK_SIZE];
+                file.pread(buf.as_mut_ptr(), i).unwrap();
+                assert!(buf.iter().all(|b| *b == i as u8));
+            }
+        }
+
+        #[test]
+        fn ok_concurrent_sync_and_write() {
+            let (_dir, cfg) = tmp_path();
+            let file = Arc::new(FrozenFile::new(cfg).unwrap());
+
+            let writer = {
+                let f = file.clone();
+                std::thread::spawn(move || {
+                    for i in 0..INIT_CHUNKS {
+                        let mut data = [i as u8; CHUNK_SIZE];
+                        f.pwrite(data.as_mut_ptr(), i).unwrap();
+                    }
+                })
+            };
+
+            let syncer = {
+                let f = file.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..0x0A {
+                        f.sync().unwrap();
+                    }
+                })
+            };
+
+            writer.join().unwrap();
+            syncer.join().unwrap();
+
+            file.sync().unwrap();
+
+            for i in 0..INIT_CHUNKS {
+                let mut buf = [0; CHUNK_SIZE];
+                file.pread(buf.as_mut_ptr(), i).unwrap();
+                assert!(buf.iter().all(|b| *b == i as u8));
+            }
+        }
+
+        #[test]
+        fn err_read_hcf_for_eof() {
+            let (_dir, cfg) = tmp_path();
+            let file = FrozenFile::new(cfg).unwrap();
+
+            // index > curr_chunks
+            let mut buf = [0; CHUNK_SIZE];
+            let err = file.pread(buf.as_mut_ptr(), 0x100).unwrap_err();
+            assert_eq!((err.id & 0xffff) as u16, err::HCF.reason);
+        }
+    }
+}
