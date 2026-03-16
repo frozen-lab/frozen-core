@@ -380,12 +380,12 @@ where
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
 
-        self.core.dirty.store(true, atomic::Ordering::Release);
-        let epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
-
         let slot: &ObjectInterface<T> = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
         let _oi_guard = slot.lock();
         let res = unsafe { f(slot.get_mut()) };
+
+        self.core.dirty.store(true, atomic::Ordering::Release);
+        let epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
 
         Ok((res, epoch))
     }
