@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.14`
+
+- Optimized vectored IO for `FrozenFile` on `POSIX` systems
+
 ## `0.0.13`
 
 - Improved error handling for `ffile`, `fmmap`, `bpool` & `fpipe` modules

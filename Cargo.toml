@@ -1,7 +1,7 @@
 [package]
 edition = "2024"
 name = "frozen-core"
-version = "0.0.13"
+version = "0.0.14"
 exclude = ["shell.nix"]
 description = "Custom implementations and core utilities for frozen-lab crates"
 readme = "README.md"
