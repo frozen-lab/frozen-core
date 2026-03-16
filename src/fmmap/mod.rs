@@ -338,7 +338,7 @@ where
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
 
-        let slot = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
+        let slot: &ObjectInterface<T> = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
         let _oi_guard = slot.lock();
         let res = unsafe { f(slot.get()) };
 
@@ -380,12 +380,12 @@ where
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
 
-        let slot = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
+        self.core.dirty.store(true, atomic::Ordering::Release);
+        let epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
+
+        let slot: &ObjectInterface<T> = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
         let _oi_guard = slot.lock();
         let res = unsafe { f(slot.get_mut()) };
-
-        let epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
-        self.core.dirty.store(true, atomic::Ordering::Release);
 
         Ok((res, epoch))
     }
@@ -425,26 +425,28 @@ where
 
         let offset = Self::SLOT_SIZE * index;
 
+        // block flush_tx scheduling
+        let _flush_guard = self.core.lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
+
         // we use exlusive lock as we perform blocking hard sync
         let _guard = self.core.acquire_exclusive_io_lock()?;
 
-        let slot = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
+        // NOTE: we hard sync we flushed an entier batch, so we can skip the sync via flush_tx as the
+        // current batch is durable
+
+        let prev_epoch = self.core.durable_epoch.fetch_add(1, atomic::Ordering::Release);
+        let prev = self.core.dirty.swap(false, atomic::Ordering::AcqRel);
+
+        let slot: &ObjectInterface<T> = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
         let _oi_guard = slot.lock();
         let res = unsafe { f(slot.get_mut()) };
 
         // blocking hard sync
         self.core.sync()?;
 
-        // NOTE: we hard sync we flushed an entier batch, so we can skip the sync via flush_tx as the
-        // current batch is durable
-
-        let prev = self.core.dirty.swap(false, atomic::Ordering::AcqRel);
-        let prev_epoch = self.core.durable_epoch.fetch_add(1, atomic::Ordering::Release);
-
         // NOTE: we must also notify cv's waiting for durability (we skip if there was no batch to sync)
         if prev {
             let _g = self.core.durable_lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
-
             self.core.durable_cv.notify_all();
         }
 
@@ -847,7 +849,7 @@ pub(in crate::fmmap) struct ObjectInterface<T>
 where
     T: Sized + Send + Sync,
 {
-    lock: atomic::AtomicU8,
+    lock: cell::UnsafeCell<u64>,
     value: cell::UnsafeCell<T>,
 }
 
@@ -859,10 +861,11 @@ where
 
     #[inline]
     fn lock(&self) -> OIGuard<'_, T> {
+        let atm = unsafe { atomic::AtomicU64::from_ptr(self.lock.get()) };
         let mut spins = 0;
+
         loop {
-            if self
-                .lock
+            if atm
                 .compare_exchange_weak(0, 1, atomic::Ordering::Acquire, atomic::Ordering::Relaxed)
                 .is_ok()
             {
@@ -903,7 +906,12 @@ where
     T: Sized + Send + Sync,
 {
     fn drop(&mut self) {
-        self.oi.lock.store(0, atomic::Ordering::Release);
+        // this fence ensures that the write becomes globally visible before the lock is released, which prevents readers
+        // from accessing stale values (＠_＠;)
+        std::sync::atomic::fence(atomic::Ordering::Release);
+
+        let atm = unsafe { atomic::AtomicU64::from_ptr(self.oi.lock.get()) };
+        atm.store(0, atomic::Ordering::Release);
     }
 }
 

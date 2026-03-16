@@ -122,9 +122,9 @@ unsafe fn munmap_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
 
     match errno {
         // invalid/unaligned ptr or address range is not mapped
-        EINVAL | ENOMEM => return new_err(err::HCF, err_msg),
+        EINVAL | ENOMEM => new_err(err::HCF, err_msg),
 
-        _ => return new_err(err::UNK, err_msg),
+        _ => new_err(err::UNK, err_msg),
     }
 }
 

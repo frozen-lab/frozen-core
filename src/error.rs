@@ -81,7 +81,7 @@ impl FrozenErr {
     pub fn new_raw<E: std::fmt::Display>(module: u8, domain: u8, code: ErrCode, err: E) -> Self {
         Self {
             id: error_id(module, domain, code.reason),
-            context: format!("[{}] {}", code.detail, err.to_string()),
+            context: format!("[{}] {}", code.detail, err),
         }
     }
 
