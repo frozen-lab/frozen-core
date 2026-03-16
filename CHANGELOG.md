@@ -1,5 +1,10 @@
 # Changelog
 
+## `0.0.13`
+
+- Improved error handling for `ffile`, `fmmap`, `bpool` & `fpipe` modules
+  - **BREAKING:** All error types are private
+
 ## `0.0.12`
 
 - Impl of `write_sync` in `FrozenMMap`

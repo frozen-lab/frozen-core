@@ -37,7 +37,7 @@ To use the `error` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.12", features = ["error"] }
+frozen-core = { version = "0.0.13", features = ["error"] }
 ```
 
 ## Hints
@@ -48,7 +48,7 @@ To use the `hints` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.12", features = ["hints"] }
+frozen-core = { version = "0.0.13", features = ["hints"] }
 ```
 
 ## FrozenFile
@@ -59,7 +59,7 @@ To use the `ffile` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.12", features = ["ffile"] }
+frozen-core = { version = "0.0.13", features = ["ffile"] }
 ```
 
 `FrozenFile` is currently available on the following platforms,
@@ -81,7 +81,7 @@ To use the `fmmap` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.12", features = ["fmmap"] }
+frozen-core = { version = "0.0.13", features = ["fmmap"] }
 ```
 
 `FrozenMMap` is currently available on the following platforms,
@@ -110,7 +110,7 @@ To use the `crc32` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.12", features = ["crc32"] }
+frozen-core = { version = "0.0.13", features = ["crc32"] }
 ```
 
 `Crc32C` is available on following architectures,
@@ -128,7 +128,7 @@ To use the `bpool` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.12", features = ["bpool"] }
+frozen-core = { version = "0.0.13", features = ["bpool"] }
 ```
 
 ## MPSCQ
@@ -139,7 +139,7 @@ To use the `mpscq` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.12", features = ["mpscq"] }
+frozen-core = { version = "0.0.13", features = ["mpscq"] }
 ```
 
 ## FrozenPipe
@@ -151,5 +151,5 @@ To use the `fpipe` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.12", features = ["fpipe"] }
+frozen-core = { version = "0.0.13", features = ["fpipe"] }
 ```
