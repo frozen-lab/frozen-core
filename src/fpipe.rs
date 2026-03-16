@@ -48,7 +48,7 @@
 
 use crate::{
     bpool,
-    error::{FrozenErr, FrozenRes},
+    error::{ErrCode, FrozenErr, FrozenRes},
     ffile, hints, mpscq,
 };
 use std::{
@@ -56,53 +56,40 @@ use std::{
     thread, time,
 };
 
-/// module id used for [`FrozenPipe`]
-static mut MODULE_ID: u8 = 0;
-
 /// Domain Id for [`FrozenPipe`] is **19**
 const ERRDOMAIN: u8 = 0x13;
 
-/// Error codes for [`FrozenPipe`]
-#[repr(u16)]
-pub enum FPErr {
-    /// (1024) internal fuck up (hault and catch fire)
-    Hcf = 0x400,
+/// module id used for [`FrozenErr`]
+static MODULE_ID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 
-    /// (1025) thread error or panic inside thread
-    Txe = 0x401,
-
-    /// (1026) lock error (failed or poisoned)
-    Lpn = 0x402,
+#[inline(always)]
+fn mod_id() -> &'static u8 {
+    MODULE_ID.get_or_init(|| 0)
 }
 
-impl FPErr {
-    #[inline]
-    fn default_message(&self) -> &'static [u8] {
-        match self {
-            Self::Lpn => b"lock poisoned",
-            Self::Hcf => b"hault and catch fire",
-            Self::Txe => b"thread failed or paniced",
-        }
-    }
+/// Error codes for [`FrozenPipe`]
+mod err {
+    use super::ErrCode;
+
+    /// (1024) flush_tx error (panic inside)
+    pub const TXE: ErrCode = ErrCode::new(0x400, "flush_tx paniced inside");
+
+    /// (1025) flush_tx error (unable to spawn)
+    pub const FXE: ErrCode = ErrCode::new(0x401, "unable to spawn flush_tx");
+
+    /// (1026) lock poisoned
+    pub const LPN: ErrCode = ErrCode::new(0x402, "lock poisoned internally");
 }
 
 #[inline]
-fn new_err<R>(res: FPErr, message: Vec<u8>) -> FrozenRes<R> {
-    let detail = res.default_message();
-    let err = FrozenErr::new(unsafe { MODULE_ID }, ERRDOMAIN, res as u16, detail, message);
+fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenRes<R> {
+    let err = FrozenErr::new_raw(*mod_id(), ERRDOMAIN, code, error);
     Err(err)
 }
 
 #[inline]
-fn new_err_raw<E: std::fmt::Display>(res: FPErr, error: E) -> FrozenErr {
-    let detail = res.default_message();
-    FrozenErr::new(
-        unsafe { MODULE_ID },
-        ERRDOMAIN,
-        res as u16,
-        detail,
-        error.to_string().as_bytes().to_vec(),
-    )
+fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenErr {
+    FrozenErr::new_raw(*mod_id(), ERRDOMAIN, code, error)
 }
 
 /// An high throughput asynchronous IO pipeline for chunk based storage, it uses batches to write requests and
@@ -455,7 +442,7 @@ impl FrozenPipe {
     /// pipe.force_durability(epoch).unwrap();
     /// ```
     pub fn force_durability(&self, epoch: u64) -> FrozenRes<()> {
-        let guard = self.core.lock.lock().map_err(|e| new_err_raw(FPErr::Lpn, e))?;
+        let guard = self.core.lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
         self.core.cv.notify_one();
         drop(guard);
 
@@ -528,7 +515,7 @@ impl FrozenPipe {
 
         let mut guard = match self.core.durable_lock.lock() {
             Ok(g) => g,
-            Err(e) => return Err(new_err_raw(FPErr::Lpn, e)),
+            Err(e) => return new_err(err::LPN, e),
         };
 
         loop {
@@ -542,7 +529,7 @@ impl FrozenPipe {
 
             guard = match self.core.durable_cv.wait(guard) {
                 Ok(g) => g,
-                Err(e) => return Err(new_err_raw(FPErr::Lpn, e)),
+                Err(e) => return new_err(err::LPN, e),
             };
         }
     }
@@ -593,12 +580,11 @@ impl Core {
         pool: bpool::BufPool,
         flush_duration: time::Duration,
     ) -> FrozenRes<sync::Arc<Self>> {
-        let cfg = file.cfg();
-        let chunk_size = cfg.chunk_size;
+        let chunk_size = file.cfg.chunk_size;
 
         // NOTE: we only set it the module_id once, hence it'll be only set once per instance
         // and is only used for error logging
-        unsafe { MODULE_ID = cfg.mid };
+        let _ = MODULE_ID.get_or_init(|| file.cfg.mid);
 
         Ok(sync::Arc::new(Self {
             file,
@@ -619,12 +605,12 @@ impl Core {
 
     #[inline]
     fn acquire_io_lock(&self) -> FrozenRes<sync::RwLockReadGuard<'_, ()>> {
-        self.io_lock.read().map_err(|e| new_err_raw(FPErr::Lpn, e))
+        self.io_lock.read().map_err(|e| new_err_raw(err::LPN, e))
     }
 
     #[inline]
     fn acquire_exclusive_io_lock(&self) -> FrozenRes<sync::RwLockWriteGuard<'_, ()>> {
-        self.io_lock.write().map_err(|e| new_err_raw(FPErr::Lpn, e))
+        self.io_lock.write().map_err(|e| new_err_raw(err::LPN, e))
     }
 
     #[inline]
@@ -693,11 +679,7 @@ impl Core {
             .spawn(move || Self::flush_tx(core))
         {
             Ok(tx) => Ok(tx),
-            Err(error) => {
-                let mut error = error.to_string().as_bytes().to_vec();
-                error.extend_from_slice(b"Failed to spawn flush thread for FrozenPipe");
-                new_err(FPErr::Hcf, error)
-            }
+            Err(error) => new_err(err::FXE, error),
         }
     }
 
@@ -706,16 +688,7 @@ impl Core {
         let mut guard = match core.lock.lock() {
             Ok(g) => g,
             Err(error) => {
-                let mut message = error.to_string().as_bytes().to_vec();
-                message.extend_from_slice(b"Flush thread died before init could be completed for FrozenPipe");
-                let error = FrozenErr::new(
-                    unsafe { MODULE_ID },
-                    ERRDOMAIN,
-                    FPErr::Lpn as u16,
-                    FPErr::Lpn.default_message(),
-                    message,
-                );
-                core.set_sync_error(error);
+                core.set_sync_error(new_err_raw(err::FXE, error));
                 return;
             }
         };
@@ -725,7 +698,7 @@ impl Core {
             guard = match core.cv.wait_timeout(guard, core.flush_duration) {
                 Ok((g, _)) => g,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(FPErr::Txe, e));
+                    core.set_sync_error(new_err_raw(err::TXE, e));
                     return;
                 }
             };
@@ -749,7 +722,7 @@ impl Core {
                 guard = match core.lock.lock() {
                     Ok(g) => g,
                     Err(e) => {
-                        core.set_sync_error(new_err_raw(FPErr::Lpn, e));
+                        core.set_sync_error(new_err_raw(err::LPN, e));
                         return;
                     }
                 };
@@ -762,8 +735,8 @@ impl Core {
 
             let io_lock = match core.acquire_exclusive_io_lock() {
                 Ok(lock) => lock,
-                Err(e) => {
-                    core.set_sync_error(new_err_raw(FPErr::Lpn, e));
+                Err(err) => {
+                    core.set_sync_error(err);
                     return;
                 }
             };
@@ -777,7 +750,7 @@ impl Core {
                     guard = match core.lock.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            core.set_sync_error(new_err_raw(FPErr::Lpn, e));
+                            core.set_sync_error(new_err_raw(err::LPN, e));
                             return;
                         }
                     };
@@ -801,7 +774,7 @@ impl Core {
                     let _g = match core.durable_lock.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            core.set_sync_error(new_err_raw(FPErr::Lpn, e));
+                            core.set_sync_error(new_err_raw(err::LPN, e));
                             return;
                         }
                     };
@@ -815,7 +788,7 @@ impl Core {
             guard = match core.lock.lock() {
                 Ok(g) => g,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(FPErr::Lpn, e));
+                    core.set_sync_error(new_err_raw(err::LPN, e));
                     return;
                 }
             };
@@ -844,7 +817,6 @@ mod tests {
     use super::*;
     use crate::{
         bpool::{BPBackend, BPCfg, BufPool},
-        error::TEST_MID,
         ffile::{FFCfg, FrozenFile},
     };
     use std::sync::{Arc, Barrier};
@@ -855,19 +827,21 @@ mod tests {
     const INIT: usize = 0x20;
     const FLUSH: Duration = Duration::from_micros(10);
 
+    const MOD_ID: u8 = 0;
+
     fn new_env() -> (tempfile::TempDir, FrozenPipe) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_pipe");
 
         let file = FrozenFile::new(FFCfg {
-            mid: TEST_MID,
             path,
+            mid: MOD_ID,
             chunk_size: CHUNK,
             initial_chunk_amount: INIT,
         })
         .unwrap();
         let pool = BufPool::new(BPCfg {
-            mid: TEST_MID,
+            mid: MOD_ID,
             chunk_size: CHUNK,
             backend: BPBackend::Prealloc { capacity: 0x100 },
         });
@@ -963,7 +937,7 @@ mod tests {
             let path = dir.path().join("tmp_pipe");
 
             let file = FrozenFile::new(FFCfg {
-                mid: TEST_MID,
+                mid: MOD_ID,
                 path,
                 chunk_size: CHUNK,
                 initial_chunk_amount: INIT,
@@ -971,7 +945,7 @@ mod tests {
             .unwrap();
 
             let pool = BufPool::new(BPCfg {
-                mid: TEST_MID,
+                mid: MOD_ID,
                 chunk_size: CHUNK,
                 backend: BPBackend::Prealloc { capacity: 1 },
             });

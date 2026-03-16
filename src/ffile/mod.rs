@@ -180,7 +180,9 @@ pub struct FFCfg {
 /// ```
 #[derive(Debug)]
 pub struct FrozenFile {
-    cfg: FFCfg,
+    /// configurations used for [`FrozenFile`]
+    pub cfg: FFCfg,
+
     file: core::cell::UnsafeCell<core::mem::ManuallyDrop<TFile>>,
 }
 

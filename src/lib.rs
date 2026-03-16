@@ -17,11 +17,11 @@ pub mod bpool;
 #[cfg(any(test, feature = "mpscq"))]
 pub mod mpscq;
 
-#[cfg(feature = "ffile")]
+#[cfg(any(test, feature = "ffile"))]
 pub mod ffile;
 
-#[cfg(feature = "fmmap")]
+#[cfg(any(test, feature = "fmmap"))]
 pub mod fmmap;
 
-#[cfg(feature = "fpipe")]
+#[cfg(any(test, feature = "fpipe"))]
 pub mod fpipe;
