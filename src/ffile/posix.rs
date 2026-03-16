@@ -8,6 +8,7 @@ use libc::{
 };
 use std::{
     ffi::CStr,
+    mem,
     sync::{atomic, OnceLock},
 };
 
@@ -21,6 +22,9 @@ const MAX_RETRIES: usize = 0x0A;
 
 /// max iovecs allowed for single readv/writev calls
 const MAX_IOVECS: usize = 0x200;
+
+/// Maximum number of [`libc::iovec`] descriptors allocated on the stack
+const STACK_IOV: usize = 0x40;
 
 /// Custom impl of `std::fs::File` for POSIX systems
 #[derive(Debug)]
@@ -372,24 +376,22 @@ impl POSIXFile {
     #[inline(always)]
     pub(super) unsafe fn preadv(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenRes<()> {
         let fd = self.fd();
-        let iovecs_len = bufs.len();
-
         let max_iovs = read_max_iovecs();
-        let mut iovecs: Vec<iovec> = bufs
-            .iter()
-            .map(|b| iovec {
-                iov_base: *b as *mut c_void,
-                iov_len: chunk_size,
-            })
-            .collect();
+
+        let (mut heap, mut stack) = build_iovecs(bufs, chunk_size);
+        let (iov_ptr, iovs_len) = if let Some(ref mut s) = stack {
+            (s.as_mut_ptr(), bufs.len())
+        } else {
+            (heap.as_mut_ptr(), heap.len())
+        };
 
         let mut head = 0usize;
         let mut off = offset as off_t;
 
-        while head < iovecs_len {
-            let remaining_iov = iovecs_len - head;
+        while head < iovs_len {
+            let remaining_iov = iovs_len - head;
             let cnt = remaining_iov.min(max_iovs) as c_int;
-            let ptr = iovecs.as_mut_ptr().add(head);
+            let ptr = iov_ptr.add(head);
 
             let res = preadv(fd, ptr, cnt, off);
 
@@ -437,8 +439,8 @@ impl POSIXFile {
             head += full_pages;
 
             // partially written page (rare)
-            if partial > 0 && head < iovecs_len {
-                let iov = &mut iovecs[head];
+            if partial > 0 && head < iovs_len {
+                let iov = &mut *iov_ptr.add(head);
                 iov.iov_base = (iov.iov_base as *mut u8).add(partial) as *mut c_void;
                 iov.iov_len -= partial;
             }
@@ -458,22 +460,20 @@ impl POSIXFile {
         let fd = self.fd();
         let max_iovs = read_max_iovecs();
 
-        let iovecs_len = bufs.len();
-        let mut iovecs: Vec<iovec> = bufs
-            .iter()
-            .map(|b| iovec {
-                iov_base: *b as *mut c_void,
-                iov_len: chunk_size,
-            })
-            .collect();
+        let (mut heap, mut stack) = build_iovecs(bufs, chunk_size);
+        let (iov_ptr, iovs_len) = if let Some(ref mut s) = stack {
+            (s.as_mut_ptr(), bufs.len())
+        } else {
+            (heap.as_mut_ptr(), heap.len())
+        };
 
         let mut head = 0usize;
         let mut off = offset as off_t;
 
-        while head < iovecs_len {
-            let remaining_iov = iovecs_len - head;
+        while head < iovs_len {
+            let remaining_iov = iovs_len - head;
             let cnt = remaining_iov.min(max_iovs) as c_int;
-            let ptr = iovecs.as_mut_ptr().add(head);
+            let ptr = iov_ptr.add(head);
 
             let res = pwritev(fd, ptr, cnt, off);
 
@@ -519,8 +519,8 @@ impl POSIXFile {
             head += full_pages;
 
             // partially written page (rare)
-            if partial > 0 && head < iovecs_len {
-                let iov = &mut iovecs[head];
+            if partial > 0 && head < iovs_len {
+                let iov = &mut *iov_ptr.add(head);
                 iov.iov_base = (iov.iov_base as *mut u8).add(partial) as *mut c_void;
                 iov.iov_len -= partial;
             }
@@ -1182,6 +1182,42 @@ unsafe fn f_advise_raw(fd: TFileId) -> FrozenRes<()> {
             // hint is not supported
             _ => return Ok(()),
         }
+    }
+}
+
+/// Builds a contiguous array of [`libc::iovec`] structures for vectored I/O
+///
+/// ## Stack vs Heap allocation
+///
+/// For small batches (`bufs.len() <= STACK_IOV`), the `iovec` array is allocated on the stack to avoid runtime
+/// heap allocation overhead, and for larger batches, a `Vec<iovec>` is allocated on the heap
+///
+/// This design reduces allocator traffic & improves cache locality for common small batch workloads ;)
+#[inline(always)]
+unsafe fn build_iovecs(bufs: &[*mut u8], chunk_size: usize) -> (Vec<iovec>, Option<[iovec; STACK_IOV]>) {
+    if bufs.len() <= STACK_IOV {
+        let mut stack: mem::MaybeUninit<[iovec; STACK_IOV]> = mem::MaybeUninit::uninit();
+        let ptr = stack.as_mut_ptr() as *mut iovec;
+
+        for (i, &b) in bufs.iter().enumerate() {
+            ptr.add(i).write(iovec {
+                iov_base: b as *mut c_void,
+                iov_len: chunk_size,
+            });
+        }
+
+        let stack = stack.assume_init();
+        (Vec::new(), Some(stack))
+    } else {
+        let mut heap = Vec::with_capacity(bufs.len());
+        for &b in bufs {
+            heap.push(iovec {
+                iov_base: b as *mut c_void,
+                iov_len: chunk_size,
+            });
+        }
+
+        (heap, None)
     }
 }
 
