@@ -31,7 +31,7 @@
 /// Custom result type w/ [`FrozenErr`] as error type
 pub type FrozenRes<T> = Result<T, FrozenErr>;
 
-/// Utilities for error propagation used across `[frozen_core]`
+/// Utility for error propagation used across [`frozen_core`]
 #[derive(Debug, Clone)]
 pub struct FrozenErr {
     /// Encoded 32-bit unique identifier for [`FrozenErr`]

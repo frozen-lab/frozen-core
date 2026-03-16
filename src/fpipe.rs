@@ -138,7 +138,15 @@ pub struct FrozenPipe {
 impl FrozenPipe {
     /// Create a new instance of [`FrozenPipe`]
     pub fn new(file: ffile::FrozenFile, pool: bpool::BufPool, flush_duration: time::Duration) -> FrozenRes<Self> {
-        let core = Core::new(file, pool, flush_duration)?;
+        let chunk_size = file.cfg.chunk_size;
+
+        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
+        // first caller sets the value and all subsequent calls reuse it
+        let _ = MODULE_ID.get_or_init(|| file.cfg.mid);
+
+        let core = Core::new(file, pool, flush_duration, chunk_size)?;
+
+        // INFO: we spawn the thread for background sync
         let tx = Core::spawn_tx(core.clone())?;
 
         Ok(Self { core, tx: Some(tx) })
@@ -579,13 +587,8 @@ impl Core {
         file: ffile::FrozenFile,
         pool: bpool::BufPool,
         flush_duration: time::Duration,
+        chunk_size: usize,
     ) -> FrozenRes<sync::Arc<Self>> {
-        let chunk_size = file.cfg.chunk_size;
-
-        // NOTE: we only set it the module_id once, hence it'll be only set once per instance
-        // and is only used for error logging
-        let _ = MODULE_ID.get_or_init(|| file.cfg.mid);
-
         Ok(sync::Arc::new(Self {
             file,
             pool,

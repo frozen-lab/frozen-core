@@ -252,13 +252,13 @@ impl FrozenFile {
 
         let file = slf.get_file();
 
-        // INFO: right after open is successful, we must obtain an exclusive lock on the
-        // entire file, hence when another instance of [`FrozenFile`], when trying to access
-        // the same file, would correctly fail, while again obtaining the lock
+        // INFO: right after open is successful, we must obtain an exclusive lock on the entire file, hence when
+        // another instance of [`FrozenFile`], when trying to access the same file, would correctly fail, while
+        // again obtaining the lock
         unsafe { file.flock() }?;
 
-        // NOTE: we only set it the module_id once, right after an exclusive lock for the entire file is
-        // acquired, hence it'll be only set once per instance and is only used for error logging
+        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
+        // first caller sets the value and all subsequent calls reuse it
         let _ = MODULE_ID.get_or_init(|| cfg.mid);
 
         let curr_len = slf.length()?;
