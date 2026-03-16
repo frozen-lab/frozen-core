@@ -362,7 +362,7 @@ impl PreallocState {
             return Ok(());
         }
 
-        let mut guard = pool.lock.lock().map_err(|e| new_err(err_code::LPN, e, pool.cfg.mid))?;
+        let mut guard = pool.lock.lock().map_err(|e| new_err(err::LPN, e, pool.cfg.mid))?;
 
         if self.has_free() {
             return Ok(());
@@ -372,7 +372,7 @@ impl PreallocState {
             guard = pool
                 .wait_cv
                 .wait(guard)
-                .map_err(|e| new_err(err_code::LPN, e, pool.cfg.mid))?;
+                .map_err(|e| new_err(err::LPN, e, pool.cfg.mid))?;
         }
 
         Ok(())
@@ -412,7 +412,7 @@ impl PreallocState {
 /// Domain Id for [`BufPool`] is **19**
 const ERRDOMAIN: u8 = 0x13;
 
-mod err_code {
+mod err {
     use super::ErrCode;
 
     /// (768) Lock error (failed or poisoned)
