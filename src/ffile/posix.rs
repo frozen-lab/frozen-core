@@ -550,6 +550,7 @@ unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenRes<TFileId> {
     #[cfg(target_os = "linux")]
     let (mut flags, mut tried_noatime) = (flags, false);
 
+    let mut retries = 0; // only for EINTR errors
     loop {
         let fd = if flags & O_CREAT != 0 {
             open(cpath.as_ptr(), flags, perm)
@@ -573,7 +574,14 @@ unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenRes<TFileId> {
 
             match errno {
                 // NOTE: We must retry on interuption errors (EINTR retry)
-                EINTR => continue,
+                EINTR | EAGAIN => {
+                    if retries < MAX_RETRIES {
+                        retries += 1;
+                        continue;
+                    }
+
+                    return new_err(err::UNK, err_msg);
+                }
 
                 // no space available on disk
                 ENOSPC => return new_err(err::NSP, err_msg),

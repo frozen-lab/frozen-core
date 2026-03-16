@@ -38,7 +38,7 @@
 mod posix;
 
 use crate::{
-    error::{FrozenErr, FrozenRes},
+    error::{ErrCode, FrozenErr, FrozenRes},
     ffile::{FFCfg, FrozenFile},
     hints,
 };
@@ -48,79 +48,68 @@ use std::{
     thread, time,
 };
 
-/// type for `epoch` used by write ops
-type TEpoch = u64;
-
 /// Domain Id for [`FrozenMMap`] is **18**
 const ERRDOMAIN: u8 = 0x12;
+
+/// type for `epoch` used by write ops
+pub type TEpoch = u64;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 type TMap = posix::POSIXMMap;
 
-/// module id used for [`FrozenErr`]
-static mut MODULE_ID: u8 = 0;
+/// module id used for [`FrozenMMap`]
+static MODULE_ID: sync::OnceLock<u8> = sync::OnceLock::new();
 
-/// Error codes for [`FrozenMMap`]
-#[repr(u16)]
-pub enum FMMapErr {
-    /// (512) internal fuck up (hault and catch fire)
-    Hcf = 0x200,
-
-    /// (513) unknown error (fallback)
-    Unk = 0x201,
-
-    /// (514) no more memory available
-    Nmm = 0x202,
-
-    /// (515) syncing error
-    Syn = 0x203,
-
-    /// (516) thread error or panic inside thread
-    Txe = 0x204,
-
-    /// (517) lock error (failed or poisoned)
-    Lpn = 0x205,
-
-    /// (518) perm error (read or write)
-    Prm = 0x208,
-
-    /// (519) invalid cfg
-    Cfg = 0x209,
+#[cfg(not(test))]
+#[inline(always)]
+fn mod_id() -> &'static u8 {
+    MODULE_ID.get().unwrap()
 }
 
-impl FMMapErr {
-    #[inline]
-    fn default_message(&self) -> &'static [u8] {
-        match self {
-            Self::Cfg => b"invalid cfg",
-            Self::Lpn => b"lock poisoned",
-            Self::Unk => b"unknown error type",
-            Self::Nmm => b"no more memory left",
-            Self::Hcf => b"hault and catch fire",
-            Self::Prm => b"no perm to read or write",
-            Self::Txe => b"thread failed or paniced",
-            Self::Syn => b"failed to sync/flush data to storage device",
-        }
-    }
+#[cfg(test)]
+#[inline(always)]
+fn mod_id() -> &'static u8 {
+    MODULE_ID.get_or_init(|| 0)
+}
+
+/// Error codes for [`FrozenMMap`]
+pub(in crate::fmmap) mod err {
+    use super::ErrCode;
+
+    /// (512) internal fuck up (hault and catch fire)
+    pub const HCF: ErrCode = ErrCode::new(0x200, "hault and catch fire");
+
+    /// (513) unknown error (fallback)
+    pub const UNK: ErrCode = ErrCode::new(0x201, "unknown error");
+
+    /// (514) no more memory available
+    pub const NMM: ErrCode = ErrCode::new(0x202, "not enough memory available on the device");
+
+    /// (515) syncing error
+    pub const SYN: ErrCode = ErrCode::new(0x203, "failed to sync/flush data to storage device");
+
+    /// (516) no write/read perm
+    pub const PRM: ErrCode = ErrCode::new(0x204, "missing permissions for IO");
+
+    /// (517) flush_tx error (panic inside)
+    pub const TXE: ErrCode = ErrCode::new(0x205, "flush_tx paniced inside");
+
+    /// (518) flush_tx error (unable to spawn)
+    pub const FXE: ErrCode = ErrCode::new(0x206, "unable to spawn flush_tx");
+
+    /// (519) lock poisoned
+    pub const LPN: ErrCode = ErrCode::new(0x207, "lock poisoned internally");
 }
 
 #[inline]
-pub(in crate::fmmap) fn new_err<R>(res: FMMapErr, message: Vec<u8>) -> FrozenRes<R> {
-    let detail = res.default_message();
-    let err = FrozenErr::new(unsafe { MODULE_ID }, ERRDOMAIN, res as u16, detail, message);
+pub(in crate::fmmap) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenRes<R> {
+    let err = FrozenErr::new_raw(*mod_id(), ERRDOMAIN, code, error);
     Err(err)
 }
 
 #[inline]
-pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(res: FMMapErr, error: E) -> FrozenErr {
-    let detail = res.default_message();
-    FrozenErr::new(
-        unsafe { MODULE_ID },
-        ERRDOMAIN,
-        res as u16,
-        detail,
-        error.to_string().as_bytes().to_vec(),
-    )
+pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenErr {
+    FrozenErr::new_raw(*mod_id(), ERRDOMAIN, code, error)
 }
 
 /// Config for [`FrozenMMap`]
@@ -241,7 +230,7 @@ where
 
         // NOTE: we only set it the module_id once, right after an exclusive lock for the entire file is
         // acquired, hence it'll be only set once per instance and is only used for error logging
-        unsafe { MODULE_ID = cfg.mid };
+        let _ = MODULE_ID.get_or_init(|| cfg.mid);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
         let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length));
@@ -302,7 +291,7 @@ where
 
         let mut guard = match self.core.durable_lock.lock() {
             Ok(g) => g,
-            Err(e) => return Err(new_err_raw(FMMapErr::Lpn, e)),
+            Err(e) => return new_err(err::LPN, e),
         };
 
         loop {
@@ -316,7 +305,7 @@ where
 
             guard = match self.core.durable_cv.wait(guard) {
                 Ok(g) => g,
-                Err(e) => return Err(new_err_raw(FMMapErr::Lpn, e)),
+                Err(e) => return new_err(err::LPN, e),
             };
         }
     }
@@ -454,11 +443,7 @@ where
 
         // NOTE: we must also notify cv's waiting for durability (we skip if there was no batch to sync)
         if prev {
-            let _g = self
-                .core
-                .durable_lock
-                .lock()
-                .map_err(|e| new_err_raw(FMMapErr::Lpn, e))?;
+            let _g = self.core.durable_lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
 
             self.core.durable_cv.notify_all();
         }
@@ -521,7 +506,7 @@ where
             core.sync()?;
             core.incr_epoch();
 
-            let _g = core.durable_lock.lock().map_err(|e| new_err_raw(FMMapErr::Lpn, e))?;
+            let _g = core.durable_lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
             core.durable_cv.notify_all();
         }
 
@@ -592,7 +577,7 @@ where
             core.sync()?;
             core.incr_epoch();
 
-            let _g = core.durable_lock.lock().map_err(|e| new_err_raw(FMMapErr::Lpn, e))?;
+            let _g = core.durable_lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
             core.durable_cv.notify_all();
         }
 
@@ -746,12 +731,12 @@ impl Core {
 
     #[inline]
     fn acquire_io_lock(&self) -> FrozenRes<sync::RwLockReadGuard<'_, ()>> {
-        self.io_lock.read().map_err(|e| new_err_raw(FMMapErr::Lpn, e))
+        self.io_lock.read().map_err(|e| new_err_raw(err::LPN, e))
     }
 
     #[inline]
     fn acquire_exclusive_io_lock(&self) -> FrozenRes<sync::RwLockWriteGuard<'_, ()>> {
-        self.io_lock.write().map_err(|e| new_err_raw(FMMapErr::Lpn, e))
+        self.io_lock.write().map_err(|e| new_err_raw(err::LPN, e))
     }
 
     #[inline]
@@ -765,11 +750,7 @@ impl Core {
             .spawn(move || Self::flush_tx(core))
         {
             Ok(tx) => Ok(tx),
-            Err(error) => {
-                let mut error = error.to_string().as_bytes().to_vec();
-                error.extend_from_slice(b"Failed to spawn flush thread for FrozenMMap");
-                new_err(FMMapErr::Hcf, error)
-            }
+            Err(error) => new_err(err::FXE, error),
         }
     }
 
@@ -778,16 +759,7 @@ impl Core {
         let mut guard = match core.lock.lock() {
             Ok(g) => g,
             Err(error) => {
-                let mut message = error.to_string().as_bytes().to_vec();
-                message.extend_from_slice(b"Flush thread died before init could be completed for FrozenMMap");
-                let error = FrozenErr::new(
-                    unsafe { MODULE_ID },
-                    ERRDOMAIN,
-                    FMMapErr::Lpn as u16,
-                    FMMapErr::Lpn.default_message(),
-                    message,
-                );
-                core.set_sync_error(error);
+                core.set_sync_error(new_err_raw(err::FXE, error));
                 return;
             }
         };
@@ -797,7 +769,7 @@ impl Core {
             guard = match core.cv.wait_timeout(guard, core.flush_duration) {
                 Ok((g, _)) => g,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(FMMapErr::Txe, e));
+                    core.set_sync_error(new_err_raw(err::TXE, e));
                     return;
                 }
             };
@@ -822,7 +794,7 @@ impl Core {
             let io_lock = match core.acquire_exclusive_io_lock() {
                 Ok(lock) => lock,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(FMMapErr::Lpn, e));
+                    core.set_sync_error(e);
                     return;
                 }
             };
@@ -847,7 +819,7 @@ impl Core {
                     let _g = match core.durable_lock.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            core.set_sync_error(new_err_raw(FMMapErr::Lpn, e));
+                            core.set_sync_error(new_err_raw(err::LPN, e));
                             return;
                         }
                     };
@@ -862,7 +834,7 @@ impl Core {
             guard = match core.lock.lock() {
                 Ok(g) => g,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(FMMapErr::Lpn, e));
+                    core.set_sync_error(new_err_raw(err::LPN, e));
                     return;
                 }
             };
@@ -938,13 +910,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::TEST_MID;
-    use crate::ffile::FFileErr;
-
-    const INIT_SLOTS: usize = 0x0A;
 
     // NOTE: we keep this small on purpose, so we won't have to wait at all in tests
     const FLUSH_DURATION: time::Duration = time::Duration::from_micros(10);
+
+    const INIT_SLOTS: usize = 0x0A;
+    const MOD_ID: u8 = 0;
 
     fn new_tmp() -> (tempfile::TempDir, FMCfg) {
         let dir = tempfile::tempdir().unwrap();
@@ -952,7 +923,7 @@ mod tests {
 
         let cfg = FMCfg {
             path,
-            mid: TEST_MID,
+            mid: MOD_ID,
             initial_count: INIT_SLOTS,
             flush_duration: FLUSH_DURATION,
         };
@@ -1009,8 +980,7 @@ mod tests {
 
             // update cfg + opne existing
             cfg.initial_count = INIT_SLOTS * 2;
-            let err = FrozenMMap::<u8>::new(cfg).unwrap_err();
-            assert!(err.compare(FFileErr::Cpt as u16));
+            assert!(FrozenMMap::<u8>::new(cfg).is_err());
         }
 
         #[test]
@@ -1029,9 +999,7 @@ mod tests {
 
             mmap.delete().unwrap();
             assert!(!mmap.core.ffile.exists().unwrap());
-
-            let err = mmap.delete().unwrap_err();
-            assert!(err.compare(FFileErr::Inv as u16));
+            assert!(mmap.delete().is_err());
         }
 
         #[test]

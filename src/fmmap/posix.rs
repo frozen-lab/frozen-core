@@ -1,9 +1,9 @@
-use super::{new_err, FMMapErr, ObjectInterface};
+use super::{err, new_err, ObjectInterface};
 use crate::{error::FrozenRes, hints};
 use core::{ffi::CStr, ptr};
 use libc::{
-    c_void, mmap, msync, munmap, off_t, size_t, strerror, EACCES, EBADF, EBUSY, EINTR, EINVAL, EIO, ENOMEM, EOVERFLOW,
-    MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
+    c_void, mmap, msync, munmap, off_t, size_t, strerror, EACCES, EAGAIN, EBADF, EBUSY, EINTR, EINVAL, EIO, ENODEV,
+    ENOMEM, EOVERFLOW, EPERM, ETXTBSY, MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
 };
 
 type TPtr = *mut c_void;
@@ -68,31 +68,47 @@ impl POSIXMMap {
 ///
 /// For our usecase, we always map the entire file, hence this is never an issue for us
 unsafe fn mmap_raw(fd: i32, length: size_t) -> FrozenRes<TPtr> {
-    let ptr = mmap(
-        ptr::null_mut(),
-        length,
-        PROT_WRITE | PROT_READ,
-        MAP_SHARED,
-        fd,
-        0 as off_t,
-    );
+    let mut retries = 0; // only for EINTR errors
+    loop {
+        let ptr = mmap(
+            ptr::null_mut(),
+            length,
+            PROT_WRITE | PROT_READ,
+            MAP_SHARED,
+            fd,
+            0 as off_t,
+        );
 
-    if ptr == MAP_FAILED {
-        let errno = last_errno();
-        let err_msg = err_msg(errno);
+        if ptr == MAP_FAILED {
+            let errno = last_errno();
+            let err_msg = err_msg(errno);
 
-        match errno {
-            // invalid fd, invalid fd type, invalid length, etc.
-            EINVAL | EBADF | EACCES | EOVERFLOW => return new_err(FMMapErr::Hcf, err_msg),
+            match errno {
+                // NOTE: We must retry on interuption errors (EINTR retry)
+                EINTR | EBUSY | EAGAIN => {
+                    if retries < MAX_RETRIES {
+                        retries += 1;
+                        continue;
+                    }
 
-            // no more memory available
-            ENOMEM => return new_err(FMMapErr::Nmm, err_msg),
+                    return new_err(err::UNK, err_msg);
+                }
 
-            _ => return new_err(FMMapErr::Unk, err_msg),
-        };
+                // invalid fd, invalid fd type, invalid length, etc.
+                EINVAL | EBADF | EOVERFLOW => return new_err(err::HCF, err_msg),
+
+                // no more memory available
+                ENOMEM => return new_err(err::NMM, err_msg),
+
+                // permission denied or read-only file
+                EACCES | EPERM | ENODEV | ETXTBSY => return new_err(err::PRM, err_msg),
+
+                _ => return new_err(err::UNK, err_msg),
+            };
+        }
+
+        return Ok(ptr);
     }
-
-    Ok(ptr)
 }
 
 /// unmap the created memory mapping w/ `mummap(2)` by given ref `ptr` and `length`
@@ -106,9 +122,9 @@ unsafe fn munmap_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
 
     match errno {
         // invalid/unaligned ptr or address range is not mapped
-        EINVAL | ENOMEM => new_err(FMMapErr::Hcf, err_msg),
+        EINVAL | ENOMEM => return new_err(err::HCF, err_msg),
 
-        _ => new_err(FMMapErr::Unk, err_msg),
+        _ => return new_err(err::UNK, err_msg),
     }
 }
 
@@ -132,7 +148,7 @@ unsafe fn msync_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
 
         match errno {
             // IO interrupt, locked file or fatel error
-            EINTR | EBUSY => {
+            EINTR | EBUSY | EAGAIN => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;
@@ -140,19 +156,19 @@ unsafe fn msync_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
 
                 // NOTE: sync error indicates that retries exhausted and durability is broken
                 // in the current/last window/batch
-                return new_err(FMMapErr::Syn, err_msg);
+                return new_err(err::SYN, err_msg);
             }
 
             // fatal error, i.e. no sync for writes in recent window/batch
-            EIO => return new_err(FMMapErr::Syn, err_msg),
+            EIO => return new_err(err::SYN, err_msg),
 
             // invalid fd or lack of support for sync
-            EINVAL => return new_err(FMMapErr::Hcf, err_msg),
+            EINVAL => return new_err(err::HCF, err_msg),
 
             // no-more memory available
-            ENOMEM => return new_err(FMMapErr::Nmm, err_msg),
+            ENOMEM => return new_err(err::NMM, err_msg),
 
-            _ => return new_err(FMMapErr::Unk, err_msg),
+            _ => return new_err(err::UNK, err_msg),
         }
     }
 }
@@ -171,26 +187,25 @@ fn last_errno() -> i32 {
 }
 
 #[inline]
-unsafe fn err_msg(errno: i32) -> Vec<u8> {
+unsafe fn err_msg(errno: i32) -> String {
     let ptr = strerror(errno);
     if ptr.is_null() {
-        return Vec::new();
+        return String::new();
     }
 
-    CStr::from_ptr(ptr).to_bytes().to_vec()
+    CStr::from_ptr(ptr).to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        error::TEST_MID,
-        ffile::{FFCfg, FrozenFile},
-    };
+    use crate::ffile::{FFCfg, FrozenFile};
 
     const CHUNK: usize = 0x10;
     const INIT_CHUNKS: usize = 0x0A;
     const LENGTH: usize = CHUNK * INIT_CHUNKS;
+
+    const MOD_ID: u8 = 0;
 
     fn new_tmp() -> (tempfile::TempDir, FrozenFile) {
         let dir = tempfile::tempdir().unwrap();
@@ -198,7 +213,7 @@ mod tests {
 
         let cfg = FFCfg {
             path,
-            mid: TEST_MID,
+            mid: MOD_ID,
             chunk_size: CHUNK,
             initial_chunk_amount: INIT_CHUNKS,
         };
@@ -241,8 +256,7 @@ mod tests {
             let (_dir, file) = new_tmp();
 
             unsafe {
-                let err = POSIXMMap::new(file.fd(), 0).unwrap_err();
-                assert!(err.compare(FMMapErr::Hcf as u16));
+                assert!(POSIXMMap::new(file.fd(), 0).is_err());
             }
         }
 
@@ -251,8 +265,7 @@ mod tests {
             let (_dir, _) = new_tmp();
 
             unsafe {
-                let err = POSIXMMap::new(-1, LENGTH).unwrap_err();
-                assert!(err.compare(FMMapErr::Hcf as u16));
+                assert!(POSIXMMap::new(-1, LENGTH).is_err());
             }
         }
 
@@ -262,8 +275,7 @@ mod tests {
 
             unsafe {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
-                let err = mmap.unmap(0).unwrap_err();
-                assert!(err.compare(FMMapErr::Hcf as u16));
+                assert!(mmap.unmap(0).is_err());
             }
         }
     }
@@ -454,8 +466,8 @@ mod tests {
             unsafe {
                 let path = dir.path().join("tmp_map");
                 let cfg = FFCfg {
-                    mid: TEST_MID,
                     path,
+                    mid: MOD_ID,
                     chunk_size: CHUNK,
                     initial_chunk_amount: INIT_CHUNKS,
                 };
