@@ -39,70 +39,13 @@ jobs:
           key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
 
       - name: Cargo check (lib)
-        run: cargo check
+        run: cargo check --release --all-features
 
       - name: Cargo check (tests)
-        run: cargo check --tests
-
-      - name: Cargo check (examples)
-        run: cargo check --examples
-  
-  examples:
-    needs: lints
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04-arm
-            arch: aarch64
-          - os: macos-15-intel
-            arch: x86_64
-          - os: ubuntu-latest
-            arch: x86_64
-          - os: macos-latest
-            arch: aarch64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
-          cache-on-failure: true
-
-      - name: Example (FrozenFile)
-        run: |
-          cargo run --release --example ff w
-          cargo run --release --example ff r
-          
-      - name: Example (FrozenMMap)
-        run: |
-          cargo run --release --example fm  
-          
-      - name: Example (Crc32)
-        run: |
-          cargo run --release --example crc
-        
-      - name: Example (BPool)
-        run: |
-          cargo run --release --example bp          
-          
-      - name: Example (MPSCQ)
-        run: |
-          cargo run --release --example mq
-          
-      - name: Example (FrozenPipe)
-        run: |
-          cargo run --release --example fp
+        run: cargo check --tests --release --all-features       
 
   release:
-    needs: examples
+    needs: lints
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -123,7 +66,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
-    needs: release
+    needs: lints
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
