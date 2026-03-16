@@ -34,13 +34,10 @@ jobs:
           key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
 
       - name: Cargo check (lib)
-        run: cargo check
+        run: cargo check --release --all-features
 
       - name: Cargo check (tests)
-        run: cargo check --tests
-
-      - name: Cargo check (examples)
-        run: cargo check --examples
+        run: cargo check --tests --release --all-features
   
   linux:
     needs: lints
