@@ -9,13 +9,12 @@
 //! let path = dir.path().join("tmp_frozen_mmap");
 //!
 //! let cfg = FMCfg {
-//!     path,
 //!     mid: 0u8,
 //!     initial_count: 0x0A,
 //!     flush_duration: std::time::Duration::from_micros(0x96),
 //! };
 //!
-//! let mmap = FrozenMMap::<u64>::new(cfg.clone()).unwrap();
+//! let mmap = FrozenMMap::<u64>::new(&path, cfg.clone()).unwrap();
 //! assert_eq!(mmap.slots(), 0x0A);
 //!
 //! let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
@@ -29,7 +28,7 @@
 //!
 //! drop(mmap);
 //!
-//! let reopened = FrozenMMap::<u64>::new(cfg).unwrap();
+//! let reopened = FrozenMMap::<u64>::new(&path, cfg).unwrap();
 //! let val = reopened.read(0, |v| *v).unwrap();
 //! assert_eq!(val, 0xDEADC0DE);
 //! ```
@@ -118,11 +117,6 @@ pub struct FMCfg {
     /// Module id used for error logging
     pub mid: u8,
 
-    /// Path for the underlying file
-    ///
-    /// *NOTE:* The caller must make sure that the parent directory exists
-    pub path: std::path::PathBuf,
-
     /// Number of slots to pre-allocate when [`FrozenMMap`] is initialized
     ///
     /// Each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`], where initial file length will
@@ -145,13 +139,12 @@ pub struct FMCfg {
 /// let path = dir.path().join("tmp_frozen_mmap");
 ///
 /// let cfg = FMCfg {
-///     path,
 ///     mid: 0u8,
 ///     initial_count: 0x0A,
 ///     flush_duration: std::time::Duration::from_micros(0x96),
 /// };
 ///
-/// let mmap = FrozenMMap::<u64>::new(cfg.clone()).unwrap();
+/// let mmap = FrozenMMap::<u64>::new(&path, cfg.clone()).unwrap();
 /// assert_eq!(mmap.slots(), 0x0A);
 ///
 /// let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
@@ -165,7 +158,7 @@ pub struct FMCfg {
 ///
 /// drop(mmap);
 ///
-/// let reopened = FrozenMMap::<u64>::new(cfg).unwrap();
+/// let reopened = FrozenMMap::<u64>::new(&path, cfg).unwrap();
 /// let val = reopened.read(0, |v| *v).unwrap();
 /// assert_eq!(val, 0xDEADC0DE);
 /// ```
@@ -217,11 +210,11 @@ where
     /// We acquire an exclusive lock for the entire file, this protects against operating with
     /// multiple simultenious instance of [`FrozenFile`], when trying to call [`FrozenFile::new`]
     /// when already called, [`FFileErrRes::Lck`] error will be thrown
-    pub fn new(cfg: FMCfg) -> FrozenRes<Self> {
+    pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg) -> FrozenRes<Self> {
         let ff_cfg = FFCfg {
             mid: cfg.mid,
-            path: cfg.path,
             chunk_size: Self::SLOT_SIZE,
+            path: path.as_ref().to_path_buf(),
             initial_chunk_amount: cfg.initial_count,
         };
 
@@ -265,13 +258,12 @@ where
     /// let path = dir.path().join("tmp_wait_epoch");
     ///
     /// let cfg = FMCfg {
-    ///     path,
     ///     mid: 0u8,
     ///     initial_count: 0x04,
     ///     flush_duration: std::time::Duration::from_micros(0x60),
     /// };
     ///
-    /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    /// let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
     ///
     /// let (_, epoch) = mmap.write(0, |v| *v = 0x8A).unwrap();
     /// mmap.wait_for_durability(epoch).unwrap();
@@ -321,13 +313,12 @@ where
     /// let path = dir.path().join("tmp_read_mmap");
     ///
     /// let cfg = FMCfg {
-    ///     path,
     ///     mid: 0u8,
     ///     initial_count: 0x02,
     ///     flush_duration: std::time::Duration::from_micros(0x60),
     /// };
     ///
-    /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    /// let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
     /// mmap.write(0, |v| *v = 0x0A).unwrap();
     ///
     /// let val = mmap.read(0, |v| *v).unwrap();
@@ -356,13 +347,12 @@ where
     /// let path = dir.path().join("tmp_write_mmap");
     ///
     /// let cfg = FMCfg {
-    ///     path,
     ///     mid: 0u8,
     ///     initial_count: 0x02,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
-    /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    /// let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
     ///
     /// let (_, epoch) = mmap.write(1, |v| *v = 0x2B).unwrap();
     /// mmap.wait_for_durability(epoch).unwrap();
@@ -404,13 +394,12 @@ where
     /// let path = dir.path().join("tmp_write_sync");
     ///
     /// let cfg = FMCfg {
-    ///     path,
     ///     mid: 0u8,
     ///     initial_count: 0x02,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
-    /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    /// let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
     /// let (_, epoch) = mmap.write_sync(0, |v| *v = 0xC0DE).unwrap();
     ///
     /// let val = mmap.read(0, |v| *v).unwrap();
@@ -479,13 +468,12 @@ where
     /// let path = dir.path().join("tmp_grow_mmap");
     ///
     /// let cfg = FMCfg {
-    ///     path,
     ///     mid: 0u8,
     ///     initial_count: 0x02,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
-    /// let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    /// let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
     /// assert_eq!(mmap.slots(), 0x02);
     ///
     /// mmap.grow(0x03).unwrap();
@@ -557,12 +545,11 @@ where
     ///
     /// let cfg = FMCfg {
     ///     mid: 0u8,
-    ///     path: path.clone(),
     ///     initial_count: 0x04,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
-    /// let mut mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+    /// let mut mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
     ///
     /// mmap.write(0, |v| *v = 55).unwrap();
     /// mmap.delete().unwrap();
@@ -925,18 +912,17 @@ mod tests {
     const INIT_SLOTS: usize = 0x0A;
     const MOD_ID: u8 = 0;
 
-    fn new_tmp() -> (tempfile::TempDir, FMCfg) {
+    fn new_tmp() -> (tempfile::TempDir, std::path::PathBuf, FMCfg) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
         let cfg = FMCfg {
-            path,
             mid: MOD_ID,
             initial_count: INIT_SLOTS,
             flush_duration: FLUSH_DURATION,
         };
 
-        (dir, cfg)
+        (dir, path, cfg)
     }
 
     mod fm_lifecycle {
@@ -944,8 +930,8 @@ mod tests {
 
         #[test]
         fn ok_new() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u8>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u8>::new(path, cfg).unwrap();
 
             assert_eq!(mmap.core.flush_duration, FLUSH_DURATION);
             assert!(!mmap.core.dirty.load(atomic::Ordering::Acquire));
@@ -967,34 +953,34 @@ mod tests {
 
         #[test]
         fn ok_new_existing() {
-            let (_dir, cfg) = new_tmp();
+            let (_dir, path, cfg) = new_tmp();
 
             // create new + close
-            let mmap1 = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
+            let mmap1 = FrozenMMap::<u8>::new(&path, cfg.clone()).unwrap();
             drop(mmap1);
 
             // open existing
-            let mmap2 = FrozenMMap::<u8>::new(cfg).unwrap();
+            let mmap2 = FrozenMMap::<u8>::new(path, cfg).unwrap();
             drop(mmap2);
         }
 
         #[test]
         fn err_new_when_change_in_cfg() {
-            let (_dir, mut cfg) = new_tmp();
+            let (_dir, path, mut cfg) = new_tmp();
 
             // create new + close
-            let mmap1 = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
+            let mmap1 = FrozenMMap::<u8>::new(&path, cfg.clone()).unwrap();
             drop(mmap1);
 
             // update cfg + opne existing
             cfg.initial_count = INIT_SLOTS * 2;
-            assert!(FrozenMMap::<u8>::new(cfg).is_err());
+            assert!(FrozenMMap::<u8>::new(path, cfg).is_err());
         }
 
         #[test]
         fn ok_delete() {
-            let (_dir, cfg) = new_tmp();
-            let mut mmap = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mut mmap = FrozenMMap::<u8>::new(&path, cfg.clone()).unwrap();
 
             mmap.delete().unwrap();
             assert!(!mmap.core.ffile.exists().unwrap());
@@ -1002,8 +988,8 @@ mod tests {
 
         #[test]
         fn err_delete_after_delete() {
-            let (_dir, cfg) = new_tmp();
-            let mut mmap = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mut mmap = FrozenMMap::<u8>::new(&path, cfg.clone()).unwrap();
 
             mmap.delete().unwrap();
             assert!(!mmap.core.ffile.exists().unwrap());
@@ -1012,17 +998,17 @@ mod tests {
 
         #[test]
         fn ok_drop_persists_when_dropped_before_bg_flush() {
-            let (_dir, cfg) = new_tmp();
+            let (_dir, path, cfg) = new_tmp();
             const VAL: u8 = 0x0A;
 
             {
-                let mmap = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
+                let mmap = FrozenMMap::<u8>::new(&path, cfg.clone()).unwrap();
                 mmap.write(0, |byte| *byte = VAL).unwrap();
                 drop(mmap);
             }
 
             {
-                let mmap = FrozenMMap::<u8>::new(cfg.clone()).unwrap();
+                let mmap = FrozenMMap::<u8>::new(&path, cfg.clone()).unwrap();
                 let val = mmap.read(0, |byte| *byte).unwrap();
                 assert_eq!(val, VAL);
             }
@@ -1034,8 +1020,8 @@ mod tests {
 
         #[test]
         fn ok_grow_updates_length() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u8>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u8>::new(path, cfg).unwrap();
             assert_eq!(mmap.core.curr_length(), INIT_SLOTS * FrozenMMap::<u8>::SLOT_SIZE);
 
             mmap.grow(0x0A).unwrap();
@@ -1047,8 +1033,8 @@ mod tests {
 
         #[test]
         fn ok_grow_sync_cycle() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u8>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u8>::new(path, cfg).unwrap();
 
             for _ in 0..0x0A {
                 mmap.grow(0x100).unwrap();
@@ -1062,8 +1048,8 @@ mod tests {
 
         #[test]
         fn ok_write_grow_read() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
             mmap.write(0, |v| *v = 0xAA).unwrap();
             mmap.grow(0x10).unwrap();
@@ -1075,8 +1061,8 @@ mod tests {
 
         #[test]
         fn ok_write_grow_read_cycle() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
             mmap.write(0, |v| *v = 1).unwrap();
 
             for i in 0..5 {
@@ -1100,8 +1086,8 @@ mod tests {
         #[test]
         fn ok_write_wait_read_cycle() {
             const VAL: u32 = 0xDEADC0DE;
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u32>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u32>::new(path, cfg).unwrap();
 
             // write + sync
             let (_, epoch) = mmap.write(0, |ptr| *ptr = VAL).unwrap();
@@ -1115,8 +1101,8 @@ mod tests {
         #[test]
         fn ok_write_read_without_wait() {
             const VAL: u32 = 0xDEADC0DE;
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u32>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u32>::new(path, cfg).unwrap();
 
             mmap.write(0, |ptr| *ptr = VAL).unwrap();
             let val = mmap.read(0, |ptr| *ptr).unwrap();
@@ -1129,8 +1115,8 @@ mod tests {
 
         #[test]
         fn ok_write_sync_read() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
             mmap.write_sync(0, |v| *v = 0x4C).unwrap();
 
@@ -1140,8 +1126,8 @@ mod tests {
 
         #[test]
         fn ok_write_sync_wait_returns_immediately() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
             let (_, epoch) = mmap.write_sync(0, |v| *v = 0x6A).unwrap();
 
@@ -1154,8 +1140,8 @@ mod tests {
 
         #[test]
         fn ok_write_sync_epoch_progression() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
             let (_, e1) = mmap.write_sync(0, |v| *v = 1).unwrap();
             let (_, e2) = mmap.write_sync(0, |v| *v = 2).unwrap();
@@ -1168,9 +1154,9 @@ mod tests {
 
         #[test]
         fn ok_write_sync_followed_by_async_write() {
-            let (_dir, cfg) = new_tmp();
+            let (_dir, path, cfg) = new_tmp();
 
-            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
             mmap.write_sync(0, |v| *v = 0x0A).unwrap();
 
             let (_, epoch) = mmap.write(0, |v| *v = 0x14).unwrap();
@@ -1182,8 +1168,8 @@ mod tests {
 
         #[test]
         fn ok_write_sync_makes_prev_batch_durable() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
             let (_, async_epoch) = mmap.write(0, |v| *v = 1).unwrap();
             mmap.write_sync(1, |v| *v = 2).unwrap();
@@ -1198,21 +1184,19 @@ mod tests {
 
         #[test]
         fn ok_write_sync_persists_across_reopen() {
-            let (dir, cfg) = new_tmp();
+            let (_dir, path, cfg) = new_tmp();
             const VAL: u64 = 0x1000;
 
             {
-                let mmap = FrozenMMap::<u64>::new(cfg.clone()).unwrap();
+                let mmap = FrozenMMap::<u64>::new(&path, cfg.clone()).unwrap();
                 mmap.write_sync(0, |v| *v = VAL).unwrap();
             }
 
             {
-                let mmap = FrozenMMap::<u64>::new(cfg.clone()).unwrap();
+                let mmap = FrozenMMap::<u64>::new(&path, cfg.clone()).unwrap();
                 let val = mmap.read(0, |v| *v).unwrap();
                 assert_eq!(val, VAL);
             }
-
-            drop(dir);
         }
     }
 
@@ -1221,8 +1205,8 @@ mod tests {
 
         #[test]
         fn ok_wait_then_drop() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
             let (_, epoch) = mmap.write(0, |v| *v = 7).unwrap();
             mmap.wait_for_durability(epoch).unwrap();
@@ -1232,8 +1216,8 @@ mod tests {
 
         #[test]
         fn ok_epoch_monotonicity() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(cfg).unwrap();
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
             let (_, e1) = mmap.write(0, |v| *v = 1).unwrap();
             mmap.wait_for_durability(e1).unwrap();
@@ -1245,8 +1229,8 @@ mod tests {
 
         #[test]
         fn ok_wait_for_durability_with_multi_writers() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(cfg).unwrap());
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(path, cfg).unwrap());
 
             let mut handles = Vec::new();
             for _ in 0..0x0A {
@@ -1271,8 +1255,8 @@ mod tests {
 
         #[test]
         fn ok_oi_lock_with_multi_threads_same_index() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(cfg).unwrap());
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(path, cfg).unwrap());
 
             let mut handles = Vec::new();
             for _ in 0..0x0A {
@@ -1294,8 +1278,8 @@ mod tests {
 
         #[test]
         fn ok_parallel_reads_with_diff_index() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(cfg).unwrap());
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(path, cfg).unwrap());
 
             mmap.write(0, |v| *v = 0x10).unwrap();
             mmap.write(1, |v| *v = 0x20).unwrap();
@@ -1316,8 +1300,8 @@ mod tests {
 
         #[test]
         fn ok_grow_with_multi_threads() {
-            let (_dir, cfg) = new_tmp();
-            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(cfg).unwrap());
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(path, cfg).unwrap());
 
             const THREADS: usize = 4;
             const GROWS_PER_THREAD: usize = 0x10;
@@ -1349,9 +1333,9 @@ mod tests {
 
         #[test]
         fn ok_wait_during_grow_cycle() {
-            let (_dir, cfg) = new_tmp();
+            let (_dir, path, cfg) = new_tmp();
 
-            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(cfg).unwrap());
+            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(path, cfg).unwrap());
             let mmap2 = mmap.clone();
 
             let t = thread::spawn(move || {

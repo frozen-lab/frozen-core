@@ -1,5 +1,10 @@
 # Changelog
 
+## `0.0.15`
+
+- Improved notes (internal docs)
+- Improved `FrozenMMap::new` api
+
 ## `0.0.14`
 
 - Optimized vectored IO for `FrozenFile` on `POSIX` systems
