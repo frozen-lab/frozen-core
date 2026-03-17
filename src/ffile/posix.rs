@@ -2,9 +2,9 @@ use super::{err, new_err, new_err_default, TFileId};
 use crate::{error::FrozenRes, hints};
 use libc::{
     access, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite, pwritev,
-    size_t, stat, strerror, sysconf, unlink, EACCES, EAGAIN, EBADF, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE,
-    ENOENT, ENOLCK, ENOSPC, ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX, LOCK_NB, O_CLOEXEC,
-    O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, _SC_IOV_MAX,
+    size_t, stat, strerror, sysconf, unlink, EACCES, EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, EIO, EISDIR,
+    EMSGSIZE, ENOENT, ENOLCK, ENOSPC, ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX, LOCK_NB,
+    O_CLOEXEC, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, _SC_IOV_MAX,
 };
 use std::{
     ffi::CStr,
@@ -17,7 +17,7 @@ static IOV_MAX_CACHE: OnceLock<usize> = OnceLock::new();
 /// placeholder value for when current fd is closed
 pub(in crate::ffile) const CLOSED_FD: TFileId = TFileId::MIN;
 
-/// max allowed retries for `EINTR` errors
+/// max allowed retries for `EINTR`, `EBUSY` and `EAGAIN` errors
 const MAX_RETRIES: usize = 0x0A;
 
 /// max iovecs allowed for single readv/writev calls
@@ -306,7 +306,7 @@ impl POSIXFile {
 
                 match errno {
                     // io interrupt
-                    EINTR | EAGAIN => continue,
+                    EINTR | EAGAIN | EBUSY => continue,
 
                     // permission denied
                     EACCES | EPERM => return new_err(err::RED, err_msg),
@@ -349,7 +349,7 @@ impl POSIXFile {
 
                 match errno {
                     // io interrupt
-                    EINTR | EAGAIN => continue,
+                    EINTR | EAGAIN | EBUSY => continue,
 
                     // permission denied or read-only file
                     EACCES | EPERM | EROFS => return new_err(err::WRT, err_msg),
@@ -407,7 +407,7 @@ impl POSIXFile {
                 let err_msg = err_msg(errno);
 
                 match errno {
-                    EINTR | EAGAIN => continue,
+                    EINTR | EAGAIN | EBUSY => continue,
 
                     // permission denied
                     EACCES | EPERM => return new_err(err::RED, err_msg),
@@ -487,7 +487,7 @@ impl POSIXFile {
                 let err_msg = err_msg(errno);
 
                 match errno {
-                    EINTR | EAGAIN => continue,
+                    EINTR | EAGAIN | EBUSY => continue,
 
                     // permission denied
                     EACCES | EPERM => return new_err(err::WRT, err_msg),
@@ -574,7 +574,7 @@ unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenRes<TFileId> {
 
             match errno {
                 // NOTE: We must retry on interuption errors (EINTR retry)
-                EINTR | EAGAIN => {
+                EINTR | EAGAIN | EBUSY => {
                     if retries < MAX_RETRIES {
                         retries += 1;
                         continue;
@@ -654,7 +654,7 @@ unsafe fn fdatasync_raw(fd: TFileId) -> FrozenRes<()> {
             // NOTE: this must be handled seperately, cuase, if this error occurs,
             // the storage system must act, mark recent writes as failed or notify users,
             // etc. to keep the system robust and fault tolerent!
-            EINTR => {
+            EINTR | EAGAIN | EBUSY => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;
@@ -683,7 +683,7 @@ unsafe fn f_fullsync_raw(fd: TFileId) -> FrozenRes<()> {
 
         match errno {
             // IO interrupt
-            EINTR => {
+            EINTR | EAGAIN | EBUSY => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;
@@ -731,7 +731,7 @@ unsafe fn fsync_raw(fd: TFileId) -> FrozenRes<()> {
 
             match errno {
                 // IO interrupt
-                EINTR => {
+                EINTR | EAGAIN | EBUSY => {
                     if retries < MAX_RETRIES {
                         retries += 1;
                         continue;
@@ -775,7 +775,7 @@ unsafe fn sync_file_range_raw(fd: TFileId, offset: usize, len: usize) -> FrozenR
 
         match errno {
             // IO interrupt
-            EINTR => {
+            EINTR | EAGAIN | EBUSY => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;
@@ -837,7 +837,7 @@ unsafe fn fallocate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> Froz
 
         match errno {
             // IO interrupt
-            EINTR => {
+            EINTR | EAGAIN | EBUSY => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;
@@ -885,7 +885,7 @@ unsafe fn ftruncate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> Froz
 
         match errno {
             // IO interrupt
-            EINTR => {
+            EINTR | EAGAIN | EBUSY => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;
@@ -961,7 +961,8 @@ unsafe fn f_preallocate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> 
         let err_msg = err_msg(errno);
 
         match errno {
-            EINTR => {
+            // IO interrupt
+            EINTR | EAGAIN | EBUSY => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;
@@ -1019,7 +1020,7 @@ unsafe fn flock_raw(fd: TFileId) -> FrozenRes<()> {
             }
 
             // IO interrupt
-            EINTR => {
+            EINTR | EBUSY => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;
@@ -1166,7 +1167,8 @@ unsafe fn f_advise_raw(fd: TFileId) -> FrozenRes<()> {
 
         let err_msg = err_msg(res);
         match res {
-            EINTR => {
+            // IO interrupt
+            EINTR | EAGAIN | EBUSY => {
                 if retries < MAX_RETRIES {
                     retries += 1;
                     continue;

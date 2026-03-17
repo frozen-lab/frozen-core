@@ -392,12 +392,53 @@ impl FrozenFile {
     ///
     /// file.grow(0x20).unwrap();
     /// assert_eq!(file.length().unwrap(), 0x10 * (0x0A + 0x20));
-    /// ```    
+    /// ```
     pub fn grow(&self, count: usize) -> FrozenRes<()> {
         let curr_len = self.length()?;
         let len_to_add = self.cfg.chunk_size * count;
 
         unsafe { self.get_file().grow(curr_len, len_to_add) }
+    }
+
+    /// Fetch total available chunks in [`FrozenFile`] from fs
+    ///
+    /// ## Working
+    ///
+    /// This call performs a syscall to fetch current length of [`FrozenFile`] from fs, as the current length of the
+    /// file is not cached anywhere in the pipeline to avoid TOCTAU race conditions
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_frozen_file");
+    ///
+    /// let cfg = FFCfg {
+    ///     chunk_size: 0x10,
+    ///     path: path.to_path_buf(),
+    ///     initial_chunk_amount: 0x0A,
+    /// };
+    ///
+    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
+    ///
+    /// file.grow(0x20).unwrap();
+    /// assert_eq!(file.total_chunks().unwrap(), 0x0A + 0x20);
+    /// ```
+    #[inline]
+    pub fn total_chunks(&self) -> FrozenRes<usize> {
+        let curr_len = self.length()?;
+        let chunk_size = self.cfg.chunk_size;
+
+        if crate::hints::unlikely(curr_len % chunk_size != 0) {
+            return new_err_default(err::CPT);
+        }
+
+        Ok(curr_len / chunk_size)
     }
 
     #[inline]
