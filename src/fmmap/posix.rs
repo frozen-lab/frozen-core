@@ -213,11 +213,10 @@ mod tests {
 
         let cfg = FFCfg {
             path,
-            mid: MOD_ID,
             chunk_size: CHUNK,
             initial_chunk_amount: INIT_CHUNKS,
         };
-        let file = FrozenFile::new(cfg).expect("new FF");
+        let file = FrozenFile::new::<MOD_ID>(cfg).expect("new FF");
 
         (dir, file)
     }
@@ -467,12 +466,11 @@ mod tests {
                 let path = dir.path().join("tmp_map");
                 let cfg = FFCfg {
                     path,
-                    mid: MOD_ID,
                     chunk_size: CHUNK,
                     initial_chunk_amount: INIT_CHUNKS,
                 };
 
-                let file = FrozenFile::new(cfg).expect("new FF");
+                let file = FrozenFile::new::<MOD_ID>(cfg).expect("new FF");
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 let ptr = mmap.as_ptr::<u64>(0);
