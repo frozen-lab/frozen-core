@@ -6,9 +6,10 @@ use libc::{
     ENOMEM, EOVERFLOW, EPERM, ETXTBSY, MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
 };
 
-type TPtr = *mut c_void;
+/// Base pointer for `mmap(2)` mapped memory
+type TPtr = *mut u8;
 
-/// max allowed retries for `EINTR` errors
+/// max allowed retries for `EINTR`, `EBUSY` and `EAGAIN` errors
 const MAX_RETRIES: usize = 0x0A;
 
 /// Custom impl of `mmap(2)` for POSIX systems
@@ -107,13 +108,13 @@ unsafe fn mmap_raw(fd: i32, length: size_t) -> FrozenRes<TPtr> {
             };
         }
 
-        return Ok(ptr);
+        return Ok(ptr as *mut u8);
     }
 }
 
 /// unmap the created memory mapping w/ `mummap(2)` by given ref `ptr` and `length`
 unsafe fn munmap_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
-    if munmap(ptr, length) == 0 {
+    if munmap(ptr as *mut c_void, length) == 0 {
         return Ok(());
     }
 
@@ -138,7 +139,7 @@ unsafe fn munmap_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
 unsafe fn msync_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
-        let res = msync(ptr, length, MS_SYNC);
+        let res = msync(ptr as *mut c_void, length, MS_SYNC);
         if hints::likely(res == 0) {
             return Ok(());
         }
@@ -201,27 +202,46 @@ mod tests {
     use super::*;
     use crate::ffile::{FFCfg, FrozenFile};
 
+    const MOD_ID: u8 = 0;
     const CHUNK: usize = 0x10;
     const INIT_CHUNKS: usize = 0x0A;
     const LENGTH: usize = CHUNK * INIT_CHUNKS;
-
-    const MOD_ID: u8 = 0;
 
     fn new_tmp() -> (tempfile::TempDir, FrozenFile) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
-        let cfg = FFCfg {
+        let file = FrozenFile::new::<MOD_ID>(FFCfg {
             path,
             chunk_size: CHUNK,
             initial_chunk_amount: INIT_CHUNKS,
-        };
-        let file = FrozenFile::new::<MOD_ID>(cfg).expect("new FF");
+        })
+        .expect("new FF");
 
         (dir, file)
     }
 
-    mod map_umap {
+    mod utils {
+        use super::*;
+
+        #[test]
+        fn ok_last_errno() {
+            unsafe {
+                let _ = libc::close(-1);
+                assert_eq!(last_errno(), libc::EBADF);
+            }
+        }
+
+        #[test]
+        fn ok_err_msg() {
+            unsafe {
+                let msg = err_msg(libc::ENOENT);
+                assert!(!msg.is_empty(), "ENOENT must produce message");
+            }
+        }
+    }
+
+    mod map_unmap {
         use super::*;
 
         #[test]
@@ -253,19 +273,13 @@ mod tests {
         #[test]
         fn err_map_on_invalid_length() {
             let (_dir, file) = new_tmp();
-
-            unsafe {
-                assert!(POSIXMMap::new(file.fd(), 0).is_err());
-            }
+            unsafe { assert!(POSIXMMap::new(file.fd(), 0).is_err()) };
         }
 
         #[test]
         fn err_map_on_invalid_fd() {
             let (_dir, _) = new_tmp();
-
-            unsafe {
-                assert!(POSIXMMap::new(-1, LENGTH).is_err());
-            }
+            unsafe { assert!(POSIXMMap::new(-1, LENGTH).is_err()) };
         }
 
         #[test]
@@ -275,26 +289,6 @@ mod tests {
             unsafe {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
                 assert!(mmap.unmap(0).is_err());
-            }
-        }
-    }
-
-    mod utils {
-        use super::*;
-
-        #[test]
-        fn ok_last_errno() {
-            unsafe {
-                let _ = libc::close(-1);
-                assert_eq!(last_errno(), libc::EBADF);
-            }
-        }
-
-        #[test]
-        fn ok_err_msg() {
-            unsafe {
-                let msg = err_msg(libc::ENOENT);
-                assert!(!msg.is_empty(), "ENOENT must produce message");
             }
         }
     }
@@ -335,8 +329,8 @@ mod tests {
 
         #[test]
         fn ok_write_read_cycle() {
-            let (_dir, file) = new_tmp();
             const VAL: u32 = 0xDEADC0DE;
+            let (_dir, file) = new_tmp();
 
             unsafe {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
@@ -357,8 +351,8 @@ mod tests {
 
         #[test]
         fn ok_write_read_with_offset() {
-            let (_dir, file) = new_tmp();
             const VAL: u32 = 0xDEADC0DE;
+            let (_dir, file) = new_tmp();
 
             unsafe {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
@@ -379,8 +373,8 @@ mod tests {
 
         #[test]
         fn ok_write_read_sync_cycle() {
-            let (_dir, file) = new_tmp();
             const VAL: [u32; 0x0A] = [0xDEADC0DE; 0x0A];
+            let (_dir, file) = new_tmp();
 
             unsafe {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
@@ -423,9 +417,10 @@ mod tests {
 
         #[test]
         fn ok_map_durability_after_unmap() {
-            let (_dir, file) = new_tmp();
             const VAL: u64 = 0xCAFEBABEDEADC0DE;
+            let (_dir, file) = new_tmp();
 
+            // create + map + write + sync
             unsafe {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
@@ -436,6 +431,7 @@ mod tests {
                 mmap.unmap(LENGTH).unwrap();
             }
 
+            // open + map + read
             unsafe {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
@@ -448,9 +444,10 @@ mod tests {
 
         #[test]
         fn ok_map_durability_after_unmap_and_close() {
+            const VAL: u64 = 0xDEADC0DEDEADC0DE;
             let (dir, file) = new_tmp();
-            const VAL: u64 = 0xCAFEBABEDEADC0DE;
 
+            // create + map + write + sync + unmap
             unsafe {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
@@ -462,6 +459,7 @@ mod tests {
                 drop(file);
             }
 
+            // open + map + read
             unsafe {
                 let path = dir.path().join("tmp_map");
                 let cfg = FFCfg {

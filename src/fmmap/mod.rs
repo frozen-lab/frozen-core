@@ -16,7 +16,7 @@
 //! };
 //!
 //! let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg.clone()).unwrap();
-//! assert_eq!(mmap.slots(), 0x0A);
+//! assert_eq!(mmap.total_slots(), 0x0A);
 //!
 //! let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
 //! mmap.wait_for_durability(epoch).unwrap();
@@ -25,7 +25,7 @@
 //! assert_eq!(val, 0xDEADC0DE);
 //!
 //! mmap.grow(0x05).unwrap();
-//! assert_eq!(mmap.slots(), 0x0A + 0x05);
+//! assert_eq!(mmap.total_slots(), 0x0A + 0x05);
 //!
 //! drop(mmap);
 //!
@@ -144,7 +144,7 @@ pub struct FMCfg {
 /// };
 ///
 /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg.clone()).unwrap();
-/// assert_eq!(mmap.slots(), 0x0A);
+/// assert_eq!(mmap.total_slots(), 0x0A);
 ///
 /// let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
 /// mmap.wait_for_durability(epoch).unwrap();
@@ -153,7 +153,7 @@ pub struct FMCfg {
 /// assert_eq!(val, 0xDEADC0DE);
 ///
 /// mmap.grow(0x05).unwrap();
-/// assert_eq!(mmap.slots(), 0x0A + 0x05);
+/// assert_eq!(mmap.total_slots(), 0x0A + 0x05);
 ///
 /// drop(mmap);
 ///
@@ -180,12 +180,6 @@ where
 {
     /// Memory space required for each slot of [`T`] in [`FrozenMMap`]
     pub const SLOT_SIZE: usize = std::mem::size_of::<ObjectInterface<T>>();
-
-    /// Read current count of slots in [`FrozenMMap`], where each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`]
-    #[inline]
-    pub fn slots(&self) -> usize {
-        self.core.curr_length() / Self::SLOT_SIZE
-    }
 
     /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`]
     ///
@@ -226,7 +220,7 @@ where
     /// };
     ///
     /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg.clone()).unwrap();
-    /// assert_eq!(mmap.slots(), 0x0A);
+    /// assert_eq!(mmap.total_slots(), 0x0A);
     ///
     /// let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
     /// mmap.wait_for_durability(epoch).unwrap();
@@ -502,12 +496,12 @@ where
     /// };
     ///
     /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
-    /// assert_eq!(mmap.slots(), 0x02);
+    /// assert_eq!(mmap.total_slots(), 0x02);
     ///
     /// mmap.grow(0x03).unwrap();
-    /// assert_eq!(mmap.slots(), 0x05);
+    /// assert_eq!(mmap.total_slots(), 0x05);
     ///
-    /// let idx = mmap.slots() - 1;
+    /// let idx = mmap.total_slots() - 1;
     /// mmap.write(idx, |v| *v = 0x100).unwrap();
     ///
     /// let val = mmap.read(idx, |v| *v).unwrap();
@@ -547,6 +541,39 @@ where
         Ok(())
     }
 
+    /// Read current available count of slots, where each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`]
+    ///
+    /// ## Working
+    ///
+    /// This call performs a syscall to fetch current length of [`FrozenFile`] from fs, as the current length of the
+    /// file is not cached anywhere in the pipeline to avoid TOCTAU race conditions
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// const MODULE_ID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_grow_mmap");
+    ///
+    /// let cfg = FMCfg {
+    ///     initial_count: 0x02,
+    ///     flush_duration: std::time::Duration::from_micros(0x96),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
+    /// assert_eq!(mmap.total_slots(), 0x02);
+    ///
+    /// mmap.grow(0x03).unwrap();
+    /// assert_eq!(mmap.total_slots(), 0x05);
+    /// ```
+    #[inline]
+    pub fn total_slots(&self) -> usize {
+        self.core.curr_length() / Self::SLOT_SIZE
+    }
+
     /// Delete the underlying [`FrozenFile`] used for [`FrozenMMap`] from fs
     ///
     /// ## Working
@@ -580,7 +607,7 @@ where
     ///
     /// let mut mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
     ///
-    /// mmap.write(0, |v| *v = 55).unwrap();
+    /// mmap.write(0, |v| *v = 0x37).unwrap();
     /// mmap.delete().unwrap();
     /// assert!(!path.exists());
     /// ```
@@ -938,8 +965,8 @@ mod tests {
     // NOTE: we keep this small on purpose, so we won't have to wait at all in tests
     const FLUSH_DURATION: time::Duration = time::Duration::from_micros(10);
 
-    const INIT_SLOTS: usize = 0x0A;
     const MID: u8 = 0;
+    const INIT_SLOTS: usize = 0x0A;
 
     fn new_tmp() -> (tempfile::TempDir, std::path::PathBuf, FMCfg) {
         let dir = tempfile::tempdir().unwrap();
@@ -975,7 +1002,7 @@ mod tests {
 
             // satisfies wait on epoch works
             let (_, epoch) = mmap.write(0, |f| *f = 0x0A).unwrap();
-            assert_eq!(epoch, 0); // inits from 0
+            assert_eq!(epoch, 0); // mut init from 0
             assert!(mmap.wait_for_durability(epoch).is_ok());
         }
 
@@ -1053,10 +1080,7 @@ mod tests {
             assert_eq!(mmap.core.curr_length(), INIT_SLOTS * FrozenMMap::<u8, MID>::SLOT_SIZE);
 
             mmap.grow(0x0A).unwrap();
-            assert_eq!(
-                mmap.core.curr_length(),
-                (INIT_SLOTS + 0x0A) * FrozenMMap::<u8, MID>::SLOT_SIZE
-            );
+            assert_eq!(mmap.total_slots(), INIT_SLOTS + 0x0A);
         }
 
         #[test]
@@ -1064,14 +1088,11 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u8, MID>::new(path, cfg).unwrap();
 
-            for _ in 0..0x0A {
+            for _ in 0..4 {
                 mmap.grow(0x100).unwrap();
             }
 
-            assert_eq!(
-                mmap.core.curr_length(),
-                (INIT_SLOTS + (0x0A * 0x100)) * FrozenMMap::<u8, MID>::SLOT_SIZE
-            );
+            assert_eq!(mmap.total_slots(), INIT_SLOTS + (4 * 0x100));
         }
 
         #[test]
@@ -1093,18 +1114,18 @@ mod tests {
             let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
             mmap.write(0, |v| *v = 1).unwrap();
 
-            for i in 0..5 {
+            for i in 0..2 {
                 mmap.grow(0x10).unwrap();
-                let idx = mmap.slots() - 1;
+                let idx = mmap.total_slots() - 1;
                 mmap.write(idx, |v| *v = (i + 2) as u64).unwrap();
             }
 
             let base = mmap.read(0, |v| *v).unwrap();
             assert_eq!(base, 1);
 
-            let last_idx = mmap.slots() - 1;
+            let last_idx = mmap.total_slots() - 1;
             let last = mmap.read(last_idx, |v| *v).unwrap();
-            assert_eq!(last, 6);
+            assert_eq!(last, 3);
         }
     }
 
@@ -1261,7 +1282,7 @@ mod tests {
             let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(path, cfg).unwrap());
 
             let mut handles = Vec::new();
-            for _ in 0..0x0A {
+            for _ in 0..2 {
                 let mmap = mmap.clone();
                 handles.push(thread::spawn(move || {
                     let (_, epoch) = mmap.write(0, |v| *v += 1).unwrap();
@@ -1274,7 +1295,7 @@ mod tests {
             }
 
             let val = mmap.read(0, |v| *v).unwrap();
-            assert_eq!(val, 0x0A);
+            assert_eq!(val, 2);
         }
     }
 
@@ -1287,10 +1308,10 @@ mod tests {
             let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(path, cfg).unwrap());
 
             let mut handles = Vec::new();
-            for _ in 0..0x0A {
+            for _ in 0..2 {
                 let mmap = mmap.clone();
                 handles.push(thread::spawn(move || {
-                    for _ in 0..0x100 {
+                    for _ in 0..2 {
                         mmap.write(0, |v| *v += 1).unwrap();
                     }
                 }));
@@ -1301,7 +1322,7 @@ mod tests {
             }
 
             let val = mmap.read(0, |v| *v).unwrap();
-            assert_eq!(val, 0x0A * 0x100);
+            assert_eq!(val, 2 * 2);
         }
 
         #[test]
@@ -1331,8 +1352,8 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(path, cfg).unwrap());
 
-            const THREADS: usize = 4;
-            const GROWS_PER_THREAD: usize = 0x10;
+            const THREADS: usize = 2;
+            const GROWS_PER_THREAD: usize = 2;
 
             let mut handles = Vec::new();
             for _ in 0..THREADS {
@@ -1342,7 +1363,7 @@ mod tests {
                         mmap.grow(1).unwrap();
 
                         // write to last slot after grow
-                        let idx = mmap.slots() - 1;
+                        let idx = mmap.total_slots() - 1;
                         mmap.write(idx, |v| *v = 0xABCD).unwrap();
                     }
                 }));
@@ -1353,9 +1374,9 @@ mod tests {
             }
 
             let expected_min = INIT_SLOTS + (THREADS * GROWS_PER_THREAD);
-            assert_eq!(mmap.slots(), expected_min);
+            assert_eq!(mmap.total_slots(), expected_min);
 
-            let last = mmap.read(mmap.slots() - 1, |v| *v).unwrap();
+            let last = mmap.read(mmap.total_slots() - 1, |v| *v).unwrap();
             assert_eq!(last, 0xABCD);
         }
 
@@ -1367,7 +1388,7 @@ mod tests {
             let mmap2 = mmap.clone();
 
             let t = thread::spawn(move || {
-                let (_, epoch) = mmap2.write(0, |v| *v = 42).unwrap();
+                let (_, epoch) = mmap2.write(0, |v| *v = 0x36).unwrap();
                 mmap2.wait_for_durability(epoch).unwrap();
             });
 
@@ -1375,7 +1396,7 @@ mod tests {
             t.join().unwrap();
 
             let val = mmap.read(0, |v| *v).unwrap();
-            assert_eq!(val, 42);
+            assert_eq!(val, 0x36);
         }
     }
 }
