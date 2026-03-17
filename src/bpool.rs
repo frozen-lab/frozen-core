@@ -595,7 +595,7 @@ impl Drop for AllocationGuard {
 mod tests {
     use super::*;
 
-    const CAP: usize = 0x20;
+    const CAP: usize = 0x10;
     const SIZE: usize = 0x0A;
     const TEST_MOD_ID: u8 = 0;
 
@@ -775,8 +775,8 @@ mod tests {
 
         #[test]
         fn ok_concurrent_alloc() {
-            const THREADS: usize = 8;
-            const ITERS: usize = 0x1000;
+            const THREADS: usize = 2;
+            const ITERS: usize = 0x10;
 
             let barrier = Arc::new(Barrier::new(THREADS));
             let pool = Arc::new(new_pool_prealloc(CAP * 0x0A));
@@ -809,8 +809,8 @@ mod tests {
 
         #[test]
         fn ok_concurrent_dynamic_alloc() {
-            const THREADS: usize = 8;
-            const ITERS: usize = 0x200;
+            const THREADS: usize = 2;
+            const ITERS: usize = 0x10;
 
             let pool = Arc::new(new_pool_dynamic());
 

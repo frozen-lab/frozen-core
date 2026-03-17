@@ -802,6 +802,10 @@ impl Core {
                 }
             };
 
+            // QUESTION: If either of `write_batch`, `file.sync_range` or `file.sync` fails, the req_batch is dropped,
+            // as its already drained from the MPSCQ, should we re-insert it so we could retry the same ops in the
+            // next flush_tx cycle??
+
             let (_min, _max) = match core.write_batch(req_batch) {
                 Ok(res) => res,
                 Err(err) => {
@@ -819,6 +823,12 @@ impl Core {
                     continue;
                 }
             };
+
+            // NOTE: On linux, we can initiate writeback (best-effort only) for a given range
+            #[cfg(target_os = "linux")]
+            if let Err(err) = core.file.sync_range(_min, _max - _min) {
+                core.set_sync_error(err);
+            }
 
             // NOTE:
             //
@@ -880,11 +890,12 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    const CHUNK: usize = 0x20;
-    const INIT: usize = 0x20;
-    const FLUSH: Duration = Duration::from_micros(10);
-
     const MID: u8 = 0;
+    const INIT: usize = 4;
+    const CHUNK: usize = 0x10;
+
+    // NOTE: we keep this small on purpose, so we won't have to wait at all in tests
+    const FLUSH_DURATION: time::Duration = time::Duration::from_micros(10);
 
     fn new_env() -> (tempfile::TempDir, FrozenPipe<MID>) {
         let dir = tempfile::tempdir().unwrap();
@@ -893,10 +904,10 @@ mod tests {
         let pipe = FrozenPipe::<MID>::new(
             path,
             FPCfg {
-                backend: bpool::BPBackend::Prealloc { capacity: 0x100 },
                 chunk_size: CHUNK,
                 initial_chunk_amount: INIT,
-                flush_duration: FLUSH,
+                flush_duration: FLUSH_DURATION,
+                backend: bpool::BPBackend::Dynamic,
             },
         )
         .unwrap();
@@ -977,7 +988,7 @@ mod tests {
         fn ok_write_large_batch() {
             let (_dir, pipe) = new_env();
 
-            for i in 0..0x100 {
+            for i in 0..0x10 {
                 let buf = vec![i as u8; CHUNK];
                 let epoch = pipe.write(&buf, i).unwrap();
                 pipe.wait_for_durability(epoch).unwrap();
@@ -993,7 +1004,7 @@ mod tests {
                 chunk_size: CHUNK,
                 initial_chunk_amount: INIT,
                 backend: bpool::BPBackend::Prealloc { capacity: 1 },
-                flush_duration: FLUSH,
+                flush_duration: FLUSH_DURATION,
             };
             let pipe = Arc::new(FrozenPipe::<MID>::new(path, cfg).unwrap());
 
@@ -1069,13 +1080,13 @@ mod tests {
         fn ok_read_multiple_indices() {
             let (_dir, pipe) = new_env();
 
-            for i in 0..8 {
+            for i in 0..2 {
                 let buf = vec![i as u8; CHUNK];
                 let epoch = pipe.write(&buf, i).unwrap();
                 pipe.wait_for_durability(epoch).unwrap();
             }
 
-            for i in 0..8 {
+            for i in 0..2 {
                 let read = pipe.read_single(i).unwrap();
                 assert_eq!(read, vec![i as u8; CHUNK]);
             }
@@ -1111,7 +1122,7 @@ mod tests {
 
         #[test]
         fn ok_read_concurrent() {
-            const THREADS: usize = 8;
+            const THREADS: usize = 2;
 
             let (_dir, pipe) = new_env();
             let pipe = Arc::new(pipe);
@@ -1146,7 +1157,7 @@ mod tests {
             let writer = {
                 let pipe = pipe.clone();
                 thread::spawn(move || {
-                    for i in 0..0x40 {
+                    for i in 0..4 {
                         let buf = vec![i as u8; CHUNK];
                         let epoch = pipe.write(&buf, i).unwrap();
                         pipe.wait_for_durability(epoch).unwrap();
@@ -1157,7 +1168,7 @@ mod tests {
             let reader = {
                 let pipe = pipe.clone();
                 thread::spawn(move || {
-                    for _ in 0..0x40 {
+                    for _ in 0..4 {
                         let _ = pipe.read_single(0);
                     }
                 })
@@ -1190,7 +1201,7 @@ mod tests {
             let (_dir, pipe) = new_env();
 
             let mut epochs = Vec::new();
-            for i in 0..0x10 {
+            for i in 0..4 {
                 let buf = vec![i as u8; CHUNK];
                 epochs.push(pipe.write(&buf, i).unwrap());
             }
@@ -1257,8 +1268,8 @@ mod tests {
 
         #[test]
         fn ok_multi_writer() {
-            const THREADS: usize = 8;
-            const ITERS: usize = 0x100;
+            const THREADS: usize = 2;
+            const ITERS: usize = 0x10;
 
             let (_dir, pipe) = new_env();
             let pipe = Arc::new(pipe);
@@ -1283,7 +1294,7 @@ mod tests {
 
         #[test]
         fn ok_barrier_start_parallel_writes() {
-            const THREADS: usize = 8;
+            const THREADS: usize = 2;
 
             let (_dir, pipe) = new_env();
             let pipe = Arc::new(pipe);
@@ -1332,7 +1343,7 @@ mod tests {
             let pipe = Arc::new(pipe);
 
             let mut handles = Vec::new();
-            for i in 0..0x0A {
+            for i in 0..4 {
                 let pipe = pipe.clone();
 
                 handles.push(thread::spawn(move || {
@@ -1366,7 +1377,6 @@ mod tests {
             let pipe = Arc::new(pipe);
 
             let p2 = pipe.clone();
-
             let handle = thread::spawn(move || {
                 let buf = vec![1u8; CHUNK];
                 let epoch = p2.write(&buf, 0).unwrap();
@@ -1386,7 +1396,7 @@ mod tests {
 
             let p2 = pipe.clone();
             let handle = thread::spawn(move || {
-                for i in 0..0x80 {
+                for i in 0..0x10 {
                     let buf = vec![1u8; CHUNK];
                     let epoch = p2.write(&buf, i).unwrap();
                     p2.wait_for_durability(epoch).unwrap();

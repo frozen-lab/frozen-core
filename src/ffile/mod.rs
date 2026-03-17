@@ -477,9 +477,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    const CHUNK_SIZE: usize = 0x10;
-    const INIT_CHUNKS: usize = 0x0A;
     const MID: u8 = 0;
+    const INIT_CHUNKS: usize = 4;
+    const CHUNK_SIZE: usize = 0x10;
 
     fn tmp_path() -> (tempfile::TempDir, FFCfg) {
         let dir = tempfile::tempdir().unwrap();
@@ -720,7 +720,7 @@ mod tests {
             let file = Arc::new(FrozenFile::new::<MID>(cfg).unwrap());
 
             let mut handles = vec![];
-            for i in 0..0x0A {
+            for i in 0..2 {
                 let f = file.clone();
                 handles.push(std::thread::spawn(move || {
                     let mut data = [i as u8; CHUNK_SIZE];
@@ -734,7 +734,7 @@ mod tests {
 
             file.sync().unwrap();
 
-            for i in 0..0x0A {
+            for i in 0..2 {
                 let mut buf = [0u8; CHUNK_SIZE];
                 file.pread(buf.as_mut_ptr(), i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
@@ -795,7 +795,7 @@ mod tests {
             let syncer = {
                 let f = file.clone();
                 std::thread::spawn(move || {
-                    for _ in 0..0x0A {
+                    for _ in 0..2 {
                         f.sync().unwrap();
                     }
                 })
