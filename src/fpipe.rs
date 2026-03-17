@@ -14,28 +14,23 @@
 //! ## Example
 //!
 //! ```
-//! use frozen_core::fpipe::FrozenPipe;
-//! use frozen_core::ffile::{FrozenFile, FFCfg};
-//! use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+//! use frozen_core::fpipe::{FrozenPipe, FPCfg};
+//! use frozen_core::bpool::BPBackend;
 //! use std::time::Duration;
+//!
+//! const MODULE_ID: u8 = 0;
 //!
 //! let dir = tempfile::tempdir().unwrap();
 //! let path = dir.path().join("tmp_pipe");
 //!
-//! let file = FrozenFile::new(FFCfg {
-//!     path,
-//!     mid: 0,
+//! let cfg = FPCfg {
 //!     chunk_size: 0x20,
 //!     initial_chunk_amount: 4,
-//! }).unwrap();
-//!
-//! let pool = BufPool::new(BPCfg {
-//!     mid: 0,
-//!     chunk_size: 0x20,
+//!     flush_duration: Duration::from_micros(0x3A),
 //!     backend: BPBackend::Prealloc { capacity: 0x10 },
-//! });
+//! };
 //!
-//! let pipe = FrozenPipe::new(file, pool, Duration::from_micros(0x3A)).unwrap();
+//! let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
 //!
 //! let buf = vec![1u8; 0x40];
 //! let epoch = pipe.write(&buf, 0).unwrap();
@@ -56,15 +51,15 @@ use std::{
     thread, time,
 };
 
-/// Domain Id for [`FrozenPipe`] is **19**
-const ERRDOMAIN: u8 = 0x13;
+/// Domain Id for [`FrozenPipe`] is **20**
+const ERRDOMAIN: u8 = 0x14;
 
 /// module id used for [`FrozenErr`]
-static MODULE_ID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+static MID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 
 #[inline(always)]
-fn mod_id() -> &'static u8 {
-    MODULE_ID.get_or_init(|| 0)
+fn mid() -> &'static u8 {
+    MID.get().unwrap()
 }
 
 /// Error codes for [`FrozenPipe`]
@@ -79,17 +74,49 @@ mod err {
 
     /// (1026) lock poisoned
     pub const LPN: ErrCode = ErrCode::new(0x402, "lock poisoned internally");
+
+    /// (1027) underlying file is corrupted
+    pub const CPT: ErrCode = ErrCode::new(0x403, "file size misaligned to chunk size");
 }
 
 #[inline]
 fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenRes<R> {
-    let err = FrozenErr::new_raw(*mod_id(), ERRDOMAIN, code, error);
+    let err = FrozenErr::new_raw(*mid(), ERRDOMAIN, code, error);
+    Err(err)
+}
+
+#[inline]
+fn new_err_default<R>(code: ErrCode) -> FrozenRes<R> {
+    let err = FrozenErr::new_raw(*mid(), ERRDOMAIN, code, "");
     Err(err)
 }
 
 #[inline]
 fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenErr {
-    FrozenErr::new_raw(*mod_id(), ERRDOMAIN, code, error)
+    FrozenErr::new_raw(*mid(), ERRDOMAIN, code, error)
+}
+
+/// Config for [`FrozenPipe`]
+#[derive(Debug, Clone)]
+pub struct FPCfg {
+    /// Backend used [`BufPool`]
+    pub backend: bpool::BPBackend,
+
+    /// Size (in bytes) of a single chunk on fs
+    ///
+    /// A chunk is a smalled fixed size allocation and addressing unit used by
+    /// [`FrozenFile`] for all the write/read ops, which are operated by index
+    /// of the chunk and not the offset of the byte
+    pub chunk_size: usize,
+
+    /// Number of chunks to pre-allocate when [`FrozenFile`] is initialized
+    ///
+    /// Initial file length will be `chunk_size * initial_chunk_amount` (bytes)
+    pub initial_chunk_amount: usize,
+
+    /// Time interval used by flusher tx, to batch write ops into a durable window and sync them
+    /// together, where all write ops in certain time interval falls into a single durable window
+    pub flush_duration: time::Duration,
 }
 
 /// An high throughput asynchronous IO pipeline for chunk based storage, it uses batches to write requests and
@@ -98,28 +125,23 @@ fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenErr {
 /// ## Example
 ///
 /// ```
-/// use frozen_core::fpipe::FrozenPipe;
-/// use frozen_core::ffile::{FrozenFile, FFCfg};
-/// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+/// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+/// use frozen_core::bpool::BPBackend;
 /// use std::time::Duration;
+///
+/// const MODULE_ID: u8 = 0;
 ///
 /// let dir = tempfile::tempdir().unwrap();
 /// let path = dir.path().join("tmp_pipe_write");
 ///
-/// let file = FrozenFile::new(FFCfg {
-///     mid: 0,
-///     path,
+/// let cfg = FPCfg {
 ///     chunk_size: 0x20,
 ///     initial_chunk_amount: 2,
-/// }).unwrap();
-///
-/// let pool = BufPool::new(BPCfg {
-///     mid: 0,
-///     chunk_size: 0x20,
 ///     backend: BPBackend::Dynamic,
-/// });
+///     flush_duration: Duration::from_micros(0x3A),
+/// };
 ///
-/// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(0x0A)).unwrap();
+/// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
 ///
 /// let buf = vec![0x3Bu8; 0x40];
 /// let epoch = pipe.write(&buf, 0).unwrap();
@@ -130,21 +152,62 @@ fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenErr {
 /// assert_eq!(read, buf);
 /// ```
 #[derive(Debug)]
-pub struct FrozenPipe {
+pub struct FrozenPipe<const MODULE_ID: u8> {
     core: sync::Arc<Core>,
     tx: Option<thread::JoinHandle<()>>,
 }
 
-impl FrozenPipe {
+unsafe impl<const MODULE_ID: u8> Send for FrozenPipe<MODULE_ID> {}
+unsafe impl<const MODULE_ID: u8> Sync for FrozenPipe<MODULE_ID> {}
+
+impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     /// Create a new instance of [`FrozenPipe`]
-    pub fn new(file: ffile::FrozenFile, pool: bpool::BufPool, flush_duration: time::Duration) -> FrozenRes<Self> {
-        let chunk_size = file.cfg.chunk_size;
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+    /// use frozen_core::bpool::BPBackend;
+    /// use std::time::Duration;
+    ///
+    /// const MODULE_ID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_pipe_write");
+    ///
+    /// let cfg = FPCfg {
+    ///     chunk_size: 0x20,
+    ///     initial_chunk_amount: 2,
+    ///     backend: BPBackend::Dynamic,
+    ///     flush_duration: Duration::from_micros(0x3A),
+    /// };
+    ///
+    /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
+    ///
+    /// let buf = vec![1; 0x20];
+    /// let epoch = pipe.write(&buf, 0).unwrap();
+    ///
+    /// pipe.wait_for_durability(epoch).unwrap();
+    ///
+    /// let read = pipe.read(0, 1).unwrap();
+    /// assert_eq!(read, buf);
+    /// ```
+    pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FPCfg) -> FrozenRes<Self> {
+        let file = ffile::FrozenFile::new::<MODULE_ID>(ffile::FFCfg {
+            path: path.as_ref().to_path_buf(),
+            chunk_size: cfg.chunk_size,
+            initial_chunk_amount: cfg.initial_chunk_amount,
+        })?;
+        let pool = bpool::BufPool::new::<MODULE_ID>(bpool::BPCfg {
+            chunk_size: cfg.chunk_size,
+            backend: cfg.backend,
+        });
 
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
         // first caller sets the value and all subsequent calls reuse it
-        let _ = MODULE_ID.get_or_init(|| file.cfg.mid);
+        let _ = MID.get_or_init(|| MODULE_ID);
 
-        let core = Core::new(file, pool, flush_duration, chunk_size)?;
+        let core = Core::new(file, pool, cfg)?;
 
         // INFO: we spawn the thread for background sync
         let tx = Core::spawn_tx(core.clone())?;
@@ -164,28 +227,23 @@ impl FrozenPipe {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fpipe::FrozenPipe;
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
-    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    /// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+    /// use frozen_core::bpool::BPBackend;
     /// use std::time::Duration;
+    ///
+    /// const MODULE_ID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_pipe_write");
     ///
-    /// let file = FrozenFile::new(FFCfg {
-    ///     mid: 0,
-    ///     path,
+    /// let cfg = FPCfg {
     ///     chunk_size: 0x20,
     ///     initial_chunk_amount: 2,
-    /// }).unwrap();
-    ///
-    /// let pool = BufPool::new(BPCfg {
-    ///     mid: 0,
-    ///     chunk_size: 0x20,
     ///     backend: BPBackend::Dynamic,
-    /// });
+    ///     flush_duration: Duration::from_micros(0x3A),
+    /// };
     ///
-    /// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(0x0A)).unwrap();
+    /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
     /// let buf = vec![0x3Bu8; 0x40];
     /// let epoch = pipe.write(&buf, 0).unwrap();
@@ -201,7 +259,7 @@ impl FrozenPipe {
             return Err(err);
         }
 
-        let chunk_size = self.core.chunk_size;
+        let chunk_size = self.core.cfg.chunk_size;
         let chunks = buf.len().div_ceil(chunk_size);
 
         let alloc = self.core.pool.allocate(chunks)?;
@@ -239,31 +297,27 @@ impl FrozenPipe {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fpipe::FrozenPipe;
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
-    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    /// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+    /// use frozen_core::bpool::BPBackend;
     /// use std::time::Duration;
     ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let path = dir.path().join("tmp_read_single");
+    /// const MODULE_ID: u8 = 0;
     ///
-    /// let file = FrozenFile::new(FFCfg {
-    ///     path,
-    ///     mid: 0,
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_pipe_write");
+    ///
+    /// let cfg = FPCfg {
     ///     chunk_size: 0x20,
     ///     initial_chunk_amount: 2,
-    /// }).unwrap();
-    ///
-    /// let pool = BufPool::new(BPCfg {
-    ///     mid: 0,
-    ///     chunk_size: 0x20,
     ///     backend: BPBackend::Dynamic,
-    /// });
+    ///     flush_duration: Duration::from_micros(0x3A),
+    /// };
     ///
-    /// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(10)).unwrap();
+    /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
     /// let data = vec![0xAAu8; 0x20];
     /// let epoch = pipe.write(&data, 0).unwrap();
+    ///
     /// pipe.wait_for_durability(epoch).unwrap();
     ///
     /// let read = pipe.read_single(0).unwrap();
@@ -273,7 +327,7 @@ impl FrozenPipe {
     pub fn read_single(&self, index: usize) -> FrozenRes<Vec<u8>> {
         let _lock = self.core.acquire_io_lock()?;
 
-        let mut slice = vec![0u8; self.core.chunk_size];
+        let mut slice = vec![0u8; self.core.cfg.chunk_size];
         self.core.file.pread(slice.as_mut_ptr(), index)?;
 
         drop(_lock);
@@ -287,31 +341,27 @@ impl FrozenPipe {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fpipe::FrozenPipe;
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
-    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    /// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+    /// use frozen_core::bpool::BPBackend;
     /// use std::time::Duration;
     ///
+    /// const MODULE_ID: u8 = 0;
+    ///
     /// let dir = tempfile::tempdir().unwrap();
-    /// let path = dir.path().join("tmp_read_multi");
+    /// let path = dir.path().join("tmp_pipe_write");
     ///
-    /// let file = FrozenFile::new(FFCfg {
-    ///     path,
-    ///     mid: 0,
+    /// let cfg = FPCfg {
     ///     chunk_size: 0x20,
-    ///     initial_chunk_amount: 8,
-    /// }).unwrap();
-    ///
-    /// let pool = BufPool::new(BPCfg {
-    ///     mid: 0,
-    ///     chunk_size: 0x20,
+    ///     initial_chunk_amount: 2,
     ///     backend: BPBackend::Dynamic,
-    /// });
+    ///     flush_duration: Duration::from_micros(0x3A),
+    /// };
     ///
-    /// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(10)).unwrap();
+    /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
     /// let buf = vec![0xBBu8; 0x20 * 2];
     /// let epoch = pipe.write(&buf, 0).unwrap();
+    ///
     /// pipe.wait_for_durability(epoch).unwrap();
     ///
     /// let read = pipe.read(0, 2).unwrap();
@@ -328,53 +378,6 @@ impl FrozenPipe {
         }
     }
 
-    #[inline(always)]
-    fn read_2x(&self, index: usize) -> FrozenRes<Vec<u8>> {
-        let chunk = self.core.chunk_size;
-
-        let mut buf = vec![0u8; chunk * 2];
-        let base = buf.as_mut_ptr();
-
-        let ptrs = [base, unsafe { base.add(chunk) }];
-        self.core.file.preadv(&ptrs, index)?;
-
-        Ok(buf)
-    }
-
-    #[inline(always)]
-    fn read_4x(&self, index: usize) -> FrozenRes<Vec<u8>> {
-        let chunk = self.core.chunk_size;
-
-        let mut buf = vec![0u8; chunk * 4];
-        let base = buf.as_mut_ptr();
-
-        let ptrs = [
-            base,
-            unsafe { base.add(chunk) },
-            unsafe { base.add(chunk * 2) },
-            unsafe { base.add(chunk * 3) },
-        ];
-        self.core.file.preadv(&ptrs, index)?;
-
-        Ok(buf)
-    }
-
-    #[inline(always)]
-    fn read_multi(&self, index: usize, count: usize) -> FrozenRes<Vec<u8>> {
-        let chunk = self.core.chunk_size;
-
-        let mut buf = vec![0u8; chunk * count];
-        let base = buf.as_mut_ptr();
-
-        let mut ptrs = Vec::with_capacity(count);
-        for i in 0..count {
-            ptrs.push(unsafe { base.add(i * chunk) });
-        }
-
-        self.core.file.preadv(&ptrs, index)?;
-        Ok(buf)
-    }
-
     /// Blocks until given `epoch` becomes durable
     ///
     /// Durability epochs increase when the background flusher successfully syncs the underlying [`FrozenFile`]
@@ -382,28 +385,23 @@ impl FrozenPipe {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fpipe::FrozenPipe;
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
-    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    /// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+    /// use frozen_core::bpool::BPBackend;
     /// use std::time::Duration;
     ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let path = dir.path().join("tmp_wait");
+    /// const MODULE_ID: u8 = 0;
     ///
-    /// let file = FrozenFile::new(FFCfg {
-    ///     mid: 0,
-    ///     path,
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_pipe_write");
+    ///
+    /// let cfg = FPCfg {
     ///     chunk_size: 0x20,
     ///     initial_chunk_amount: 2,
-    /// }).unwrap();
-    ///
-    /// let pool = BufPool::new(BPCfg {
-    ///     mid: 0,
-    ///     chunk_size: 0x20,
     ///     backend: BPBackend::Dynamic,
-    /// });
+    ///     flush_duration: Duration::from_micros(0x3A),
+    /// };
     ///
-    /// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(10)).unwrap();
+    /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
     /// let buf = vec![1u8; 0x20];
     /// let epoch = pipe.write(&buf, 0).unwrap();
@@ -421,28 +419,23 @@ impl FrozenPipe {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fpipe::FrozenPipe;
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
-    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    /// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+    /// use frozen_core::bpool::BPBackend;
     /// use std::time::Duration;
     ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let path = dir.path().join("tmp_force");
+    /// const MODULE_ID: u8 = 0;
     ///
-    /// let file = FrozenFile::new(FFCfg {
-    ///     mid: 0,
-    ///     path,
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_pipe_write");
+    ///
+    /// let cfg = FPCfg {
     ///     chunk_size: 0x20,
     ///     initial_chunk_amount: 2,
-    /// }).unwrap();
-    ///
-    /// let pool = BufPool::new(BPCfg {
-    ///     mid: 0,
-    ///     chunk_size: 0x20,
     ///     backend: BPBackend::Dynamic,
-    /// });
+    ///     flush_duration: Duration::from_micros(0x3A),
+    /// };
     ///
-    /// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(10)).unwrap();
+    /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
     /// let buf = vec![0x0Au8; 0x20];
     /// let epoch = pipe.write(&buf, 0).unwrap();
@@ -464,29 +457,27 @@ impl FrozenPipe {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fpipe::FrozenPipe;
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
-    /// use frozen_core::bpool::{BufPool, BPCfg, BPBackend};
+    /// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+    /// use frozen_core::bpool::BPBackend;
     /// use std::time::Duration;
     ///
+    /// const MODULE_ID: u8 = 0;
+    ///
     /// let dir = tempfile::tempdir().unwrap();
-    /// let path = dir.path().join("tmp_grow");
+    /// let path = dir.path().join("tmp_pipe_write");
     ///
-    /// let file = FrozenFile::new(FFCfg {
-    ///     mid: 0,
-    ///     path,
+    /// let cfg = FPCfg {
     ///     chunk_size: 0x20,
-    ///     initial_chunk_amount: 2,
-    /// }).unwrap();
-    ///
-    /// let pool = BufPool::new(BPCfg {
-    ///     mid: 0,
-    ///     chunk_size: 0x20,
+    ///     initial_chunk_amount: 0x0A,
     ///     backend: BPBackend::Dynamic,
-    /// });
+    ///     flush_duration: Duration::from_micros(0x3A),
+    /// };
     ///
-    /// let pipe = FrozenPipe::new(file, pool, Duration::from_micros(10)).unwrap();
-    /// pipe.grow(4).unwrap();
+    /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
+    /// pipe.grow(0x0A).unwrap();
+    ///
+    /// let total_chunks = pipe.total_chunks().unwrap();
+    /// assert_eq!(total_chunks, 0x14);
     /// ```
     pub fn grow(&self, count: usize) -> FrozenRes<()> {
         loop {
@@ -510,6 +501,96 @@ impl FrozenPipe {
 
             drop(lock);
         }
+    }
+
+    /// Fetch total available chunks on fs
+    ///
+    /// ## Working
+    ///
+    /// This call performs a syscall to fetch current length of [`FrozenFile`] from fs, as the current length of the
+    /// file is not cached anywhere in the pipeline to avoid TOCTAU race conditions
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+    /// use frozen_core::bpool::BPBackend;
+    /// use std::time::Duration;
+    ///
+    /// const MODULE_ID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_pipe_write");
+    ///
+    /// let cfg = FPCfg {
+    ///     chunk_size: 0x20,
+    ///     initial_chunk_amount: 2,
+    ///     backend: BPBackend::Dynamic,
+    ///     flush_duration: Duration::from_micros(0x3A),
+    /// };
+    ///
+    /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
+    ///
+    /// let total_chunks = pipe.total_chunks().unwrap();
+    /// assert_eq!(total_chunks, 2);
+    /// ```
+    #[inline]
+    pub fn total_chunks(&self) -> FrozenRes<usize> {
+        let curr_len = self.core.file.length()?;
+        let chunk_size = self.core.cfg.chunk_size;
+
+        if hints::unlikely(curr_len % chunk_size != 0) {
+            return new_err_default(err::CPT);
+        }
+
+        Ok(curr_len / chunk_size)
+    }
+
+    #[inline(always)]
+    fn read_2x(&self, index: usize) -> FrozenRes<Vec<u8>> {
+        let chunk = self.core.cfg.chunk_size;
+
+        let mut buf = vec![0u8; chunk * 2];
+        let base = buf.as_mut_ptr();
+
+        let ptrs = [base, unsafe { base.add(chunk) }];
+        self.core.file.preadv(&ptrs, index)?;
+
+        Ok(buf)
+    }
+
+    #[inline(always)]
+    fn read_4x(&self, index: usize) -> FrozenRes<Vec<u8>> {
+        let chunk = self.core.cfg.chunk_size;
+
+        let mut buf = vec![0u8; chunk * 4];
+        let base = buf.as_mut_ptr();
+
+        let ptrs = [
+            base,
+            unsafe { base.add(chunk) },
+            unsafe { base.add(chunk * 2) },
+            unsafe { base.add(chunk * 3) },
+        ];
+        self.core.file.preadv(&ptrs, index)?;
+
+        Ok(buf)
+    }
+
+    #[inline(always)]
+    fn read_multi(&self, index: usize, count: usize) -> FrozenRes<Vec<u8>> {
+        let chunk = self.core.cfg.chunk_size;
+
+        let mut buf = vec![0u8; chunk * count];
+        let base = buf.as_mut_ptr();
+
+        let mut ptrs = Vec::with_capacity(count);
+        for i in 0..count {
+            ptrs.push(unsafe { base.add(i * chunk) });
+        }
+
+        self.core.file.preadv(&ptrs, index)?;
+        Ok(buf)
     }
 
     fn internal_wait(&self, epoch: u64) -> FrozenRes<()> {
@@ -543,7 +624,7 @@ impl FrozenPipe {
     }
 }
 
-impl Drop for FrozenPipe {
+impl<const MODULE_ID: u8> Drop for FrozenPipe<MODULE_ID> {
     fn drop(&mut self) {
         self.core.closed.store(true, atomic::Ordering::Release);
         self.core.cv.notify_one(); // notify flusher tx to shut
@@ -567,7 +648,7 @@ impl Drop for FrozenPipe {
 
 #[derive(Debug)]
 struct Core {
-    chunk_size: usize,
+    cfg: FPCfg,
     cv: sync::Condvar,
     pool: bpool::BufPool,
     lock: sync::Mutex<()>,
@@ -577,23 +658,16 @@ struct Core {
     durable_cv: sync::Condvar,
     closed: atomic::AtomicBool,
     durable_lock: sync::Mutex<()>,
-    flush_duration: time::Duration,
     mpscq: mpscq::MPSCQueue<WriteReq>,
     error: atomic::AtomicPtr<FrozenErr>,
 }
 
 impl Core {
-    fn new(
-        file: ffile::FrozenFile,
-        pool: bpool::BufPool,
-        flush_duration: time::Duration,
-        chunk_size: usize,
-    ) -> FrozenRes<sync::Arc<Self>> {
+    fn new(file: ffile::FrozenFile, pool: bpool::BufPool, cfg: FPCfg) -> FrozenRes<sync::Arc<Self>> {
         Ok(sync::Arc::new(Self {
+            cfg,
             file,
             pool,
-            chunk_size,
-            flush_duration,
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
             io_lock: sync::RwLock::new(()),
@@ -698,7 +772,7 @@ impl Core {
 
         // sync loop w/ non-busy waiting
         loop {
-            guard = match core.cv.wait_timeout(guard, core.flush_duration) {
+            guard = match core.cv.wait_timeout(guard, core.cfg.flush_duration) {
                 Ok((g, _)) => g,
                 Err(e) => {
                     core.set_sync_error(new_err_raw(err::TXE, e));
@@ -818,10 +892,6 @@ impl WriteReq {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        bpool::{BPBackend, BPCfg, BufPool},
-        ffile::{FFCfg, FrozenFile},
-    };
     use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -830,26 +900,22 @@ mod tests {
     const INIT: usize = 0x20;
     const FLUSH: Duration = Duration::from_micros(10);
 
-    const MOD_ID: u8 = 0;
+    const MID: u8 = 0;
 
-    fn new_env() -> (tempfile::TempDir, FrozenPipe) {
+    fn new_env() -> (tempfile::TempDir, FrozenPipe<MID>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_pipe");
 
-        let file = FrozenFile::new(FFCfg {
+        let pipe = FrozenPipe::<MID>::new(
             path,
-            mid: MOD_ID,
-            chunk_size: CHUNK,
-            initial_chunk_amount: INIT,
-        })
+            FPCfg {
+                backend: bpool::BPBackend::Prealloc { capacity: 0x100 },
+                chunk_size: CHUNK,
+                initial_chunk_amount: INIT,
+                flush_duration: FLUSH,
+            },
+        )
         .unwrap();
-        let pool = BufPool::new(BPCfg {
-            mid: MOD_ID,
-            chunk_size: CHUNK,
-            backend: BPBackend::Prealloc { capacity: 0x100 },
-        });
-
-        let pipe = FrozenPipe::new(file, pool, FLUSH).unwrap();
 
         (dir, pipe)
     }
@@ -939,21 +1005,13 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("tmp_pipe");
 
-            let file = FrozenFile::new(FFCfg {
-                mid: MOD_ID,
-                path,
+            let cfg = FPCfg {
                 chunk_size: CHUNK,
                 initial_chunk_amount: INIT,
-            })
-            .unwrap();
-
-            let pool = BufPool::new(BPCfg {
-                mid: MOD_ID,
-                chunk_size: CHUNK,
-                backend: BPBackend::Prealloc { capacity: 1 },
-            });
-
-            let pipe = Arc::new(FrozenPipe::new(file, pool, FLUSH).unwrap());
+                backend: bpool::BPBackend::Prealloc { capacity: 1 },
+                flush_duration: FLUSH,
+            };
+            let pipe = Arc::new(FrozenPipe::<MID>::new(path, cfg).unwrap());
 
             let p2 = pipe.clone();
             let t = thread::spawn(move || {
@@ -1172,7 +1230,7 @@ mod tests {
             pipe.grow(0x10).unwrap();
             let new_len = pipe.core.file.length().unwrap();
 
-            assert_eq!(new_len, curr_len + (0x10 * pipe.core.chunk_size));
+            assert_eq!(new_len, curr_len + (0x10 * pipe.core.cfg.chunk_size));
         }
 
         #[test]
@@ -1206,7 +1264,7 @@ mod tests {
             writer.join().unwrap();
 
             let new_len = pipe.core.file.length().unwrap();
-            assert_eq!(new_len, curr_len + (0x3A * pipe.core.chunk_size));
+            assert_eq!(new_len, curr_len + (0x3A * pipe.core.cfg.chunk_size));
         }
     }
 
