@@ -74,20 +74,11 @@ mod err {
 
     /// (1026) lock poisoned
     pub const LPN: ErrCode = ErrCode::new(0x402, "lock poisoned internally");
-
-    /// (1027) underlying file is corrupted
-    pub const CPT: ErrCode = ErrCode::new(0x403, "file size misaligned to chunk size");
 }
 
 #[inline]
 fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenRes<R> {
     let err = FrozenErr::new_raw(*mid(), ERRDOMAIN, code, error);
-    Err(err)
-}
-
-#[inline]
-fn new_err_default<R>(code: ErrCode) -> FrozenRes<R> {
-    let err = FrozenErr::new_raw(*mid(), ERRDOMAIN, code, "");
     Err(err)
 }
 
@@ -503,7 +494,7 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
         }
     }
 
-    /// Fetch total available chunks from fs
+    /// Fetch total available chunks in [`FrozenFile`] from fs
     ///
     /// ## Working
     ///
@@ -536,14 +527,7 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     /// ```
     #[inline]
     pub fn total_chunks(&self) -> FrozenRes<usize> {
-        let curr_len = self.core.file.length()?;
-        let chunk_size = self.core.cfg.chunk_size;
-
-        if hints::unlikely(curr_len % chunk_size != 0) {
-            return new_err_default(err::CPT);
-        }
-
-        Ok(curr_len / chunk_size)
+        self.core.file.total_chunks()
     }
 
     #[inline(always)]
