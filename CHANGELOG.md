@@ -4,6 +4,8 @@
 
 - Improved notes (internal docs)
 - Improved `FrozenMMap::new` api
+- Improved `FrozenPipe::new` api
+- Improved `MODULE_ID` handling
 
 ## `0.0.14`
 

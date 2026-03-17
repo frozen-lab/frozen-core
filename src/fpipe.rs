@@ -503,7 +503,7 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
         }
     }
 
-    /// Fetch total available chunks on fs
+    /// Fetch total available chunks from fs
     ///
     /// ## Working
     ///
