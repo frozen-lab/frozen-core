@@ -1,4 +1,4 @@
-use super::{err, new_err, ObjectInterface};
+use super::{err, new_err};
 use crate::{error::FrozenRes, hints};
 use core::{ffi::CStr, ptr};
 use libc::{
@@ -52,11 +52,11 @@ impl POSIXMMap {
     ///
     /// Given `offset` must be aligned w/ `std::mem::size_of::<ObjectInterface<T>>()`
     #[inline]
-    pub(super) unsafe fn as_ptr<T>(&self, offset: usize) -> *mut ObjectInterface<T>
+    pub(super) unsafe fn as_ptr<T>(&self, offset: usize) -> *mut T
     where
         T: Sized + Send + Sync,
     {
-        self.0.add(offset) as *mut ObjectInterface<T>
+        self.0.add(offset) as *mut T
     }
 }
 
@@ -264,7 +264,7 @@ mod tests {
 
                 let ptr = mmap.as_ptr::<[u8; LENGTH]>(0);
                 let oi = &*ptr;
-                assert_eq!(*oi.get(), BUF);
+                assert_eq!(*oi, BUF);
 
                 mmap.unmap(LENGTH).unwrap();
             }
@@ -337,13 +337,12 @@ mod tests {
 
                 // write
                 let wptr = mmap.as_ptr::<u32>(0);
-                let oi = &*wptr;
-                *oi.get_mut() = VAL;
+                *wptr = VAL;
 
                 // read
                 let rptr = mmap.as_ptr::<u32>(0);
                 let oi = &*rptr;
-                assert_eq!(*oi.get(), VAL);
+                assert_eq!(*oi, VAL);
 
                 mmap.unmap(LENGTH).unwrap();
             }
@@ -359,13 +358,12 @@ mod tests {
 
                 // write
                 let wptr = mmap.as_ptr::<u32>(0x0C);
-                let oi = &*wptr;
-                *oi.get_mut() = VAL;
+                *wptr = VAL;
 
                 // read
                 let rptr = mmap.as_ptr::<u32>(0x0C);
                 let oi = &*rptr;
-                assert_eq!(*oi.get(), VAL);
+                assert_eq!(*oi, VAL);
 
                 mmap.unmap(LENGTH).unwrap();
             }
@@ -381,8 +379,7 @@ mod tests {
 
                 // write
                 let wptr = mmap.as_ptr::<[u32; 0x0A]>(0);
-                let oi = &*wptr;
-                *oi.get_mut() = VAL;
+                *wptr = VAL;
 
                 // sync
                 mmap.sync(LENGTH).unwrap();
@@ -390,7 +387,7 @@ mod tests {
                 // read
                 let rptr = mmap.as_ptr::<[u32; 0x0A]>(0);
                 let oi = &*rptr;
-                assert_eq!(*oi.get(), VAL);
+                assert_eq!(*oi, VAL);
 
                 mmap.unmap(LENGTH).unwrap();
             }
@@ -405,7 +402,7 @@ mod tests {
 
                 let rptr = mmap.as_ptr::<u64>(0);
                 let oi = &*rptr;
-                assert_eq!(*oi.get(), 0);
+                assert_eq!(*oi, 0);
 
                 mmap.unmap(LENGTH).unwrap();
             }
@@ -425,7 +422,7 @@ mod tests {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 let ptr = mmap.as_ptr::<u64>(0);
-                *(*ptr).get_mut() = VAL;
+                *ptr = VAL;
 
                 mmap.sync(LENGTH).unwrap();
                 mmap.unmap(LENGTH).unwrap();
@@ -436,7 +433,7 @@ mod tests {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 let ptr = mmap.as_ptr::<u64>(0);
-                assert_eq!(*(*ptr).get(), VAL);
+                assert_eq!(*ptr, VAL);
 
                 mmap.unmap(LENGTH).unwrap();
             }
@@ -452,7 +449,7 @@ mod tests {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 let ptr = mmap.as_ptr::<u64>(0);
-                *(*ptr).get_mut() = VAL;
+                *ptr = VAL;
 
                 mmap.sync(LENGTH).unwrap();
                 mmap.unmap(LENGTH).unwrap();
@@ -472,7 +469,7 @@ mod tests {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 let ptr = mmap.as_ptr::<u64>(0);
-                assert_eq!(*(*ptr).get(), VAL);
+                assert_eq!(*ptr, VAL);
 
                 mmap.unmap(LENGTH).unwrap();
             }

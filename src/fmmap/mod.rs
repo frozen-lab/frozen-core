@@ -1,5 +1,24 @@
 //! Custom implementation of `mmap(2)`
 //!
+//! ## Constraints
+//!
+//! [`FrozenMMap`] treats the mapped file as raw storage for values of `T`. Because of that, `T` must be a POD type
+//! which is safe to persist and later reinterpret from bytes.
+//!
+//! Required properties for `T`,
+//!
+//! - Must use `#[repr(C)]`
+//! - Should be 8-bytes aligned
+//! - Must not implement [`Drop`]
+//! - `size_of::<T>()` should be multiple of `8`
+//!
+//! *NOTE:* `T` must not contain heap owning or process-local pointers like [`Vec`], [`String`], [`Box`], references
+//! and function pointers, or other fields whose bit-pattern is not stable across reopen.
+//!
+//! These constrains are enforced as [`FrozenMMap`] does not serialize or deserialize values. It directly reads and
+//! writes `T` inside a memory mapped file. That means `T` must have a stable layout and must remain valid when the file
+//! is reopened in a later process.
+//!
 //! ## Example
 //!
 //! ```
@@ -42,7 +61,7 @@ use crate::{
     hints,
 };
 use std::{
-    cell, fmt,
+    fmt,
     sync::{self, atomic},
     thread, time,
 };
@@ -98,11 +117,29 @@ pub(in crate::fmmap) mod err {
 
     /// (519) lock poisoned
     pub const LPN: ErrCode = ErrCode::new(0x207, "lock poisoned internally");
+
+    /// (520) type `T` implements drop
+    pub const DRP: ErrCode = ErrCode::new(0x208, "type T must not implement `Drop`");
+
+    /// (521) type `T` is not 8 bytes aligned
+    pub const ALN: ErrCode = ErrCode::new(0x209, "type T must be 8-bytes aligned");
+
+    /// (522) `size_of::<T>()` is not multiple of 8
+    pub const SZE: ErrCode = ErrCode::new(0x20A, "`size_of::<T>()` must be multiple of 8 bytes");
+
+    /// (523) type `T` must not be zero sized
+    pub const ZRO: ErrCode = ErrCode::new(0x20B, "type T must not be zero sized");
 }
 
 #[inline]
 pub(in crate::fmmap) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenRes<R> {
     let err = FrozenErr::new_raw(*mid(), ERRDOMAIN, code, error);
+    Err(err)
+}
+
+#[inline]
+pub(in crate::fmmap) fn new_err_default<R>(code: ErrCode) -> FrozenRes<R> {
+    let err = FrozenErr::new_raw(*mid(), ERRDOMAIN, code, "");
     Err(err)
 }
 
@@ -177,7 +214,7 @@ where
     T: Sized + Send + Sync,
 {
     /// Memory space required for each slot of [`T`] in [`FrozenMMap`]
-    pub const SLOT_SIZE: usize = std::mem::size_of::<ObjectInterface<T>>();
+    pub const SLOT_SIZE: usize = std::mem::size_of::<T>();
 
     /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`]
     ///
@@ -230,6 +267,7 @@ where
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
     pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg) -> FrozenRes<Self> {
+        Self::validate_t()?;
         let (file, curr_length) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
 
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
@@ -306,6 +344,7 @@ where
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
     pub fn new_grown<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg, additional_slots: usize) -> FrozenRes<Self> {
+        Self::validate_t()?;
         let (file, _) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
 
         // we grow the underlying FrozenFile as requested
@@ -341,6 +380,29 @@ where
         let curr_length = file.length()?;
 
         Ok((file, curr_length))
+    }
+
+    #[inline]
+    fn validate_t() -> FrozenRes<()> {
+        if std::mem::needs_drop::<T>() {
+            return new_err_default(err::DRP);
+        }
+
+        let align = std::mem::align_of::<T>();
+        if align != 8 {
+            return new_err_default(err::ALN);
+        }
+
+        let size = std::mem::size_of::<T>();
+        if size == 0 {
+            return new_err_default(err::ZRO);
+        }
+
+        if size % 8 != 0 {
+            return new_err_default(err::SZE);
+        }
+
+        Ok(())
     }
 
     /// Blocks until given `epoch` becomes durable
@@ -436,9 +498,7 @@ where
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
 
-        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
-        let _oi_guard = slot.lock();
-        let res = unsafe { f(slot.get()) };
+        let res = unsafe { f(&*self.core.map.as_ptr::<T>(offset)) };
 
         Ok(res)
     }
@@ -478,9 +538,7 @@ where
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
 
-        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
-        let _oi_guard = slot.lock();
-        let res = unsafe { f(slot.get_mut()) };
+        let res = unsafe { f(&mut *self.core.map.as_ptr::<T>(offset)) };
 
         self.core.dirty.store(true, atomic::Ordering::Release);
         let epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
@@ -535,9 +593,7 @@ where
         let prev_epoch = self.core.durable_epoch.fetch_add(1, atomic::Ordering::Release);
         let prev = self.core.dirty.swap(false, atomic::Ordering::AcqRel);
 
-        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
-        let _oi_guard = slot.lock();
-        let res = unsafe { f(slot.get_mut()) };
+        let res = unsafe { f(&mut *self.core.map.as_ptr::<T>(offset)) };
 
         // blocking hard sync
         self.core.sync()?;
@@ -890,77 +946,6 @@ impl Core {
     }
 }
 
-#[repr(C)]
-pub(in crate::fmmap) struct ObjectInterface<T>
-where
-    T: Sized + Send + Sync,
-{
-    lock: cell::UnsafeCell<u64>,
-    value: cell::UnsafeCell<T>,
-}
-
-impl<T> ObjectInterface<T>
-where
-    T: Sized + Send + Sync,
-{
-    const MAX_SPINS: usize = 0x10;
-
-    #[inline]
-    fn lock(&self) -> OIGuard<'_, T> {
-        let atm = unsafe { atomic::AtomicU64::from_ptr(self.lock.get()) };
-        let mut spins = 0;
-
-        loop {
-            if atm
-                .compare_exchange_weak(0, 1, atomic::Ordering::Acquire, atomic::Ordering::Relaxed)
-                .is_ok()
-            {
-                return OIGuard { oi: self };
-            }
-
-            if hints::likely(spins < Self::MAX_SPINS) {
-                std::hint::spin_loop();
-            } else {
-                std::thread::yield_now();
-            }
-
-            spins += 1;
-        }
-    }
-
-    #[inline]
-    unsafe fn get(&self) -> &T {
-        &*self.value.get()
-    }
-
-    #[inline]
-    #[allow(clippy::mut_from_ref)]
-    unsafe fn get_mut(&self) -> &mut T {
-        &mut *self.value.get()
-    }
-}
-
-struct OIGuard<'a, T>
-where
-    T: Sized + Send + Sync,
-{
-    oi: &'a ObjectInterface<T>,
-}
-
-impl<T> Drop for OIGuard<'_, T>
-where
-    T: Sized + Send + Sync,
-{
-    fn drop(&mut self) {
-        // this fence ensures that the write becomes globally visible before the lock is released, which prevents readers
-        // from accessing stale values (＠_＠;)
-        std::sync::atomic::fence(atomic::Ordering::Release);
-
-        let atm = unsafe { atomic::AtomicU64::from_ptr(self.oi.lock.get()) };
-        atm.store(0, atomic::Ordering::Release);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -989,13 +974,13 @@ mod tests {
         #[test]
         fn ok_new() {
             let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u8, MID>::new(path, cfg).unwrap();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
             assert_eq!(mmap.core.flush_duration, FLUSH_DURATION);
             assert!(!mmap.core.dirty.load(atomic::Ordering::Acquire));
             assert!(!mmap.core.closed.load(atomic::Ordering::Acquire));
             assert_eq!(mmap.core.durable_epoch.load(atomic::Ordering::Acquire), 0);
-            assert_eq!(mmap.core.curr_length, INIT_SLOTS * FrozenMMap::<u8, MID>::SLOT_SIZE);
+            assert_eq!(mmap.core.curr_length, INIT_SLOTS * FrozenMMap::<u64, MID>::SLOT_SIZE);
 
             // satisfies the bg thread was spawned correctly
             assert!(mmap.core.error.load(atomic::Ordering::Acquire).is_null());
@@ -1011,11 +996,11 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
 
             // create new + close
-            let mmap1 = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+            let mmap1 = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
             drop(mmap1);
 
             // open existing
-            let mmap2 = FrozenMMap::<u8, MID>::new(path, cfg).unwrap();
+            let mmap2 = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
             drop(mmap2);
         }
 
@@ -1024,18 +1009,18 @@ mod tests {
             let (_dir, path, mut cfg) = new_tmp();
 
             // create new + close
-            let mmap1 = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+            let mmap1 = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
             drop(mmap1);
 
             // update cfg + opne existing
             cfg.initial_count = INIT_SLOTS * 2;
-            assert!(FrozenMMap::<u8, MID>::new(path, cfg).is_err());
+            assert!(FrozenMMap::<u64, MID>::new(path, cfg).is_err());
         }
 
         #[test]
         fn ok_delete() {
             let (_dir, path, cfg) = new_tmp();
-            let mut mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+            let mut mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
 
             mmap.delete().unwrap();
             assert!(!mmap.core.file.exists().unwrap());
@@ -1044,7 +1029,7 @@ mod tests {
         #[test]
         fn err_delete_after_delete() {
             let (_dir, path, cfg) = new_tmp();
-            let mut mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+            let mut mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
 
             mmap.delete().unwrap();
             assert!(!mmap.core.file.exists().unwrap());
@@ -1054,19 +1039,124 @@ mod tests {
         #[test]
         fn ok_drop_persists_when_dropped_before_bg_flush() {
             let (_dir, path, cfg) = new_tmp();
-            const VAL: u8 = 0x0A;
+            const VAL: u64 = 0x0A;
 
             {
-                let mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+                let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
                 mmap.write(0, |byte| *byte = VAL).unwrap();
                 drop(mmap);
             }
 
             {
-                let mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+                let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
                 let val = mmap.read(0, |byte| *byte).unwrap();
                 assert_eq!(val, VAL);
             }
+        }
+    }
+
+    mod fm_validate_t {
+        use super::*;
+
+        #[repr(C, align(8))]
+        struct OkT {
+            a: u64,
+            b: u64,
+        }
+
+        #[repr(C)]
+        struct BadAlignT {
+            a: u32,
+            b: u32,
+        }
+
+        #[repr(C, align(4))]
+        struct BadSizeT {
+            a: u32,
+            b: u16,
+        }
+
+        #[repr(C, align(8))]
+        struct DropT(u64);
+
+        impl Drop for DropT {
+            fn drop(&mut self) {}
+        }
+
+        #[repr(C, align(8))]
+        struct ZstT;
+
+        #[test]
+        fn ok_validate_t() {
+            assert!(FrozenMMap::<OkT, MID>::validate_t().is_ok());
+        }
+
+        #[test]
+        fn err_validate_t_when_drop() {
+            assert!(FrozenMMap::<DropT, MID>::validate_t().is_err());
+        }
+
+        #[test]
+        fn err_validate_t_when_not_8_byte_aligned() {
+            assert!(FrozenMMap::<BadAlignT, MID>::validate_t().is_err());
+        }
+
+        #[test]
+        fn err_validate_t_when_size_not_multiple_of_8() {
+            assert!(FrozenMMap::<BadSizeT, MID>::validate_t().is_err());
+        }
+
+        #[test]
+        fn err_validate_t_when_zero_sized() {
+            assert!(FrozenMMap::<ZstT, MID>::validate_t().is_err());
+        }
+
+        #[test]
+        fn err_new_when_t_implements_drop() {
+            let (_dir, path, cfg) = new_tmp();
+            assert!(FrozenMMap::<DropT, MID>::new(path, cfg).is_err());
+        }
+
+        #[test]
+        fn err_new_when_t_is_not_8_byte_aligned() {
+            let (_dir, path, cfg) = new_tmp();
+            assert!(FrozenMMap::<BadAlignT, MID>::new(path, cfg).is_err());
+        }
+
+        #[test]
+        fn err_new_when_t_size_is_not_multiple_of_8() {
+            let (_dir, path, cfg) = new_tmp();
+            assert!(FrozenMMap::<BadSizeT, MID>::new(path, cfg).is_err());
+        }
+
+        #[test]
+        fn err_new_when_t_is_zero_sized() {
+            let (_dir, path, cfg) = new_tmp();
+            assert!(FrozenMMap::<ZstT, MID>::new(path, cfg).is_err());
+        }
+
+        #[test]
+        fn err_new_grown_when_t_implements_drop() {
+            let (_dir, path, cfg) = new_tmp();
+            assert!(FrozenMMap::<DropT, MID>::new_grown(path, cfg, 1).is_err());
+        }
+
+        #[test]
+        fn err_new_grown_when_t_is_not_8_byte_aligned() {
+            let (_dir, path, cfg) = new_tmp();
+            assert!(FrozenMMap::<BadAlignT, MID>::new_grown(path, cfg, 1).is_err());
+        }
+
+        #[test]
+        fn err_new_grown_when_t_size_is_not_multiple_of_8() {
+            let (_dir, path, cfg) = new_tmp();
+            assert!(FrozenMMap::<BadSizeT, MID>::new_grown(path, cfg, 1).is_err());
+        }
+
+        #[test]
+        fn err_new_grown_when_t_is_zero_sized() {
+            let (_dir, path, cfg) = new_tmp();
+            assert!(FrozenMMap::<ZstT, MID>::new_grown(path, cfg, 1).is_err());
         }
     }
 
@@ -1077,15 +1167,15 @@ mod tests {
         fn ok_new_grown_updates_length() {
             let (_dir, path, cfg) = new_tmp();
 
-            let mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+            let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
             assert_eq!(mmap.total_slots(), INIT_SLOTS);
             drop(mmap);
 
-            let mmap = FrozenMMap::<u8, MID>::new_grown(path, cfg, 0x0A).unwrap();
+            let mmap = FrozenMMap::<u64, MID>::new_grown(path, cfg, 0x0A).unwrap();
             assert_eq!(mmap.total_slots(), INIT_SLOTS + 0x0A);
             assert_eq!(
                 mmap.core.curr_length,
-                (INIT_SLOTS + 0x0A) * FrozenMMap::<u8, MID>::SLOT_SIZE
+                (INIT_SLOTS + 0x0A) * FrozenMMap::<u64, MID>::SLOT_SIZE
             );
         }
 
@@ -1093,28 +1183,28 @@ mod tests {
         fn err_new_grown_with_preexisting_instance() {
             let (_dir, path, cfg) = new_tmp();
 
-            let mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+            let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
             assert_eq!(mmap.total_slots(), INIT_SLOTS);
 
-            assert!(FrozenMMap::<u8, MID>::new_grown(path, cfg, 0x0A).is_err());
+            assert!(FrozenMMap::<u64, MID>::new_grown(path, cfg, 0x0A).is_err());
         }
 
         #[test]
         fn ok_new_grown_cycle() {
             let (_dir, path, cfg) = new_tmp();
 
-            let mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+            let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
             drop(mmap);
 
-            let mmap = FrozenMMap::<u8, MID>::new_grown(&path, cfg.clone(), 0x100).unwrap();
+            let mmap = FrozenMMap::<u64, MID>::new_grown(&path, cfg.clone(), 0x100).unwrap();
             assert_eq!(mmap.total_slots(), INIT_SLOTS + 0x100);
             drop(mmap);
 
-            let mmap = FrozenMMap::<u8, MID>::new_grown(&path, cfg.clone(), 0x100).unwrap();
+            let mmap = FrozenMMap::<u64, MID>::new_grown(&path, cfg.clone(), 0x100).unwrap();
             assert_eq!(mmap.total_slots(), INIT_SLOTS + (2 * 0x100));
             drop(mmap);
 
-            let mmap = FrozenMMap::<u8, MID>::new_grown(path, cfg, 0x100).unwrap();
+            let mmap = FrozenMMap::<u64, MID>::new_grown(path, cfg, 0x100).unwrap();
             assert_eq!(mmap.total_slots(), INIT_SLOTS + (3 * 0x100));
         }
 
@@ -1178,9 +1268,9 @@ mod tests {
 
         #[test]
         fn ok_write_wait_read_cycle() {
-            const VAL: u32 = 0xDEADC0DE;
+            const VAL: u64 = 0xDEADC0DE;
             let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u32, MID>::new(path, cfg).unwrap();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
             // write + sync
             let (_, epoch) = mmap.write(0, |ptr| *ptr = VAL).unwrap();
@@ -1193,9 +1283,9 @@ mod tests {
 
         #[test]
         fn ok_write_read_without_wait() {
-            const VAL: u32 = 0xDEADC0DE;
+            const VAL: u64 = 0xDEADC0DE;
             let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u32, MID>::new(path, cfg).unwrap();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
             mmap.write(0, |ptr| *ptr = VAL).unwrap();
             let val = mmap.read(0, |ptr| *ptr).unwrap();
@@ -1345,29 +1435,6 @@ mod tests {
 
     mod fm_concurrency {
         use super::*;
-
-        #[test]
-        fn ok_oi_lock_with_multi_threads_same_index() {
-            let (_dir, path, cfg) = new_tmp();
-            let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(path, cfg).unwrap());
-
-            let mut handles = Vec::new();
-            for _ in 0..2 {
-                let mmap = mmap.clone();
-                handles.push(thread::spawn(move || {
-                    for _ in 0..2 {
-                        mmap.write(0, |v| *v += 1).unwrap();
-                    }
-                }));
-            }
-
-            for h in handles {
-                h.join().unwrap();
-            }
-
-            let val = mmap.read(0, |v| *v).unwrap();
-            assert_eq!(val, 2 * 2);
-        }
 
         #[test]
         fn ok_parallel_reads_with_diff_index() {
