@@ -24,12 +24,11 @@
 //! let val = mmap.read(0, |v| *v).unwrap();
 //! assert_eq!(val, 0xDEADC0DE);
 //!
-//! mmap.grow(0x05).unwrap();
-//! assert_eq!(mmap.total_slots(), 0x0A + 0x05);
-//!
 //! drop(mmap);
 //!
-//! let reopened = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
+//! let reopened = FrozenMMap::<u64, MODULE_ID>::new_with_grow(&path, cfg, 0x05).unwrap();
+//! assert_eq!(reopened.total_slots(), 0x0A + 0x05);
+//!
 //! let val = reopened.read(0, |v| *v).unwrap();
 //! assert_eq!(val, 0xDEADC0DE);
 //! ```
@@ -43,7 +42,7 @@ use crate::{
     hints,
 };
 use std::{
-    cell, fmt, mem,
+    cell, fmt,
     sync::{self, atomic},
     thread, time,
 };
@@ -152,12 +151,11 @@ pub struct FMCfg {
 /// let val = mmap.read(0, |v| *v).unwrap();
 /// assert_eq!(val, 0xDEADC0DE);
 ///
-/// mmap.grow(0x05).unwrap();
-/// assert_eq!(mmap.total_slots(), 0x0A + 0x05);
-///
 /// drop(mmap);
 ///
-/// let reopened = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
+/// let reopened = FrozenMMap::<u64, MODULE_ID>::new_with_grow(&path, cfg, 0x05).unwrap();
+/// assert_eq!(reopened.total_slots(), 0x0A + 0x05);
+///
 /// let val = reopened.read(0, |v| *v).unwrap();
 /// assert_eq!(val, 0xDEADC0DE);
 /// ```
@@ -168,7 +166,7 @@ where
 {
     core: sync::Arc<Core>,
     tx: Option<thread::JoinHandle<()>>,
-    _type: core::marker::PhantomData<T>,
+    _t: core::marker::PhantomData<T>,
 }
 
 unsafe impl<T, const MODULE_ID: u8> Send for FrozenMMap<T, MODULE_ID> where T: Sized + Send + Sync {}
@@ -229,14 +227,7 @@ where
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
     pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg) -> FrozenRes<Self> {
-        let ff_cfg = FFCfg {
-            chunk_size: Self::SLOT_SIZE,
-            path: path.as_ref().to_path_buf(),
-            initial_chunk_amount: cfg.initial_count,
-        };
-
-        let file = FrozenFile::new::<MODULE_ID>(ff_cfg)?;
-        let curr_length = file.length()?;
+        let (file, curr_length) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
 
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
         // first caller sets the value and all subsequent calls reuse it
@@ -251,8 +242,100 @@ where
         Ok(Self {
             core,
             tx: Some(tx),
-            _type: core::marker::PhantomData,
+            _t: core::marker::PhantomData,
         })
+    }
+
+    /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`] and grown capacity by given `grow_x` amount
+    ///
+    /// ## Why not create a [`FrozenMMap::grow`] call?
+    ///
+    /// Previously when [`FrozenMMap::grow`] was attempted, in a multi tx env, due to preemption of processes
+    /// from OS schedular, there was serious UB risks for write/read calls using the pointer to dropped mmap'ed
+    /// memory, to reduce this risk, we now offload our burden to caller side, as they should drop the current
+    /// [`FrozenMMap`] instance and create a new one w/ grown capacity
+    ///
+    /// ## [`FMCfg`]
+    ///
+    /// All configs for [`FrozenMMap`] are stored in [`FMCfg`]
+    ///
+    /// ## Working
+    ///
+    /// We first create a new [`FrozenFile`] if note already, then we grow the file using [`FrozenFile::grow`]
+    /// then map the entire file using `mmap(2)`, the entire file must read/write `T`, which also should stay
+    /// constant for the entire lifetime of file
+    ///
+    /// ## Important
+    ///
+    /// The `cfg` must not change any of its properties for the entire life of [`FrozenFile`], which is used under
+    /// the hood, one must use config stores like [`Rta`](https://crates.io/crates/rta) to store config
+    ///
+    /// ## Multiple Instances
+    ///
+    /// We acquire an exclusive lock for the entire file, this protects against operating with multiple simultenious
+    /// instance of [`FrozenFile`], when trying to call [`FrozenFile::new`] when already called, [`FFileErrRes::Lck`]
+    /// error will be thrown
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// const MODULE_ID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_frozen_mmap");
+    ///
+    /// let cfg = FMCfg {
+    ///     initial_count: 0x0A,
+    ///     flush_duration: std::time::Duration::from_micros(0x96),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new_with_grow(&path, cfg.clone(), 0x0A).unwrap();
+    /// assert_eq!(mmap.total_slots(), 0x0A * 2);
+    ///
+    /// let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
+    /// mmap.wait_for_durability(epoch).unwrap();
+    ///
+    /// let val = mmap.read(0, |v| *v).unwrap();
+    /// assert_eq!(val, 0xDEADC0DE);
+    /// ```
+    pub fn new_with_grow<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg, grow_x: usize) -> FrozenRes<Self> {
+        let (file, _) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
+
+        // we grow the underlying FrozenFile as requested
+        file.grow(grow_x)?;
+        let curr_length = file.length()?; // we must read the updated (grown) length
+
+        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
+        // first caller sets the value and all subsequent calls reuse it
+        let _ = MID.get_or_init(|| MODULE_ID);
+
+        let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
+        let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length));
+
+        // INFO: we spawn the thread for background sync
+        let tx = Core::spawn_tx(core.clone())?;
+
+        Ok(Self {
+            core,
+            tx: Some(tx),
+            _t: core::marker::PhantomData,
+        })
+    }
+
+    /// Create/opens [`FrozenFile`]
+    fn open_file(path: std::path::PathBuf, cfg: &FMCfg) -> FrozenRes<(FrozenFile, usize)> {
+        let ff_cfg = FFCfg {
+            path,
+            chunk_size: Self::SLOT_SIZE,
+            initial_chunk_amount: cfg.initial_count,
+        };
+
+        let file = FrozenFile::new::<MODULE_ID>(ff_cfg)?;
+        let curr_length = file.length()?;
+
+        Ok((file, curr_length))
     }
 
     /// Blocks until given `epoch` becomes durable
@@ -348,7 +431,7 @@ where
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
 
-        let slot: &ObjectInterface<T> = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
+        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
         let _oi_guard = slot.lock();
         let res = unsafe { f(slot.get()) };
 
@@ -390,7 +473,7 @@ where
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
 
-        let slot: &ObjectInterface<T> = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
+        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
         let _oi_guard = slot.lock();
         let res = unsafe { f(slot.get_mut()) };
 
@@ -447,7 +530,7 @@ where
         let prev_epoch = self.core.durable_epoch.fetch_add(1, atomic::Ordering::Release);
         let prev = self.core.dirty.swap(false, atomic::Ordering::AcqRel);
 
-        let slot: &ObjectInterface<T> = unsafe { &*self.get_mmap().as_ptr::<T>(offset) };
+        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
         let _oi_guard = slot.lock();
         let res = unsafe { f(slot.get_mut()) };
 
@@ -461,84 +544,6 @@ where
         }
 
         Ok((res, prev_epoch))
-    }
-
-    /// Grow [`FrozenMMap`] by given `slot_count` of `T`, where each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`]
-    ///
-    /// ## Working
-    ///
-    /// When `grow` is called, all read, write, and (background) sync ops are paused till completion,
-    /// growth is done in following steps:
-    ///
-    /// - acquire an exclusive `io_lock` (all other ops are paused)
-    /// - if any batch is pending for sync,
-    ///   - swap the flag
-    ///   - call sync manually
-    ///   - incr epoch and update cv
-    /// - `munmap(2)` current mapping
-    /// - grow underlying [`FrozenFile`] by requested `count` via [`FrozenFile::grow`]
-    /// - `mmap(2)` entire file again
-    /// - free the lock and unpause all ops
-    ///
-    /// ## Example
-    ///
-    /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
-    ///
-    /// const MODULE_ID: u8 = 0;
-    ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let path = dir.path().join("tmp_grow_mmap");
-    ///
-    /// let cfg = FMCfg {
-    ///     initial_count: 0x02,
-    ///     flush_duration: std::time::Duration::from_micros(0x96),
-    /// };
-    ///
-    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
-    /// assert_eq!(mmap.total_slots(), 0x02);
-    ///
-    /// mmap.grow(0x03).unwrap();
-    /// assert_eq!(mmap.total_slots(), 0x05);
-    ///
-    /// let idx = mmap.total_slots() - 1;
-    /// mmap.write(idx, |v| *v = 0x100).unwrap();
-    ///
-    /// let val = mmap.read(idx, |v| *v).unwrap();
-    /// assert_eq!(val, 0x100);
-    /// ```
-    pub fn grow(&self, count: usize) -> FrozenRes<()> {
-        let core = &self.core;
-
-        // pause all read, write and bg sync ops while growing
-        let _lock = self.core.acquire_exclusive_io_lock()?;
-
-        // swap dirty flag and manual sync to avoid any kind of data loss before unmap
-        if core.dirty.swap(false, atomic::Ordering::AcqRel) {
-            core.sync()?;
-            core.incr_epoch();
-
-            let _g = core.durable_lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
-            core.durable_cv.notify_all();
-        }
-
-        // unmap the current mmap and clear unsafeCell
-        unsafe {
-            self.munmap()?;
-            mem::ManuallyDrop::drop(&mut *core.mmap.get());
-        }
-
-        core.ffile.grow(count)?;
-
-        let new_len = core.ffile.length()?;
-        core.curr_length.store(new_len, atomic::Ordering::Release);
-
-        unsafe {
-            let new_map = TMap::new(core.ffile.fd(), new_len)?;
-            *core.mmap.get() = mem::ManuallyDrop::new(new_map);
-        };
-
-        Ok(())
     }
 
     /// Read current available count of slots, where each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`]
@@ -563,15 +568,17 @@ where
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
-    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
+    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg.clone()).unwrap();
     /// assert_eq!(mmap.total_slots(), 0x02);
     ///
-    /// mmap.grow(0x03).unwrap();
-    /// assert_eq!(mmap.total_slots(), 0x05);
+    /// drop(mmap);
+    ///
+    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new_with_grow(&path, cfg, 0x03).unwrap();
+    /// assert_eq!(mmap.total_slots(), 0x02 + 0x03);
     /// ```
     #[inline]
     pub fn total_slots(&self) -> usize {
-        self.core.curr_length() / Self::SLOT_SIZE
+        self.core.curr_length / Self::SLOT_SIZE
     }
 
     /// Delete the underlying [`FrozenFile`] used for [`FrozenMMap`] from fs
@@ -635,18 +642,13 @@ where
         }
 
         self.munmap()?;
-        core.ffile.delete()
+        core.file.delete()
     }
 
     #[inline]
     fn munmap(&self) -> FrozenRes<()> {
-        let length = self.core.curr_length();
-        unsafe { self.get_mmap().unmap(length) }
-    }
-
-    #[inline]
-    fn get_mmap(&self) -> &mem::ManuallyDrop<TMap> {
-        unsafe { &*self.core.mmap.get() }
+        let length = self.core.curr_length;
+        unsafe { self.core.map.unmap(length) }
     }
 }
 
@@ -684,17 +686,20 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "FrozenMMap{{fd: {}, len: {}}}",
-            self.core.ffile.fd(),
-            self.core.curr_length()
+            "FrozenMMap{{fd: {}, total_slots: {}, len: {}}}",
+            self.core.file.fd(),
+            self.total_slots(),
+            self.core.curr_length,
         )
     }
 }
 
 #[derive(Debug)]
 struct Core {
+    map: TMap,
+    file: FrozenFile,
     cv: sync::Condvar,
-    ffile: FrozenFile,
+    curr_length: usize,
     lock: sync::Mutex<()>,
     io_lock: sync::RwLock<()>,
     dirty: atomic::AtomicBool,
@@ -703,18 +708,18 @@ struct Core {
     durable_lock: sync::Mutex<()>,
     flush_duration: time::Duration,
     durable_epoch: atomic::AtomicU64,
-    curr_length: atomic::AtomicUsize,
     error: atomic::AtomicPtr<FrozenErr>,
-    mmap: cell::UnsafeCell<mem::ManuallyDrop<TMap>>,
 }
 
 unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
 impl Core {
-    fn new(mmap: TMap, ffile: FrozenFile, flush_duration: time::Duration, curr_length: usize) -> Self {
+    fn new(map: TMap, file: FrozenFile, flush_duration: time::Duration, curr_length: usize) -> Self {
         Self {
-            ffile,
+            map,
+            file,
+            curr_length,
             flush_duration,
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
@@ -724,21 +729,14 @@ impl Core {
             dirty: atomic::AtomicBool::new(false),
             closed: atomic::AtomicBool::new(false),
             durable_epoch: atomic::AtomicU64::new(0),
-            curr_length: atomic::AtomicUsize::new(curr_length),
             error: atomic::AtomicPtr::new(std::ptr::null_mut()),
-            mmap: cell::UnsafeCell::new(mem::ManuallyDrop::new(mmap)),
         }
     }
 
     #[inline]
-    fn curr_length(&self) -> usize {
-        self.curr_length.load(atomic::Ordering::Acquire)
-    }
-
-    #[inline]
     fn sync(&self) -> FrozenRes<()> {
-        unsafe { (*self.mmap.get()).sync(self.curr_length()) }?;
-        self.ffile.sync()
+        unsafe { self.map.sync(self.curr_length) }?;
+        self.file.sync()
     }
 
     #[inline]
