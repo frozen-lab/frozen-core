@@ -61,7 +61,7 @@ use crate::{
     hints,
 };
 use std::{
-    fmt,
+    cell, fmt,
     sync::{self, atomic},
     thread, time,
 };
@@ -233,7 +233,7 @@ where
     T: Sized + Send + Sync,
 {
     /// Memory space required for each slot of [`T`] in [`FrozenMMap`]
-    pub const SLOT_SIZE: usize = std::mem::size_of::<T>();
+    pub const SLOT_SIZE: usize = std::mem::size_of::<ObjectInterface<T>>();
 
     /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`]
     ///
@@ -464,7 +464,7 @@ where
         }
 
         let durable_epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
-        if durable_epoch > epoch {
+        if durable_epoch >= epoch {
             return Ok(());
         }
 
@@ -478,7 +478,7 @@ where
                 return Err(sync_err);
             }
 
-            if self.core.durable_epoch.load(atomic::Ordering::Acquire) > epoch {
+            if self.core.durable_epoch.load(atomic::Ordering::Acquire) >= epoch {
                 return Ok(());
             }
 
@@ -517,7 +517,9 @@ where
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
 
-        let res = unsafe { f(&*self.core.map.as_ptr::<T>(offset)) };
+        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
+        let _oi_guard = slot.lock();
+        let res = unsafe { f(slot.get()) };
 
         Ok(res)
     }
@@ -557,10 +559,12 @@ where
         let offset = Self::SLOT_SIZE * index;
         let _guard = self.core.acquire_io_lock()?;
 
-        let res = unsafe { f(&mut *self.core.map.as_ptr::<T>(offset)) };
+        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
+        let _oi_guard = slot.lock();
+        let res = unsafe { f(slot.get_mut()) };
 
         self.core.dirty.store(true, atomic::Ordering::Release);
-        let epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
+        let epoch = self.core.incr_curr_epoch();
 
         Ok((res, epoch))
     }
@@ -586,13 +590,13 @@ where
     /// };
     ///
     /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
-    /// let (_, epoch) = mmap.write_sync(0, |v| *v = 0xC0DE).unwrap();
+    /// let _ = mmap.write_sync(0, |v| *v = 0xC0DE).unwrap();
     ///
     /// let val = mmap.read(0, |v| *v).unwrap();
     /// assert_eq!(val, 0xC0DE);
     /// ```
     #[inline(always)]
-    pub fn write_sync<R>(&self, index: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
+    pub fn write_sync<R>(&self, index: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<R> {
         // propagate prev errors
         if let Some(err) = self.core.get_sync_error() {
             return Err(err);
@@ -606,16 +610,18 @@ where
         // we use exlusive lock as we perform blocking hard sync
         let _guard = self.core.acquire_exclusive_io_lock()?;
 
-        // NOTE: we hard sync we flushed an entier batch, so we can skip the sync via flush_tx as the
-        // current batch is durable
-
-        let prev_epoch = self.core.durable_epoch.fetch_add(1, atomic::Ordering::Release);
-        let prev = self.core.dirty.swap(false, atomic::Ordering::AcqRel);
-
-        let res = unsafe { f(&mut *self.core.map.as_ptr::<T>(offset)) };
+        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
+        let _oi_guard = slot.lock();
+        let res = unsafe { f(slot.get_mut()) };
 
         // blocking hard sync
         self.core.sync()?;
+
+        // NOTE: we hard sync we flushed an entier batch, so we can skip the sync via flush_tx as the
+        // current batch is durable
+
+        self.core.mark_epoch_durable();
+        let prev = self.core.dirty.swap(false, atomic::Ordering::AcqRel);
 
         // NOTE: we must also notify cv's waiting for durability (we skip if there was no batch to sync)
         if prev {
@@ -623,7 +629,7 @@ where
             self.core.durable_cv.notify_all();
         }
 
-        Ok((res, prev_epoch))
+        Ok(res)
     }
 
     /// Read current available count of slots, where each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`]
@@ -704,11 +710,9 @@ where
         // pause all read, write and bg sync ops while growing
         let _lock = core.acquire_exclusive_io_lock()?;
 
-        // swap dirty flag and manual sync to avoid any kind of data loss before unmap
+        // swap dirty flag and brodcast closing
         if core.dirty.swap(false, atomic::Ordering::AcqRel) {
-            core.sync()?;
-            core.incr_epoch();
-
+            self.core.closed.store(true, atomic::Ordering::Release);
             let _g = core.durable_lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
             core.durable_cv.notify_all();
         }
@@ -737,7 +741,7 @@ where
     T: Sized + Send + Sync,
 {
     fn drop(&mut self) {
-        self.core.closed.store(true, atomic::Ordering::Release);
+        let is_closed = self.core.closed.swap(true, atomic::Ordering::Release);
         self.core.cv.notify_one(); // notify flusher tx to shut
 
         if let Some(handle) = self.tx.take() {
@@ -755,7 +759,9 @@ where
             }
         }
 
-        let _ = self.munmap();
+        if !is_closed {
+            let _ = self.munmap();
+        }
     }
 }
 
@@ -787,6 +793,7 @@ struct Core {
     closed: atomic::AtomicBool,
     durable_lock: sync::Mutex<()>,
     flush_duration: time::Duration,
+    current_epoch: atomic::AtomicU64,
     durable_epoch: atomic::AtomicU64,
     error: atomic::AtomicPtr<FrozenErr>,
 }
@@ -808,6 +815,7 @@ impl Core {
             durable_lock: sync::Mutex::new(()),
             dirty: atomic::AtomicBool::new(false),
             closed: atomic::AtomicBool::new(false),
+            current_epoch: atomic::AtomicU64::new(0),
             durable_epoch: atomic::AtomicU64::new(0),
             error: atomic::AtomicPtr::new(std::ptr::null_mut()),
         }
@@ -863,8 +871,14 @@ impl Core {
     }
 
     #[inline]
-    fn incr_epoch(&self) {
-        self.durable_epoch.fetch_add(1, atomic::Ordering::Release);
+    fn incr_curr_epoch(&self) -> u64 {
+        self.current_epoch.fetch_add(1, atomic::Ordering::Release) + 1
+    }
+
+    #[inline]
+    fn mark_epoch_durable(&self) {
+        let curr_epoch = self.current_epoch.load(atomic::Ordering::Acquire);
+        self.durable_epoch.store(curr_epoch, atomic::Ordering::Release);
     }
 
     fn spawn_tx(core: sync::Arc<Self>) -> FrozenRes<thread::JoinHandle<()>> {
@@ -883,6 +897,7 @@ impl Core {
             Ok(g) => g,
             Err(error) => {
                 core.set_sync_error(new_err_raw(err::FXE, error));
+                core.cv.notify_all();
                 return;
             }
         };
@@ -893,6 +908,7 @@ impl Core {
                 Ok((g, _)) => g,
                 Err(e) => {
                     core.set_sync_error(new_err_raw(err::TXE, e));
+                    core.cv.notify_all();
                     return;
                 }
             };
@@ -905,6 +921,7 @@ impl Core {
 
             if !dirty {
                 if closing {
+                    core.cv.notify_all();
                     return;
                 }
 
@@ -918,6 +935,7 @@ impl Core {
                 Ok(lock) => lock,
                 Err(e) => {
                     core.set_sync_error(e);
+                    core.cv.notify_all();
                     return;
                 }
             };
@@ -937,7 +955,7 @@ impl Core {
 
             match core.sync() {
                 Ok(_) => {
-                    core.incr_epoch();
+                    core.mark_epoch_durable();
 
                     let _g = match core.durable_lock.lock() {
                         Ok(g) => g,
@@ -947,10 +965,13 @@ impl Core {
                         }
                     };
 
-                    core.durable_cv.notify_all();
                     core.clear_sync_error();
+                    core.durable_cv.notify_all();
                 }
-                Err(err) => core.set_sync_error(err),
+                Err(err) => {
+                    core.set_sync_error(err);
+                    core.durable_cv.notify_all();
+                }
             }
 
             drop(io_lock);
@@ -958,10 +979,80 @@ impl Core {
                 Ok(g) => g,
                 Err(e) => {
                     core.set_sync_error(new_err_raw(err::LPN, e));
+                    core.durable_cv.notify_all();
                     return;
                 }
             };
         }
+    }
+}
+
+#[repr(C, align(8))]
+pub(in crate::fmmap) struct ObjectInterface<T>
+where
+    T: Sized + Send + Sync,
+{
+    lock: cell::UnsafeCell<u64>,
+    value: cell::UnsafeCell<T>,
+}
+
+impl<T> ObjectInterface<T>
+where
+    T: Sized + Send + Sync,
+{
+    const MAX_SPINS: usize = 0x10;
+
+    #[inline]
+    fn lock(&self) -> OIGuard<'_, T> {
+        let atm = unsafe { atomic::AtomicU64::from_ptr(self.lock.get()) };
+        let mut spins = 0;
+
+        loop {
+            if atm
+                .compare_exchange_weak(0, 1, atomic::Ordering::Acquire, atomic::Ordering::Relaxed)
+                .is_ok()
+            {
+                return OIGuard { oi: self };
+            }
+
+            if hints::likely(spins < Self::MAX_SPINS) {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+
+            spins += 1;
+        }
+    }
+
+    #[inline]
+    unsafe fn get(&self) -> &T {
+        &*self.value.get()
+    }
+
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn get_mut(&self) -> &mut T {
+        &mut *self.value.get()
+    }
+}
+
+struct OIGuard<'a, T>
+where
+    T: Sized + Send + Sync,
+{
+    oi: &'a ObjectInterface<T>,
+}
+
+impl<T> Drop for OIGuard<'_, T>
+where
+    T: Sized + Send + Sync,
+{
+    fn drop(&mut self) {
+        // this fence ensures that the write becomes globally visible before the lock is released, which prevents readers
+        // from accessing stale values (＠_＠;)
+        std::sync::atomic::fence(atomic::Ordering::Release);
+        unsafe { atomic::AtomicU64::from_ptr(self.oi.lock.get()) }.store(0, atomic::Ordering::Release);
     }
 }
 
@@ -1006,7 +1097,6 @@ mod tests {
 
             // satisfies wait on epoch works
             let (_, epoch) = mmap.write(0, |f| *f = 0x0A).unwrap();
-            assert_eq!(epoch, 0); // mut init from 0
             assert!(mmap.wait_for_durability(epoch).is_ok());
         }
 
@@ -1331,27 +1421,10 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
-            let (_, epoch) = mmap.write_sync(0, |v| *v = 0x6A).unwrap();
-
-            // already durable
-            mmap.wait_for_durability(epoch).unwrap();
+            let _ = mmap.write_sync(0, |v| *v = 0x6A).unwrap();
 
             let val = mmap.read(0, |v| *v).unwrap();
             assert_eq!(val, 0x6A);
-        }
-
-        #[test]
-        fn ok_write_sync_epoch_progression() {
-            let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
-
-            let (_, e1) = mmap.write_sync(0, |v| *v = 1).unwrap();
-            let (_, e2) = mmap.write_sync(0, |v| *v = 2).unwrap();
-
-            assert!(e2 >= e1);
-
-            mmap.wait_for_durability(e1).unwrap();
-            mmap.wait_for_durability(e2).unwrap();
         }
 
         #[test]
