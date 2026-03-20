@@ -26,7 +26,7 @@
 //!
 //! drop(mmap);
 //!
-//! let reopened = FrozenMMap::<u64, MODULE_ID>::new_with_grow(&path, cfg, 0x05).unwrap();
+//! let reopened = FrozenMMap::<u64, MODULE_ID>::new_grown(&path, cfg, 0x05).unwrap();
 //! assert_eq!(reopened.total_slots(), 0x0A + 0x05);
 //!
 //! let val = reopened.read(0, |v| *v).unwrap();
@@ -153,7 +153,7 @@ pub struct FMCfg {
 ///
 /// drop(mmap);
 ///
-/// let reopened = FrozenMMap::<u64, MODULE_ID>::new_with_grow(&path, cfg, 0x05).unwrap();
+/// let reopened = FrozenMMap::<u64, MODULE_ID>::new_grown(&path, cfg, 0x05).unwrap();
 /// assert_eq!(reopened.total_slots(), 0x0A + 0x05);
 ///
 /// let val = reopened.read(0, |v| *v).unwrap();
@@ -181,6 +181,16 @@ where
 
     /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`]
     ///
+    /// ## Multiple Instances
+    ///
+    /// For each [`FrozenMMap`] instance, we acquire an exclusive lock from the kernal for the underlying [`FrozenFile`],
+    /// when trying to create multiple instances of [`FrozenMMap`], an error will be thrown    ///
+    ///
+    /// ## Capacity Growth
+    ///
+    /// [`FrozenMMap`] does not support in-place growth of a live mapping, to increase capacity, drop the current instance
+    /// and reopen w/ [`FrozenMMap::open_grown`] which provides memory mapping over grown capacity
+    ///
     /// ## [`FMCfg`]
     ///
     /// All configs for [`FrozenMMap`] are stored in [`FMCfg`]
@@ -192,15 +202,8 @@ where
     ///
     /// ## Important
     ///
-    /// The `cfg` must not change any of its properties for the entire life of [`FrozenFile`],
-    /// which is used under the hood, one must use config stores like [`Rta`](https://crates.io/crates/rta)
-    /// to store config
-    ///
-    /// ## Multiple Instances
-    ///
-    /// We acquire an exclusive lock for the entire file, this protects against operating with
-    /// multiple simultenious instance of [`FrozenFile`], when trying to call [`FrozenFile::new`]
-    /// when already called, [`FFileErrRes::Lck`] error will be thrown
+    /// The `cfg` must not change any of its properties for the entire life of [`FrozenFile`], which is used under
+    /// the hood, one must use config stores like [`Rta`](https://crates.io/crates/rta) to store config
     ///
     /// ## Example
     ///
@@ -246,14 +249,22 @@ where
         })
     }
 
-    /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`] and grown capacity by given `grow_x` amount
+    /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`], while growing the underlying [`FrozenFile`]
+    /// by `additional_slots` before creating memory mapping
+    ///
+    /// ## Multiple Instances
+    ///
+    /// For each [`FrozenMMap`] instance, we acquire an exclusive lock from the kernal for the underlying [`FrozenFile`],
+    /// when trying to create multiple instances of [`FrozenMMap`], an error will be thrown
     ///
     /// ## Why not create a [`FrozenMMap::grow`] call?
     ///
-    /// Previously when [`FrozenMMap::grow`] was attempted, in a multi tx env, due to preemption of processes
-    /// from OS schedular, there was serious UB risks for write/read calls using the pointer to dropped mmap'ed
-    /// memory, to reduce this risk, we now offload our burden to caller side, as they should drop the current
-    /// [`FrozenMMap`] instance and create a new one w/ grown capacity
+    /// Previously when [`FrozenMMap::grow`] was attempted, it was observed that, resizing an active memory mapping
+    /// in place is tricky in concurrent code, as some threads would still hold stale/unmapped pointers to mmap
+    /// due to preemption from the OS schedular
+    ///
+    /// So, instead of remmaping a live instance, the current API performs growth during open, making capacity expansion
+    /// an explicit lifecycle operation, and not a side effect on a live instance
     ///
     /// ## [`FMCfg`]
     ///
@@ -270,12 +281,6 @@ where
     /// The `cfg` must not change any of its properties for the entire life of [`FrozenFile`], which is used under
     /// the hood, one must use config stores like [`Rta`](https://crates.io/crates/rta) to store config
     ///
-    /// ## Multiple Instances
-    ///
-    /// We acquire an exclusive lock for the entire file, this protects against operating with multiple simultenious
-    /// instance of [`FrozenFile`], when trying to call [`FrozenFile::new`] when already called, [`FFileErrRes::Lck`]
-    /// error will be thrown
-    ///
     /// ## Example
     ///
     /// ```
@@ -291,7 +296,7 @@ where
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
-    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new_with_grow(&path, cfg.clone(), 0x0A).unwrap();
+    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new_grown(&path, cfg.clone(), 0x0A).unwrap();
     /// assert_eq!(mmap.total_slots(), 0x0A * 2);
     ///
     /// let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
@@ -300,11 +305,11 @@ where
     /// let val = mmap.read(0, |v| *v).unwrap();
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
-    pub fn new_with_grow<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg, grow_x: usize) -> FrozenRes<Self> {
+    pub fn new_grown<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg, additional_slots: usize) -> FrozenRes<Self> {
         let (file, _) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
 
         // we grow the underlying FrozenFile as requested
-        file.grow(grow_x)?;
+        file.grow(additional_slots)?;
         let curr_length = file.length()?; // we must read the updated (grown) length
 
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
@@ -324,7 +329,7 @@ where
         })
     }
 
-    /// Create/opens [`FrozenFile`]
+    /// Create/open a new [`FrozenFile`] instance
     fn open_file(path: std::path::PathBuf, cfg: &FMCfg) -> FrozenRes<(FrozenFile, usize)> {
         let ff_cfg = FFCfg {
             path,
@@ -573,7 +578,7 @@ where
     ///
     /// drop(mmap);
     ///
-    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new_with_grow(&path, cfg, 0x03).unwrap();
+    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new_grown(&path, cfg, 0x03).unwrap();
     /// assert_eq!(mmap.total_slots(), 0x02 + 0x03);
     /// ```
     #[inline]
