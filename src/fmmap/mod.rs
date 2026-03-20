@@ -995,10 +995,7 @@ mod tests {
             assert!(!mmap.core.dirty.load(atomic::Ordering::Acquire));
             assert!(!mmap.core.closed.load(atomic::Ordering::Acquire));
             assert_eq!(mmap.core.durable_epoch.load(atomic::Ordering::Acquire), 0);
-            assert_eq!(
-                mmap.core.curr_length.load(atomic::Ordering::Acquire),
-                INIT_SLOTS * FrozenMMap::<u8, MID>::SLOT_SIZE
-            );
+            assert_eq!(mmap.core.curr_length, INIT_SLOTS * FrozenMMap::<u8, MID>::SLOT_SIZE);
 
             // satisfies the bg thread was spawned correctly
             assert!(mmap.core.error.load(atomic::Ordering::Acquire).is_null());
@@ -1041,7 +1038,7 @@ mod tests {
             let mut mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
 
             mmap.delete().unwrap();
-            assert!(!mmap.core.ffile.exists().unwrap());
+            assert!(!mmap.core.file.exists().unwrap());
         }
 
         #[test]
@@ -1050,7 +1047,7 @@ mod tests {
             let mut mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
 
             mmap.delete().unwrap();
-            assert!(!mmap.core.ffile.exists().unwrap());
+            assert!(!mmap.core.file.exists().unwrap());
             assert!(mmap.delete().is_err());
         }
 
@@ -1073,55 +1070,89 @@ mod tests {
         }
     }
 
-    mod fm_grow {
+    mod fm_new_grown {
         use super::*;
 
         #[test]
-        fn ok_grow_updates_length() {
+        fn ok_new_grown_updates_length() {
             let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u8, MID>::new(path, cfg).unwrap();
-            assert_eq!(mmap.core.curr_length(), INIT_SLOTS * FrozenMMap::<u8, MID>::SLOT_SIZE);
 
-            mmap.grow(0x0A).unwrap();
+            let mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+            assert_eq!(mmap.total_slots(), INIT_SLOTS);
+            drop(mmap);
+
+            let mmap = FrozenMMap::<u8, MID>::new_grown(path, cfg, 0x0A).unwrap();
             assert_eq!(mmap.total_slots(), INIT_SLOTS + 0x0A);
+            assert_eq!(
+                mmap.core.curr_length,
+                (INIT_SLOTS + 0x0A) * FrozenMMap::<u8, MID>::SLOT_SIZE
+            );
         }
 
         #[test]
-        fn ok_grow_sync_cycle() {
+        fn err_new_grown_with_preexisting_instance() {
             let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u8, MID>::new(path, cfg).unwrap();
 
-            for _ in 0..4 {
-                mmap.grow(0x100).unwrap();
+            let mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+            assert_eq!(mmap.total_slots(), INIT_SLOTS);
+
+            assert!(FrozenMMap::<u8, MID>::new_grown(path, cfg, 0x0A).is_err());
+        }
+
+        #[test]
+        fn ok_new_grown_cycle() {
+            let (_dir, path, cfg) = new_tmp();
+
+            let mmap = FrozenMMap::<u8, MID>::new(&path, cfg.clone()).unwrap();
+            drop(mmap);
+
+            let mmap = FrozenMMap::<u8, MID>::new_grown(&path, cfg.clone(), 0x100).unwrap();
+            assert_eq!(mmap.total_slots(), INIT_SLOTS + 0x100);
+            drop(mmap);
+
+            let mmap = FrozenMMap::<u8, MID>::new_grown(&path, cfg.clone(), 0x100).unwrap();
+            assert_eq!(mmap.total_slots(), INIT_SLOTS + (2 * 0x100));
+            drop(mmap);
+
+            let mmap = FrozenMMap::<u8, MID>::new_grown(path, cfg, 0x100).unwrap();
+            assert_eq!(mmap.total_slots(), INIT_SLOTS + (3 * 0x100));
+        }
+
+        #[test]
+        fn ok_write_reopen_grown_read() {
+            let (_dir, path, cfg) = new_tmp();
+
+            {
+                let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
+                mmap.write(0, |v| *v = 0xAA).unwrap();
             }
 
-            assert_eq!(mmap.total_slots(), INIT_SLOTS + (4 * 0x100));
+            {
+                let mmap = FrozenMMap::<u64, MID>::new_grown(&path, cfg.clone(), 0x10).unwrap();
+                mmap.write(0, |v| *v = 0xBB).unwrap();
+
+                let val = mmap.read(0, |v| *v).unwrap();
+                assert_eq!(val, 0xBB);
+            }
         }
 
         #[test]
-        fn ok_write_grow_read() {
+        fn ok_write_reopen_grown_read_cycle() {
             let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
-            mmap.write(0, |v| *v = 0xAA).unwrap();
-            mmap.grow(0x10).unwrap();
-            mmap.write(0, |v| *v = 0xBB).unwrap();
-
-            let val = mmap.read(0, |v| *v).unwrap();
-            assert_eq!(val, 0xBB);
-        }
-
-        #[test]
-        fn ok_write_grow_read_cycle() {
-            let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
-            mmap.write(0, |v| *v = 1).unwrap();
+            {
+                let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
+                mmap.write(0, |v| *v = 1).unwrap();
+            }
 
             for i in 0..2 {
-                mmap.grow(0x10).unwrap();
+                let mmap = FrozenMMap::<u64, MID>::new_grown(&path, cfg.clone(), 0x10).unwrap();
                 let idx = mmap.total_slots() - 1;
                 mmap.write(idx, |v| *v = (i + 2) as u64).unwrap();
+                drop(mmap);
             }
+
+            let mmap = FrozenMMap::<u64, MID>::new(&path, cfg).unwrap();
 
             let base = mmap.read(0, |v| *v).unwrap();
             assert_eq!(base, 1);
@@ -1129,6 +1160,16 @@ mod tests {
             let last_idx = mmap.total_slots() - 1;
             let last = mmap.read(last_idx, |v| *v).unwrap();
             assert_eq!(last, 3);
+        }
+
+        #[test]
+        fn err_new_grown_while_previous_instance_is_alive() {
+            let (_dir, path, cfg) = new_tmp();
+
+            let _mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
+            let reopened = FrozenMMap::<u64, MID>::new_grown(&path, cfg, 0x10);
+
+            assert!(reopened.is_err());
         }
     }
 
@@ -1351,55 +1392,48 @@ mod tests {
         }
 
         #[test]
-        fn ok_grow_with_multi_threads() {
-            let (_dir, path, cfg) = new_tmp();
-            let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(path, cfg).unwrap());
-
-            const THREADS: usize = 2;
-            const GROWS_PER_THREAD: usize = 2;
-
-            let mut handles = Vec::new();
-            for _ in 0..THREADS {
-                let mmap = mmap.clone();
-                handles.push(thread::spawn(move || {
-                    for _ in 0..GROWS_PER_THREAD {
-                        mmap.grow(1).unwrap();
-
-                        // write to last slot after grow
-                        let idx = mmap.total_slots() - 1;
-                        mmap.write(idx, |v| *v = 0xABCD).unwrap();
-                    }
-                }));
-            }
-
-            for h in handles {
-                h.join().unwrap();
-            }
-
-            let expected_min = INIT_SLOTS + (THREADS * GROWS_PER_THREAD);
-            assert_eq!(mmap.total_slots(), expected_min);
-
-            let last = mmap.read(mmap.total_slots() - 1, |v| *v).unwrap();
-            assert_eq!(last, 0xABCD);
-        }
-
-        #[test]
-        fn ok_wait_during_grow_cycle() {
+        fn ok_multi_tx_drop_then_reopen_grown() {
             let (_dir, path, cfg) = new_tmp();
 
-            let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(path, cfg).unwrap());
-            let mmap2 = mmap.clone();
+            {
+                let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap());
 
-            let t = thread::spawn(move || {
-                let (_, epoch) = mmap2.write(0, |v| *v = 0x36).unwrap();
-                mmap2.wait_for_durability(epoch).unwrap();
-            });
+                let mut handles = Vec::new();
 
-            mmap.grow(8).unwrap();
-            t.join().unwrap();
+                for i in 0..2u64 {
+                    let mmap = mmap.clone();
+                    handles.push(thread::spawn(move || {
+                        let (_, _) = mmap.write(i as usize, |v| *v = i + 1).unwrap();
+                    }));
+                }
 
-            let val = mmap.read(0, |v| *v).unwrap();
-            assert_eq!(val, 0x36);
+                for i in 0..2usize {
+                    let mmap = mmap.clone();
+                    handles.push(thread::spawn(move || {
+                        let _ = mmap.read(i, |v| *v).unwrap();
+                    }));
+                }
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            }
+
+            {
+                let mmap = FrozenMMap::<u64, MID>::new_grown(&path, cfg.clone(), 0x10).unwrap();
+                assert_eq!(mmap.total_slots(), INIT_SLOTS + 0x10);
+
+                for i in 0..2u64 {
+                    let val = mmap.read(i as usize, |v| *v).unwrap();
+                    assert_eq!(val, i + 1);
+                }
+
+                let idx = mmap.total_slots() - 1;
+                mmap.write(idx, |v| *v = 0xDEAD).unwrap();
+
+                let val = mmap.read(idx, |v| *v).unwrap();
+                assert_eq!(val, 0xDEAD);
+            }
         }
     }
 }
