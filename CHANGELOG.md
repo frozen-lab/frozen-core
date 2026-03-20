@@ -1,5 +1,13 @@
 # Changelog
 
+## `0.0.16`
+
+- `FrozenMMap`
+  - Improved Docs
+  - Yanked `FrozenMMap::grow`
+  - Impl of `FrozenMMap::new_grown`
+  - Yanked internal locking for `FrozenMMap`
+
 ## `0.0.15`
 
 - Improved notes (internal docs)

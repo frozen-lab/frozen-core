@@ -164,6 +164,25 @@ pub struct FMCfg {
 
 /// Custom implementation of `mmap(2)`
 ///
+/// ## Constraints
+///
+/// [`FrozenMMap`] treats the mapped file as raw storage for values of `T`. Because of that, `T` must be a POD type
+/// which is safe to persist and later reinterpret from bytes.
+///
+/// Required properties for `T`,
+///
+/// - Must use `#[repr(C)]`
+/// - Should be 8-bytes aligned
+/// - Must not implement [`Drop`]
+/// - `size_of::<T>()` should be multiple of `8`
+///
+/// *NOTE:* `T` must not contain heap owning or process-local pointers like [`Vec`], [`String`], [`Box`], references
+/// and function pointers, or other fields whose bit-pattern is not stable across reopen.
+///
+/// These constrains are enforced as [`FrozenMMap`] does not serialize or deserialize values. It directly reads and
+/// writes `T` inside a memory mapped file. That means `T` must have a stable layout and must remain valid when the file
+/// is reopened in a later process.
+///
 /// ## Example
 ///
 /// ```
