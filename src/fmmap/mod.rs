@@ -672,6 +672,41 @@ where
         self.core.curr_length / Self::SLOT_SIZE
     }
 
+    /// Read the total memory footprint (in bytes) used by [`FrozenMMap`]
+    ///
+    /// *NOTE:* This is an approzimation of memory used, actual RSS may differ depending on paging and OS
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// const MODULE_ID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_mem_usage");
+    ///
+    /// let cfg = FMCfg {
+    ///     initial_count: 0x10,
+    ///     flush_duration: std::time::Duration::from_micros(0x60),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
+    ///
+    /// let bytes = mmap.memory_usage();
+    /// assert!(bytes >= mmap.total_slots() * std::mem::size_of::<u64>());
+    /// ```
+    #[inline]
+    pub fn memory_usage(&self) -> usize {
+        // memory of mem-maped region
+        let mmap_bytes = self.core.curr_length;
+
+        // memory used for locking
+        let lock_bytes = self.core.locks.0.len() * std::mem::size_of::<atomic::AtomicU8>();
+
+        mmap_bytes + lock_bytes
+    }
+
     /// Delete the underlying [`FrozenFile`] used for [`FrozenMMap`] from fs
     ///
     /// ## Working
