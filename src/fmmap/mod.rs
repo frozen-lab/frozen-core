@@ -37,10 +37,10 @@
 //! let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg.clone()).unwrap();
 //! assert_eq!(mmap.total_slots(), 0x0A);
 //!
-//! let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
+//! let epoch = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
 //! mmap.wait_for_durability(epoch).unwrap();
 //!
-//! let val = mmap.read(0, |v| *v).unwrap();
+//! let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
 //! assert_eq!(val, 0xDEADC0DE);
 //!
 //! drop(mmap);
@@ -48,7 +48,7 @@
 //! let reopened = FrozenMMap::<u64, MODULE_ID>::new_grown(&path, cfg, 0x05).unwrap();
 //! assert_eq!(reopened.total_slots(), 0x0A + 0x05);
 //!
-//! let val = reopened.read(0, |v| *v).unwrap();
+//! let val = unsafe { reopened.read(0, |v| *v) }.unwrap();
 //! assert_eq!(val, 0xDEADC0DE);
 //! ```
 
@@ -61,7 +61,7 @@ use crate::{
     hints,
 };
 use std::{
-    cell, fmt,
+    fmt,
     sync::{self, atomic},
     thread, time,
 };
@@ -201,10 +201,10 @@ pub struct FMCfg {
 /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg.clone()).unwrap();
 /// assert_eq!(mmap.total_slots(), 0x0A);
 ///
-/// let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
+/// let epoch = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
 /// mmap.wait_for_durability(epoch).unwrap();
 ///
-/// let val = mmap.read(0, |v| *v).unwrap();
+/// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
 /// assert_eq!(val, 0xDEADC0DE);
 ///
 /// drop(mmap);
@@ -212,7 +212,7 @@ pub struct FMCfg {
 /// let reopened = FrozenMMap::<u64, MODULE_ID>::new_grown(&path, cfg, 0x05).unwrap();
 /// assert_eq!(reopened.total_slots(), 0x0A + 0x05);
 ///
-/// let val = reopened.read(0, |v| *v).unwrap();
+/// let val = unsafe { reopened.read(0, |v| *v) }.unwrap();
 /// assert_eq!(val, 0xDEADC0DE);
 /// ```
 #[derive(Debug)]
@@ -233,7 +233,7 @@ where
     T: Sized + Send + Sync,
 {
     /// Memory space required for each slot of [`T`] in [`FrozenMMap`]
-    pub const SLOT_SIZE: usize = std::mem::size_of::<ObjectInterface<T>>();
+    pub const SLOT_SIZE: usize = std::mem::size_of::<T>();
 
     /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`]
     ///
@@ -279,22 +279,23 @@ where
     /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg.clone()).unwrap();
     /// assert_eq!(mmap.total_slots(), 0x0A);
     ///
-    /// let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
+    /// let epoch = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
     /// mmap.wait_for_durability(epoch).unwrap();
     ///
-    /// let val = mmap.read(0, |v| *v).unwrap();
+    /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
     pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg) -> FrozenRes<Self> {
         Self::validate_t()?;
         let (file, curr_length) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
+        let total_slots = curr_length / Self::SLOT_SIZE;
 
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
         // first caller sets the value and all subsequent calls reuse it
         let _ = MID.get_or_init(|| MODULE_ID);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
-        let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length));
+        let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length, total_slots));
 
         // INFO: we spawn the thread for background sync
         let tx = Core::spawn_tx(core.clone())?;
@@ -356,10 +357,10 @@ where
     /// let mmap = FrozenMMap::<u64, MODULE_ID>::new_grown(&path, cfg.clone(), 0x0A).unwrap();
     /// assert_eq!(mmap.total_slots(), 0x0A * 2);
     ///
-    /// let (_, epoch) = mmap.write(0, |v| *v = 0xDEADC0DE).unwrap();
+    /// let epoch = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
     /// mmap.wait_for_durability(epoch).unwrap();
     ///
-    /// let val = mmap.read(0, |v| *v).unwrap();
+    /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
     pub fn new_grown<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg, additional_slots: usize) -> FrozenRes<Self> {
@@ -369,13 +370,14 @@ where
         // we grow the underlying FrozenFile as requested
         file.grow(additional_slots)?;
         let curr_length = file.length()?; // we must read the updated (grown) length
+        let total_slots = curr_length / Self::SLOT_SIZE;
 
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
         // first caller sets the value and all subsequent calls reuse it
         let _ = MID.get_or_init(|| MODULE_ID);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
-        let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length));
+        let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length, total_slots));
 
         // INFO: we spawn the thread for background sync
         let tx = Core::spawn_tx(core.clone())?;
@@ -452,10 +454,10 @@ where
     ///
     /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
     ///
-    /// let (_, epoch) = mmap.write(0, |v| *v = 0x8A).unwrap();
+    /// let epoch = unsafe { mmap.write(0, |v| *v = 0x8A) }.unwrap();
     /// mmap.wait_for_durability(epoch).unwrap();
     ///
-    /// let val = mmap.read(0, |v| *v).unwrap();
+    /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0x8A);
     /// ```
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
@@ -507,21 +509,22 @@ where
     /// };
     ///
     /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
-    /// mmap.write(0, |v| *v = 0x0A).unwrap();
     ///
-    /// let val = mmap.read(0, |v| *v).unwrap();
+    /// let epoch = unsafe { mmap.write(0, |v| *v = 0x0A) }.unwrap();
+    /// mmap.wait_for_durability(epoch).unwrap();
+    ///
+    /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0x0A);
     /// ```
     #[inline(always)]
-    pub fn read<R>(&self, index: usize, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
+    pub unsafe fn read<R>(&self, index: usize, f: impl FnOnce(*const T) -> R) -> FrozenRes<R> {
         let offset = Self::SLOT_SIZE * index;
+
         let _guard = self.core.acquire_io_lock()?;
+        let _lock = self.core.locks.lock(index);
 
-        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
-        let _oi_guard = slot.lock();
-        let res = unsafe { f(slot.get()) };
-
-        Ok(res)
+        let ptr = unsafe { self.core.map.as_ptr(offset) };
+        Ok(f(ptr))
     }
 
     /// Write/update a `T` at given `index` via callback (`f`)
@@ -543,30 +546,31 @@ where
     ///
     /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
     ///
-    /// let (_, epoch) = mmap.write(1, |v| *v = 0x2B).unwrap();
+    /// let epoch = unsafe {mmap.write(1, |v| *v = 0x2B) }.unwrap();
     /// mmap.wait_for_durability(epoch).unwrap();
     ///
-    /// let val = mmap.read(1, |v| *v).unwrap();
+    /// let val = unsafe { mmap.read(1, |v| *v) }.unwrap();
     /// assert_eq!(val, 0x2B);
     /// ```
     #[inline(always)]
-    pub fn write<R>(&self, index: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<(R, TEpoch)> {
+    pub unsafe fn write(&self, index: usize, f: impl FnOnce(*mut T)) -> FrozenRes<TEpoch> {
         // propagate prev errors
         if let Some(err) = self.core.get_sync_error() {
             return Err(err);
         }
 
         let offset = Self::SLOT_SIZE * index;
-        let _guard = self.core.acquire_io_lock()?;
 
-        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
-        let _oi_guard = slot.lock();
-        let res = unsafe { f(slot.get_mut()) };
+        let _guard = self.core.acquire_io_lock()?;
+        let _lock = self.core.locks.lock(index);
+
+        let ptr = unsafe { self.core.map.as_mut_ptr(offset) };
+        f(ptr);
 
         self.core.dirty.store(true, atomic::Ordering::Release);
         let epoch = self.core.incr_curr_epoch();
 
-        Ok((res, epoch))
+        Ok(epoch)
     }
 
     /// Write/update a `T` at given `index` via callback (`f`) w/ instant durability
@@ -590,13 +594,13 @@ where
     /// };
     ///
     /// let mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
-    /// let _ = mmap.write_sync(0, |v| *v = 0xC0DE).unwrap();
+    /// unsafe { mmap.write_sync(0, |v| *v = 0xC0DE) }.unwrap();
     ///
-    /// let val = mmap.read(0, |v| *v).unwrap();
+    /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0xC0DE);
     /// ```
     #[inline(always)]
-    pub fn write_sync<R>(&self, index: usize, f: impl FnOnce(&mut T) -> R) -> FrozenRes<R> {
+    pub unsafe fn write_sync(&self, index: usize, f: impl FnOnce(*mut T)) -> FrozenRes<()> {
         // propagate prev errors
         if let Some(err) = self.core.get_sync_error() {
             return Err(err);
@@ -610,9 +614,9 @@ where
         // we use exlusive lock as we perform blocking hard sync
         let _guard = self.core.acquire_exclusive_io_lock()?;
 
-        let slot: &ObjectInterface<T> = unsafe { &*self.core.map.as_ptr::<T>(offset) };
-        let _oi_guard = slot.lock();
-        let res = unsafe { f(slot.get_mut()) };
+        let _lock = self.core.locks.lock(index);
+        let ptr = unsafe { self.core.map.as_mut_ptr(offset) };
+        f(ptr);
 
         // blocking hard sync
         self.core.sync()?;
@@ -629,7 +633,7 @@ where
             self.core.durable_cv.notify_all();
         }
 
-        Ok(res)
+        Ok(())
     }
 
     /// Read current available count of slots, where each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`]
@@ -699,8 +703,6 @@ where
     /// };
     ///
     /// let mut mmap = FrozenMMap::<u64, MODULE_ID>::new(&path, cfg).unwrap();
-    ///
-    /// mmap.write(0, |v| *v = 0x37).unwrap();
     /// mmap.delete().unwrap();
     /// assert!(!path.exists());
     /// ```
@@ -783,6 +785,7 @@ where
 #[derive(Debug)]
 struct Core {
     map: TMap,
+    locks: Locks,
     file: FrozenFile,
     cv: sync::Condvar,
     curr_length: usize,
@@ -802,7 +805,13 @@ unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
 impl Core {
-    fn new(map: TMap, file: FrozenFile, flush_duration: time::Duration, curr_length: usize) -> Self {
+    fn new(
+        map: TMap,
+        file: FrozenFile,
+        flush_duration: time::Duration,
+        curr_length: usize,
+        total_slots: usize,
+    ) -> Self {
         Self {
             map,
             file,
@@ -811,6 +820,7 @@ impl Core {
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
             io_lock: sync::RwLock::new(()),
+            locks: Locks::new(total_slots),
             durable_cv: sync::Condvar::new(),
             durable_lock: sync::Mutex::new(()),
             dirty: atomic::AtomicBool::new(false),
@@ -945,6 +955,11 @@ impl Core {
             // and acqurie it again, in-between other process could acquire it and use it
             drop(guard);
 
+            // NOTE: We snapshot `current_epoch` before sync to establish a strict batch boundary, all writes
+            // up to `target_epoch` are guaranteed to be part of this flush window, while anything beyound belongs
+            // to the next batch
+            let target_epoch = core.current_epoch.load(atomic::Ordering::Acquire);
+
             // NOTE:
             //
             // - if sync fails, we update the Core::error w/ the received error object
@@ -955,7 +970,7 @@ impl Core {
 
             match core.sync() {
                 Ok(_) => {
-                    core.mark_epoch_durable();
+                    core.durable_epoch.store(target_epoch, atomic::Ordering::Release);
 
                     let _g = match core.durable_lock.lock() {
                         Ok(g) => g,
@@ -987,72 +1002,72 @@ impl Core {
     }
 }
 
-#[repr(C, align(8))]
-pub(in crate::fmmap) struct ObjectInterface<T>
-where
-    T: Sized + Send + Sync,
-{
-    lock: cell::UnsafeCell<u64>,
-    value: cell::UnsafeCell<T>,
-}
+#[derive(Debug)]
+struct Locks(Box<[atomic::AtomicU8]>);
 
-impl<T> ObjectInterface<T>
-where
-    T: Sized + Send + Sync,
-{
-    const MAX_SPINS: usize = 0x10;
+impl Locks {
+    const LOCK: u8 = 1;
+    const UNLOCK: u8 = 0;
 
-    #[inline]
-    fn lock(&self) -> OIGuard<'_, T> {
-        let atm = unsafe { atomic::AtomicU64::from_ptr(self.lock.get()) };
+    const L1_CONTENTION: usize = 0x10;
+    const L2_CONTENTION: usize = 0x20;
+
+    fn new(cap: usize) -> Self {
+        let mut slots = Vec::with_capacity(cap);
+        for _ in 0..cap {
+            slots.push(atomic::AtomicU8::new(Self::UNLOCK));
+        }
+
+        Self(slots.into_boxed_slice())
+    }
+
+    #[inline(always)]
+    fn lock(&self, index: usize) -> LockGuard<'_> {
+        let val = &self.0[index];
         let mut spins = 0;
 
         loop {
-            if atm
-                .compare_exchange_weak(0, 1, atomic::Ordering::Acquire, atomic::Ordering::Relaxed)
+            if val
+                .compare_exchange_weak(
+                    Self::UNLOCK,
+                    Self::LOCK,
+                    atomic::Ordering::Acquire,
+                    atomic::Ordering::Relaxed,
+                )
                 .is_ok()
             {
-                return OIGuard { oi: self };
+                return LockGuard(val);
             }
 
-            if hints::likely(spins < Self::MAX_SPINS) {
+            // we must backoff under contention
+
+            // NOTE:
+            //
+            // We have three levels of backoff,
+            //
+            // 1. Busy waiting w/ CPU hint
+            // 2. Willingly allow preemption by OS schedular
+            // 3. Sleep the thread (increasing w/ exponenial factor)
+
+            if hints::likely(spins < Self::L1_CONTENTION) {
                 std::hint::spin_loop();
+            } else if spins < Self::L2_CONTENTION {
+                thread::yield_now();
             } else {
-                std::thread::yield_now();
+                let ns = 0x30 << (spins - Self::L2_CONTENTION).min(0x0A);
+                thread::sleep(time::Duration::from_nanos(ns));
             }
 
             spins += 1;
         }
     }
-
-    #[inline]
-    unsafe fn get(&self) -> &T {
-        &*self.value.get()
-    }
-
-    #[inline]
-    #[allow(clippy::mut_from_ref)]
-    unsafe fn get_mut(&self) -> &mut T {
-        &mut *self.value.get()
-    }
 }
 
-struct OIGuard<'a, T>
-where
-    T: Sized + Send + Sync,
-{
-    oi: &'a ObjectInterface<T>,
-}
+struct LockGuard<'a>(&'a atomic::AtomicU8);
 
-impl<T> Drop for OIGuard<'_, T>
-where
-    T: Sized + Send + Sync,
-{
+impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
-        // this fence ensures that the write becomes globally visible before the lock is released, which prevents readers
-        // from accessing stale values (＠_＠;)
-        std::sync::atomic::fence(atomic::Ordering::Release);
-        unsafe { atomic::AtomicU64::from_ptr(self.oi.lock.get()) }.store(0, atomic::Ordering::Release);
+        self.0.store(Locks::UNLOCK, atomic::Ordering::Release);
     }
 }
 
@@ -1096,7 +1111,7 @@ mod tests {
             assert!(mmap.core.error.load(atomic::Ordering::Acquire).is_null());
 
             // satisfies wait on epoch works
-            let (_, epoch) = mmap.write(0, |f| *f = 0x0A).unwrap();
+            let epoch = unsafe { mmap.write(0, |f| *f = 0x0A).unwrap() };
             assert!(mmap.wait_for_durability(epoch).is_ok());
         }
 
@@ -1152,13 +1167,13 @@ mod tests {
 
             {
                 let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
-                mmap.write(0, |byte| *byte = VAL).unwrap();
+                unsafe { mmap.write(0, |byte| *byte = VAL).unwrap() };
                 drop(mmap);
             }
 
             {
                 let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
-                let val = mmap.read(0, |byte| *byte).unwrap();
+                let val = unsafe { mmap.read(0, |byte| *byte).unwrap() };
                 assert_eq!(val, VAL);
             }
         }
@@ -1323,14 +1338,14 @@ mod tests {
 
             {
                 let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
-                mmap.write(0, |v| *v = 0xAA).unwrap();
+                unsafe { mmap.write(0, |v| *v = 0xAA).unwrap() };
             }
 
             {
                 let mmap = FrozenMMap::<u64, MID>::new_grown(&path, cfg.clone(), 0x10).unwrap();
-                mmap.write(0, |v| *v = 0xBB).unwrap();
+                unsafe { mmap.write(0, |v| *v = 0xBB).unwrap() };
 
-                let val = mmap.read(0, |v| *v).unwrap();
+                let val = unsafe { mmap.read(0, |v| *v).unwrap() };
                 assert_eq!(val, 0xBB);
             }
         }
@@ -1341,23 +1356,23 @@ mod tests {
 
             {
                 let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
-                mmap.write(0, |v| *v = 1).unwrap();
+                unsafe { mmap.write(0, |v| *v = 1).unwrap() };
             }
 
             for i in 0..2 {
                 let mmap = FrozenMMap::<u64, MID>::new_grown(&path, cfg.clone(), 0x10).unwrap();
                 let idx = mmap.total_slots() - 1;
-                mmap.write(idx, |v| *v = (i + 2) as u64).unwrap();
+                unsafe { mmap.write(idx, |v| *v = (i + 2) as u64).unwrap() };
                 drop(mmap);
             }
 
             let mmap = FrozenMMap::<u64, MID>::new(&path, cfg).unwrap();
 
-            let base = mmap.read(0, |v| *v).unwrap();
+            let base = unsafe { mmap.read(0, |v| *v).unwrap() };
             assert_eq!(base, 1);
 
             let last_idx = mmap.total_slots() - 1;
-            let last = mmap.read(last_idx, |v| *v).unwrap();
+            let last = unsafe { mmap.read(last_idx, |v| *v).unwrap() };
             assert_eq!(last, 3);
         }
 
@@ -1382,11 +1397,11 @@ mod tests {
             let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
             // write + sync
-            let (_, epoch) = mmap.write(0, |ptr| *ptr = VAL).unwrap();
+            let epoch = unsafe { mmap.write(0, |ptr| *ptr = VAL).unwrap() };
             mmap.wait_for_durability(epoch).unwrap();
 
             // read + verify
-            let val = mmap.read(0, |ptr| *ptr).unwrap();
+            let val = unsafe { mmap.read(0, |ptr| *ptr).unwrap() };
             assert_eq!(val, VAL);
         }
 
@@ -1396,8 +1411,8 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
-            mmap.write(0, |ptr| *ptr = VAL).unwrap();
-            let val = mmap.read(0, |ptr| *ptr).unwrap();
+            unsafe { mmap.write(0, |ptr| *ptr = VAL).unwrap() };
+            let val = unsafe { mmap.read(0, |ptr| *ptr).unwrap() };
             assert_eq!(val, VAL);
         }
     }
@@ -1410,9 +1425,9 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
-            mmap.write_sync(0, |v| *v = 0x4C).unwrap();
+            unsafe { mmap.write_sync(0, |v| *v = 0x4C).unwrap() };
 
-            let val = mmap.read(0, |v| *v).unwrap();
+            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
             assert_eq!(val, 0x4C);
         }
 
@@ -1421,9 +1436,9 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
-            let _ = mmap.write_sync(0, |v| *v = 0x6A).unwrap();
+            let _ = unsafe { mmap.write_sync(0, |v| *v = 0x6A).unwrap() };
 
-            let val = mmap.read(0, |v| *v).unwrap();
+            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
             assert_eq!(val, 0x6A);
         }
 
@@ -1432,12 +1447,12 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
 
             let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
-            mmap.write_sync(0, |v| *v = 0x0A).unwrap();
+            unsafe { mmap.write_sync(0, |v| *v = 0x0A).unwrap() };
 
-            let (_, epoch) = mmap.write(0, |v| *v = 0x14).unwrap();
+            let epoch = unsafe { mmap.write(0, |v| *v = 0x14).unwrap() };
             mmap.wait_for_durability(epoch).unwrap();
 
-            let val = mmap.read(0, |v| *v).unwrap();
+            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
             assert_eq!(val, 0x14);
         }
 
@@ -1446,12 +1461,12 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
-            let (_, async_epoch) = mmap.write(0, |v| *v = 1).unwrap();
-            mmap.write_sync(1, |v| *v = 2).unwrap();
+            let async_epoch = unsafe { mmap.write(0, |v| *v = 1).unwrap() };
+            unsafe { mmap.write_sync(1, |v| *v = 2).unwrap() };
             mmap.wait_for_durability(async_epoch).unwrap();
 
-            let v1 = mmap.read(0, |v| *v).unwrap();
-            let v2 = mmap.read(1, |v| *v).unwrap();
+            let v1 = unsafe { mmap.read(0, |v| *v).unwrap() };
+            let v2 = unsafe { mmap.read(1, |v| *v).unwrap() };
 
             assert_eq!(v1, 1);
             assert_eq!(v2, 2);
@@ -1464,12 +1479,12 @@ mod tests {
 
             {
                 let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
-                mmap.write_sync(0, |v| *v = VAL).unwrap();
+                unsafe { mmap.write_sync(0, |v| *v = VAL).unwrap() };
             }
 
             {
                 let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
-                let val = mmap.read(0, |v| *v).unwrap();
+                let val = unsafe { mmap.read(0, |v| *v).unwrap() };
                 assert_eq!(val, VAL);
             }
         }
@@ -1483,7 +1498,7 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
-            let (_, epoch) = mmap.write(0, |v| *v = 7).unwrap();
+            let epoch = unsafe { mmap.write(0, |v| *v = 7).unwrap() };
             mmap.wait_for_durability(epoch).unwrap();
 
             drop(mmap);
@@ -1494,10 +1509,10 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
 
-            let (_, e1) = mmap.write(0, |v| *v = 1).unwrap();
+            let e1 = unsafe { mmap.write(0, |v| *v = 1).unwrap() };
             mmap.wait_for_durability(e1).unwrap();
 
-            let (_, e2) = mmap.write(0, |v| *v = 2).unwrap();
+            let e2 = unsafe { mmap.write(0, |v| *v = 2).unwrap() };
             mmap.wait_for_durability(e2).unwrap();
             assert!(e2 >= e1);
         }
@@ -1511,7 +1526,7 @@ mod tests {
             for _ in 0..2 {
                 let mmap = mmap.clone();
                 handles.push(thread::spawn(move || {
-                    let (_, epoch) = mmap.write(0, |v| *v += 1).unwrap();
+                    let epoch = unsafe { mmap.write(0, |v| *v += 1).unwrap() };
                     mmap.wait_for_durability(epoch).unwrap();
                 }));
             }
@@ -1520,7 +1535,7 @@ mod tests {
                 h.join().unwrap();
             }
 
-            let val = mmap.read(0, |v| *v).unwrap();
+            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
             assert_eq!(val, 2);
         }
     }
@@ -1533,17 +1548,17 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(path, cfg).unwrap());
 
-            mmap.write(0, |v| *v = 0x10).unwrap();
-            mmap.write(1, |v| *v = 0x20).unwrap();
+            unsafe { mmap.write(0, |v| *v = 0x10).unwrap() };
+            unsafe { mmap.write(1, |v| *v = 0x20).unwrap() };
 
             let t1 = {
                 let mmap = mmap.clone();
-                thread::spawn(move || mmap.read(0, |v| *v).unwrap())
+                thread::spawn(move || unsafe { mmap.read(0, |v| *v).unwrap() })
             };
 
             let t2 = {
                 let mmap = mmap.clone();
-                thread::spawn(move || mmap.read(1, |v| *v).unwrap())
+                thread::spawn(move || unsafe { mmap.read(1, |v| *v).unwrap() })
             };
 
             assert_eq!(t1.join().unwrap(), 0x10);
@@ -1558,18 +1573,17 @@ mod tests {
                 let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap());
 
                 let mut handles = Vec::new();
-
                 for i in 0..2u64 {
                     let mmap = mmap.clone();
                     handles.push(thread::spawn(move || {
-                        let (_, _) = mmap.write(i as usize, |v| *v = i + 1).unwrap();
+                        let _ = unsafe { mmap.write(i as usize, |v| *v = i + 1).unwrap() };
                     }));
                 }
 
                 for i in 0..2usize {
                     let mmap = mmap.clone();
                     handles.push(thread::spawn(move || {
-                        let _ = mmap.read(i, |v| *v).unwrap();
+                        let _ = unsafe { mmap.read(i, |v| *v).unwrap() };
                     }));
                 }
 
@@ -1583,14 +1597,14 @@ mod tests {
                 assert_eq!(mmap.total_slots(), INIT_SLOTS + 0x10);
 
                 for i in 0..2u64 {
-                    let val = mmap.read(i as usize, |v| *v).unwrap();
+                    let val = unsafe { mmap.read(i as usize, |v| *v).unwrap() };
                     assert_eq!(val, i + 1);
                 }
 
                 let idx = mmap.total_slots() - 1;
-                mmap.write(idx, |v| *v = 0xDEAD).unwrap();
+                unsafe { mmap.write(idx, |v| *v = 0xDEAD).unwrap() };
 
-                let val = mmap.read(idx, |v| *v).unwrap();
+                let val = unsafe { mmap.read(idx, |v| *v).unwrap() };
                 assert_eq!(val, 0xDEAD);
             }
         }
