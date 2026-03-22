@@ -519,9 +519,10 @@ where
     #[inline(always)]
     pub unsafe fn read<R>(&self, index: usize, f: impl FnOnce(*const T) -> R) -> FrozenRes<R> {
         let offset = Self::SLOT_SIZE * index;
-
-        let _guard = self.core.acquire_io_lock()?;
         let _lock = self.core.locks.lock(index);
+
+        // NOTE: We do avoid acquiring io_lock for read ops to increase the throughput (under the assumption of
+        // OS guarantees visibility)
 
         let ptr = unsafe { self.core.map.as_ptr(offset) };
         Ok(f(ptr))
@@ -707,28 +708,20 @@ where
     /// assert!(!path.exists());
     /// ```
     pub fn delete(&mut self) -> FrozenRes<()> {
-        let core = &self.core;
-
-        // pause all read, write and bg sync ops while growing
-        let _lock = core.acquire_exclusive_io_lock()?;
-
-        // swap dirty flag and brodcast closing
-        if core.dirty.swap(false, atomic::Ordering::AcqRel) {
-            self.core.closed.store(true, atomic::Ordering::Release);
-            let _g = core.durable_lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
-            core.durable_cv.notify_all();
-        }
-
         // NOTE: we must broadcast that the close is happening to allow flusher tx to wrap up
-        core.closed.store(true, atomic::Ordering::Release);
-        core.cv.notify_one();
+        self.core.dirty.store(false, atomic::Ordering::Release);
+        self.core.closed.store(true, atomic::Ordering::Release);
+        self.core.durable_cv.notify_one();
 
         if let Some(handle) = self.tx.take() {
             let _ = handle.join();
         }
 
+        // pause all new write ops
+        let _lock = self.core.acquire_exclusive_io_lock()?;
+
         self.munmap()?;
-        core.file.delete()
+        self.core.file.delete()
     }
 
     #[inline]

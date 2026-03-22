@@ -366,11 +366,11 @@ mod tests {
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 // write
-                let wptr = mmap.as_mut_ptr::<u64>(0x0C);
+                let wptr = mmap.as_mut_ptr::<u64>(8);
                 *wptr = VAL;
 
                 // read
-                let rptr = mmap.as_ptr::<u64>(0x0C);
+                let rptr = mmap.as_ptr::<u64>(8);
                 assert_eq!(*rptr, VAL);
 
                 mmap.unmap(LENGTH).unwrap();

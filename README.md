@@ -31,7 +31,7 @@ Contributions are welcome! Please feel free to submit a PR or open an issue if y
 
 ## FrozenErr
 
-`FRes` & `FErr` are custom implementation's for result and error propagation.
+`FrozenRes` & `FrozenErr` are custom implementation's for result and error propagation.
 
 To use the `error` module, add it as a dependency in your `Cargo.toml`:
 

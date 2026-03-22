@@ -13,10 +13,12 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/frozen-lab/frozen-core"
 
 [features]
-bpool = ["error"]
 crc32 = []
-default = []
 error = []
+hints = []
+mpscq = []
+default = []
+bpool = ["error"]
 ffile = [
     "libc",
     "error",
@@ -34,8 +36,6 @@ fpipe = [
     "bpool",
     "hints",
 ]
-hints = []
-mpscq = []
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.178", optional = true }
