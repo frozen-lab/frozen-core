@@ -791,7 +791,7 @@ struct Core {
     flush_duration: time::Duration,
     current_epoch: atomic::AtomicU64,
     durable_epoch: atomic::AtomicU64,
-    error: atomic::AtomicPtr<FrozenErr>,
+    error: atomic::AtomicPtr<sync::Arc<FrozenErr>>,
 }
 
 unsafe impl Send for Core {}
@@ -830,16 +830,14 @@ impl Core {
         self.file.sync()
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_sync_error(&self, err: FrozenErr) {
-        let boxed = Box::into_raw(Box::new(err));
+        let boxed = Box::into_raw(Box::new(sync::Arc::new(err)));
         let old = self.error.swap(boxed, atomic::Ordering::AcqRel);
 
         // NOTE: we must free the old error, if any, to avoid mem leaks
         if !old.is_null() {
-            unsafe {
-                drop(Box::from_raw(old));
-            }
+            unsafe { drop(Box::from_raw(old)) };
         }
     }
 
@@ -850,7 +848,8 @@ impl Core {
             return None;
         }
 
-        Some(unsafe { (*ptr).clone() })
+        let arc = unsafe { &*ptr }.clone();
+        Some((*arc).clone())
     }
 
     #[inline]
