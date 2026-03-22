@@ -493,6 +493,23 @@ where
 
     /// Read a `T` at given `index` via callback (`f`)
     ///
+    /// ## Concurrency
+    ///
+    /// Internally, [`FrozenMMap`] implements per-slot locking, so concurrent reads and writes for at same index is atomic
+    /// and thread safe, while operations on different indices may proceed fully in parallel
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure following:
+    ///
+    /// - given `index` is within bounds
+    /// - underlying memory contains a valid instance of `T`
+    /// - provided callback `f` must not,
+    ///   - write through the pointer
+    ///   - store or leak pointer beyound there lifetime
+    ///
+    /// Violating any of the above may result in undefined behavior
+    ///
     /// ## Example
     ///
     /// ```
@@ -529,6 +546,21 @@ where
     }
 
     /// Write/update a `T` at given `index` via callback (`f`)
+    ///
+    /// ## Concurrency
+    ///
+    /// Internally, [`FrozenMMap`] implements per-slot locking, so concurrent reads and writes for at same index is atomic
+    /// and thread safe, while operations on different indices may proceed fully in parallel
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure following:
+    ///
+    /// - given `index` is within bounds
+    /// - underlying memory contains a valid instance of `T`
+    /// - provided callback `f` must not  store or leak pointer beyound there lifetime
+    ///
+    /// Violating any of the above may result in undefined behavior
     ///
     /// ## Example
     ///
@@ -578,6 +610,21 @@ where
     ///
     /// This function performs a blocking hard-sync, unlike [`FrozenMMap::write`], the update is immediately
     /// persisted to the underlying storage device
+    ///
+    /// ## Concurrency
+    ///
+    /// Internally, [`FrozenMMap`] implements per-slot locking, so concurrent reads and writes for at same index is atomic
+    /// and thread safe, while operations on different indices may proceed fully in parallel
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure following:
+    ///
+    /// - given `index` is within bounds
+    /// - underlying memory contains a valid instance of `T`
+    /// - provided callback `f` must not  store or leak pointer beyound there lifetime
+    ///
+    /// Violating any of the above may result in undefined behavior
     ///
     /// ## Example
     ///

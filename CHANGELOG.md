@@ -1,5 +1,12 @@
 # Changelog
 
+## `0.0.17`
+
+- `FrozenMMap`
+  - Impl of `FrozenMMap::memory_usage()`
+  - Improved internal locking (to fix random SIGSEGV errors)
+  - Improved `FrozenMMap::read()` throughput (yanked io_locking)
+
 ## `0.0.16`
 
 - `FrozenMMap`
