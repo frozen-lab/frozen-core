@@ -29,6 +29,10 @@ This project is licensed under the Apache-2.0 and MIT License. See the [LICENSE-
 
 Contributions are welcome! Please feel free to submit a PR or open an issue if you have any feedback or suggestions.
 
+> [!NOTE]
+> `frozen-core` contains next to naught AI-generated code. Therefore, any catastrophic bugs or fatal crashes encountered
+> are results of pure & unadulterated skill issues
+
 ## FrozenErr
 
 `FrozenRes` & `FrozenErr` are custom implementation's for result and error propagation.

@@ -36,6 +36,11 @@ fpipe = [
     "bpool",
     "hints",
 ]
+fbits = [
+    "error",
+    "hints",
+    "fmmap",   
+]
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.178", optional = true }
