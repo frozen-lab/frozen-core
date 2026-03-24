@@ -127,3 +127,136 @@ fn find_run(word: u64, n: usize) -> u64 {
 
     acc
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    const MID: u8 = 0;
+    const FLUSH: time::Duration = time::Duration::from_micros(10);
+
+    fn new_tmp(slots: usize) -> FrozenBits<MID> {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("bitmap");
+
+        let cfg = FBCfg {
+            initial_count: slots,
+            flush_duration: FLUSH,
+        };
+
+        FrozenBits::<MID>::new(path, cfg).expect("create bitmap")
+    }
+
+    mod alloc_2x {
+        use super::*;
+
+        #[test]
+        fn ok_single_alloc() {
+            let bits = new_tmp(1);
+
+            let idx = bits.allocate_2x(2).expect("alloc").expect("some");
+            assert_eq!(idx, 0);
+        }
+
+        #[test]
+        fn ok_alloc_respects_occupied() {
+            let bits = new_tmp(1);
+
+            let idx = bits.allocate_2x(2).expect("alloc").expect("some");
+            assert_eq!(idx, 0);
+
+            let idx2 = bits.allocate_2x(2).expect("alloc").expect("some");
+            assert_eq!(idx2, 2);
+        }
+
+        #[test]
+        fn ok_fill_entire_slot() {
+            let bits = new_tmp(1);
+
+            for i in 0..0x20 {
+                let idx = bits.allocate_2x(2).expect("alloc").expect("some");
+                assert_eq!(idx, i * 2);
+            }
+
+            let none = bits.allocate_2x(2).expect("alloc");
+            assert!(none.is_none());
+        }
+
+        #[test]
+        fn ok_var_sizes() {
+            let bits = new_tmp(1);
+
+            let a = bits.allocate_2x(4).expect("alloc").unwrap();
+            let b = bits.allocate_2x(2).expect("alloc").unwrap();
+            let c = bits.allocate_2x(8).expect("alloc").unwrap();
+
+            assert_eq!(a, 0);
+            assert_eq!(b, 4);
+            assert_eq!(c, 6);
+        }
+
+        #[test]
+        fn ok_skip_used_regions() {
+            let bits = new_tmp(1);
+
+            let _ = bits.allocate_2x(4).expect("alloc");
+            let _ = bits.allocate_2x(4).expect("alloc");
+
+            // first 8 bits used
+            let idx = bits.allocate_2x(2).expect("alloc").unwrap();
+            assert_eq!(idx, 8);
+        }
+
+        #[test]
+        fn ok_multi_slot_scan() {
+            let bits = new_tmp(2);
+
+            // fill first slot
+            for _ in 0..0x20 {
+                bits.allocate_2x(2).expect("alloc");
+            }
+
+            // should move to next slot
+            let idx = bits.allocate_2x(2).expect("alloc").unwrap();
+            assert_eq!(idx, 0x40);
+        }
+
+        #[test]
+        fn ok_exact_fit() {
+            let bits = new_tmp(1);
+
+            let _ = bits.allocate_2x(0x3E).expect("alloc");
+            let idx = bits.allocate_2x(2).expect("alloc").unwrap();
+
+            assert_eq!(idx, 0x3E);
+
+            let none = bits.allocate_2x(2).expect("alloc");
+            assert!(none.is_none());
+        }
+
+        #[test]
+        fn ok_concurrent_allocs() {
+            let bits = Arc::new(new_tmp(2));
+
+            let mut handles = vec![];
+            for _ in 0..4 {
+                let b = bits.clone();
+                handles.push(thread::spawn(move || {
+                    for _ in 0..0x10 {
+                        let _ = b.allocate_2x(2).expect("alloc");
+                    }
+                }));
+            }
+
+            for h in handles {
+                h.join().expect("join");
+            }
+
+            // ensure no panic + consistent usage
+            let none = bits.allocate_2x(2).expect("alloc");
+            assert!(none.is_none());
+        }
+    }
+}
