@@ -149,7 +149,7 @@ mod tests {
         FrozenBits::<MID>::new(path, cfg).expect("create bitmap")
     }
 
-    mod alloc_2x {
+    mod twox_alloc_free {
         use super::*;
 
         #[test]

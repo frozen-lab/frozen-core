@@ -25,6 +25,3 @@ pub mod fmmap;
 
 #[cfg(any(test, feature = "fpipe"))]
 pub mod fpipe;
-
-#[cfg(any(test, feature = "fbits"))]
-pub mod fbits;
