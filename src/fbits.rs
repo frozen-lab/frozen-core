@@ -4,10 +4,7 @@ use crate::{
     error::FrozenRes,
     fmmap::{FMCfg, FrozenMMap},
 };
-use std::{
-    sync::{self, atomic},
-    time,
-};
+use std::{sync::atomic, time};
 
 /// Custom type `T` representing single `chunk` of bits on `FrozenFile`
 ///
@@ -40,7 +37,6 @@ impl From<FBCfg> for FMCfg {
 /// An os-disk bitmap implementation
 #[derive(Debug)]
 pub struct FrozenBits<const MODULE_ID: u8> {
-    slots: atomic::AtomicUsize,
     curr_idx: atomic::AtomicUsize,
     map: FrozenMMap<T, MODULE_ID>,
 }
@@ -48,12 +44,10 @@ pub struct FrozenBits<const MODULE_ID: u8> {
 impl<const MODULE_ID: u8> FrozenBits<MODULE_ID> {
     /// Create a new instance of [`FrozenBits`]
     pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FBCfg) -> FrozenRes<Self> {
-        let slots = atomic::AtomicUsize::new(cfg.initial_count);
         let map: FrozenMMap<T, MODULE_ID> = FrozenMMap::new(path, cfg.into())?;
 
         Ok(Self {
             map,
-            slots,
             curr_idx: atomic::AtomicUsize::new(0),
         })
     }
@@ -61,15 +55,75 @@ impl<const MODULE_ID: u8> FrozenBits<MODULE_ID> {
     /// Allocate `N` free slots, where `N` is a muliple of 2
     #[inline(always)]
     pub fn allocate_2x(&self, n: usize) -> FrozenRes<Option<usize>> {
-        let curr_idx = self.curr_idx.load(atomic::Ordering::Acquire);
-        let _epoch = unsafe {
-            self.map.write(curr_idx, |slot| {
-                if *slot == SLOT_FULL {
-                    return;
-                }
-            })
-        }?;
+        let total = self.map.total_slots();
+        let mut idx = self.curr_idx.load(atomic::Ordering::Acquire);
 
-        Ok(Some(curr_idx * BITS_PER_SLOT))
+        while idx < total {
+            let mut found = None;
+            let _ = unsafe {
+                self.map.write(idx, |slot| {
+                    let val = *slot;
+
+                    if val == SLOT_FULL {
+                        return;
+                    }
+
+                    let free = !val;
+                    let candidates = find_run(free, n);
+
+                    if candidates == 0 {
+                        return;
+                    }
+
+                    let bit = candidates.trailing_zeros() as usize;
+                    let mask = ((1u64 << n) - 1) << bit;
+
+                    // re-check (still needed inside closure)
+                    if (val & mask) != 0 {
+                        return;
+                    }
+
+                    *slot = val | mask;
+                    found = Some(bit);
+                })
+            }?;
+
+            if let Some(bit) = found {
+                self.advance_cursor(idx);
+                return Ok(Some(idx * BITS_PER_SLOT + bit));
+            }
+
+            idx += 1;
+        }
+
+        Ok(None)
     }
+
+    #[inline(always)]
+    fn advance_cursor(&self, new_idx: usize) {
+        let mut current = self.curr_idx.load(atomic::Ordering::Relaxed);
+        while new_idx > current {
+            match self.curr_idx.compare_exchange_weak(
+                current,
+                new_idx,
+                atomic::Ordering::Release,
+                atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(val) => current = val,
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn find_run(word: u64, n: usize) -> u64 {
+    let mut acc = word;
+
+    // collapse runs
+    for i in 1..n {
+        acc &= word >> i;
+    }
+
+    acc
 }
