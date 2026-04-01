@@ -22,6 +22,34 @@
 //! It uses polynomial arithmetic in GF(2), the generator polynomial for CRC32C is `0x1EDC6F41`, and we use the
 //! reflected form `0x82F63B78`, which is required by little-endian streaming algorithms
 //!
+//! ## Benchmarks
+//!
+//! Look at following benches for the throughout and latency measurements,
+//!
+//! ```md
+//! | Mode | Size    | Time (ns / µs)        | Throughput (GiB/s) |
+//! |:----:|:-------:|:---------------------:|:------------------:|
+//! | 1x   | 4 KiB   | 318 ns                | 11.97              |
+//! | 2x   | 4 KiB   | 340 ns                | 11.24              |
+//! | 4x   | 4 KiB   | 451 ns                | 8.46               |
+//! | 1x   | 64 KiB  | 5.44 µs               | 11.23              |
+//! | 2x   | 64 KiB  | 5.26 µs               | 11.60              |
+//! | 4x   | 64 KiB  | 7.50 µs               | 8.14               |
+//! | 1x   | 1 MiB   | 89.80 µs              | 10.88              |
+//! | 2x   | 1 MiB   | 90.56 µs              | 10.78              |
+//! | 4x   | 1 MiB   | 120.04 µs             | 8.13               |
+//! ```
+//!
+//! Environment used for benching,
+//!
+//! - OS: NixOS (WSL2)
+//! - Architecture: x86_64
+//! - Memory: 8 GiB RAM (DDR4)
+//! - Backend: Hardware (SSE4.2)
+//! - Rust: rustc 1.86.0 w/ cargo 1.86.0
+//! - Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+//! - CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
+//!
 //! ## Example
 //!
 //! ```
