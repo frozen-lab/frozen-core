@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.18`
+
+- Added benches for `crc32` module
+
 ## `0.0.17`
 
 - `FrozenMMap`
