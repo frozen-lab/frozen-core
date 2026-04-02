@@ -4,6 +4,7 @@
 
 - Added benches for `crc32` module
 - Added benches for `bpool` module
+- Added benches for `mpscq` module
 
 ## `0.0.17`
 
