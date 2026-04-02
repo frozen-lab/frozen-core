@@ -754,6 +754,15 @@ where
         mmap_bytes + lock_bytes
     }
 
+    ///
+    pub fn new_tx(&self) -> FMTransaction<'_, T> {
+        FMTransaction {
+            core: &self.core,
+            idx_vec: Vec::new(),
+            ops_vec: Vec::new(),
+        }
+    }
+
     /// Delete the underlying [`FrozenFile`] used for [`FrozenMMap`] from fs
     ///
     /// ## Working
@@ -854,6 +863,61 @@ where
             self.total_slots(),
             self.core.curr_length,
         )
+    }
+}
+
+///
+pub struct FMTransaction<'a, T> {
+    core: &'a Core,
+    idx_vec: Vec<usize>,
+    ops_vec: Vec<Box<dyn FnOnce(*mut T) + 'a>>,
+}
+
+impl<'a, T> FMTransaction<'a, T> {
+    ///
+    pub fn write<F>(&mut self, index: usize, f: F) -> FrozenRes<()>
+    where
+        F: FnOnce(*mut T) + 'a,
+    {
+        if let Some(last) = self.idx_vec.last() {
+            if index <= *last {
+                return new_err(
+                    err::HCF,
+                    "tx writes must be strictly increasing (ordered, no duplicates)",
+                );
+            }
+        }
+
+        self.idx_vec.push(index);
+        self.ops_vec.push(Box::new(f));
+        Ok(())
+    }
+
+    ///
+    pub fn commit(self) -> FrozenRes<u64> {
+        if let Some(err) = self.core.get_sync_error() {
+            return Err(err);
+        }
+
+        let _guard = self.core.acquire_io_lock()?;
+
+        // NOTE: we must acquire all locks beforehand, to make sure all the write go through
+        let mut guards = Vec::with_capacity(self.ops_vec.len());
+        for idx in &self.idx_vec {
+            guards.push(self.core.locks.lock(*idx));
+        }
+
+        for (idx, op) in self.idx_vec.into_iter().zip(self.ops_vec.into_iter()) {
+            let offset = idx * std::mem::size_of::<T>();
+            let ptr = unsafe { self.core.map.as_mut_ptr(offset) };
+
+            op(ptr);
+        }
+
+        self.core.dirty.store(true, atomic::Ordering::Release);
+        let epoch = self.core.incr_curr_epoch();
+
+        Ok(epoch)
     }
 }
 
