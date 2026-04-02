@@ -3,6 +3,7 @@
 ## `0.0.18`
 
 - Added benches for `crc32` module
+- Added benches for `bpool` module
 
 ## `0.0.17`
 
