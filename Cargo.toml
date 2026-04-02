@@ -60,3 +60,8 @@ criterion = { version = "0.8", features = ["html_reports"] }
 name = "crc32"
 harness = false
 required-features = ["crc32"]
+
+[[bench]]
+name = "bpool"
+harness = false
+required-features = ["bpool"]

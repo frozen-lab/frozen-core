@@ -1,4 +1,5 @@
-//! Benchmarks for `crc32` module, run using `taskset -c 2 cargo bench --bench crc32 --features=crc32`
+//! Benchmarks for `crc32` module
+//! Run using `taskset -c 2 cargo bench --bench crc32 --features=crc32`
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use frozen_core::crc32::Crc32C;
