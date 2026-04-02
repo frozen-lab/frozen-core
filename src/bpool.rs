@@ -12,6 +12,75 @@
 //! in [`Allocation`], but if the choosen `backend` is [`BPBackend::Prealloc`], the call blocks internally
 //! when not enough chunks are available, generally till the previous [`Allocation`] are dropped
 //!
+//! ## Benchmarks
+//!
+//! Following are latency measurements for allocation across different backends and configurations.
+//!
+//! > **NOTE:* All timings represent **allocation + drop (RAII lifecycle)**
+//!
+//! Single tx latency,
+//!
+//! ```md
+//! | Mode     | N (chunks) | Time (ns / µs) |
+//! |:---------|:-----------|:---------------|
+//! | Dynamic  | 1          | 150 ns         |
+//! | Prealloc | 1          | 262 ns         |
+//! | Dynamic  | 4          | 163 ns         |
+//! | Prealloc | 4          | 595 ns         |
+//! | Dynamic  | 16         | 163 ns         |
+//! | Prealloc | 16         | 1.97 µs        |
+//! | Dynamic  | 64         | 220 ns         |
+//! | Prealloc | 64         | 8.25 µs        |
+//! ```
+//!
+//! Prealloc scaling (batch size),
+//!
+//! ```md
+//! | N (chunks) | Time (ns / µs) |
+//! |:-----------|:---------------|
+//! | 1          | 253 ns         |
+//! | 8          | 1.13 µs        |
+//! | 32         | 3.97 µs        |
+//! | 128        | 14.84 µs       |
+//! ```
+//!
+//! Contention (multi tx),
+//!
+//! ```md
+//! | Threads | Time (µs) |
+//! |:--------|:----------|
+//! |       2 |    132 µs |
+//! |       4 |    243 µs |
+//! |       8 |    519 µs |
+//! ```
+//!
+//! Blocking behavior (Prealloc),
+//!
+//! ```md
+//! | Scenario        | Time (µs) |
+//! |:----------------|:----------|
+//! | Pool exhaustion |   68.6 µs |
+//! ```
+//!
+//! Fallback (Prealloc -> Dynamic),
+//!
+//! ```md
+//! | N (chunks) | Time (ns) |
+//! |:-----------|:----------|
+//! | 32         | 201 ns    |
+//! | 64         | 229 ns    |
+//! | 128        | 252 ns    |
+//! ```
+//!
+//! Environment used for benching,
+//!
+//! - OS: NixOS (WSL2)
+//! - Architecture: x86_64
+//! - Memory: 8 GiB RAM (DDR4)
+//! - Rust: rustc 1.86.0 w/ cargo 1.86.0
+//! - Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+//! - CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
+//!
 //! ## Example
 //!
 //! ```

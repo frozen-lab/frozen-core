@@ -69,7 +69,7 @@ frozen-core = { version = "0.0.17", features = ["ffile"] }
 `FrozenFile` is currently available on the following platforms,
 
 | Platform                              | Support |
-|---------------------------------------|:-------:|
+|:--------------------------------------|:--------|
 | `aarch64-unknown-linux-gnu`           | ✅      |
 | `x86_64-unknown-linux-gnu`            | ✅      |
 | `aarch64-pc-windows-msvc`             | ❌      |
@@ -91,7 +91,7 @@ frozen-core = { version = "0.0.17", features = ["fmmap"] }
 `FrozenMMap` is currently available on the following platforms,
 
 | Platform                              | Support |
-|---------------------------------------|:-------:|
+|:--------------------------------------|:--------|
 | `aarch64-unknown-linux-gnu`           | ✅      |
 | `x86_64-unknown-linux-gnu`            | ✅      |
 | `aarch64-pc-windows-msvc`             | ❌      |
@@ -120,14 +120,14 @@ frozen-core = { version = "0.0.17", features = ["crc32"] }
 `Crc32C` is available on following architectures,
 
 | Architecture    | Support |
-|-----------------|:-------:|
+|:----------------|:--------|
 | `aarch64`       | ✅      |
 | `x86_64`        | ✅      |
 
 Look at following benches for the throughout and latency measurements,
 
 | Mode | Size    | Time (ns / µs)        | Throughput (GiB/s) |
-|:----:|:-------:|:---------------------:|:------------------:|
+|:-----|:--------|:----------------------|:-------------------|
 | 1x   | 4 KiB   | 318 ns                | 11.97              |
 | 2x   | 4 KiB   | 340 ns                | 11.24              |
 | 4x   | 4 KiB   | 451 ns                | 8.46               |
@@ -152,12 +152,75 @@ Environment used for benching,
 
 Lock-free buffer pool used for staging IO buffers.
 
+It offers following backends,
+
+- **Dynamic:** fastest, low latency, heap allocated
+- **Prealloc:** stable under contention, bounded memory, lock free reuse
+
 To use the `bpool` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
 frozen-core = { version = "0.0.17", features = ["bpool"] }
 ```
+
+Following are latency measurements for allocation across different backends and configurations.
+
+> [!NOTE]
+> All timings represent **allocation + drop (RAII lifecycle)**
+
+Single tx latency,
+
+| Mode     | N (chunks) | Time (ns / µs) |
+|:---------|:-----------|:---------------|
+| Dynamic  | 1          | 150 ns         |
+| Prealloc | 1          | 262 ns         |
+| Dynamic  | 4          | 163 ns         |
+| Prealloc | 4          | 595 ns         |
+| Dynamic  | 16         | 163 ns         |
+| Prealloc | 16         | 1.97 µs        |
+| Dynamic  | 64         | 220 ns         |
+| Prealloc | 64         | 8.25 µs        |
+
+Prealloc scaling (batch size),
+
+| N (chunks) | Time (ns / µs) |
+|:-----------|:---------------|
+| 1          | 253 ns         |
+| 8          | 1.13 µs        |
+| 32         | 3.97 µs        |
+| 128        | 14.84 µs       |
+
+Contention (multi tx),
+
+| Threads | Time (µs) |
+|:--------|:----------|
+|       2 |    132 µs |
+|       4 |    243 µs |
+|       8 |    519 µs |
+
+Blocking behavior (Prealloc),
+
+| Scenario        | Time (µs) |
+|:----------------|:----------|
+| Pool exhaustion |   68.6 µs |
+
+Fallback (Prealloc -> Dynamic),
+
+| N (chunks) | Time (ns) |
+|:-----------|:----------|
+| 32         | 201 ns    |
+| 64         | 229 ns    |
+| 128        | 252 ns    |
+
+Environment used for benching,
+
+- OS: NixOS (WSL2)
+- Architecture: x86_64
+- Memory: 8 GiB RAM (DDR4)
+- Rust: rustc 1.86.0 w/ cargo 1.86.0
+- Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+- CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
 
 ## MPSCQ
 
