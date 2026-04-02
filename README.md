@@ -231,6 +231,61 @@ To use the `mpscq` module, add it as a dependency in your `Cargo.toml`:
 frozen-core = { version = "0.0.17", features = ["mpscq"] }
 ```
 
+Following are latency measurements for push, drain, and combined operations,
+
+> [!NOTE]
+> All timings represent **end-to-end operation cost (including allocation & reclamation)**
+
+Single-thread push,
+
+| N (ops) | Time (ns / µs) |
+|:--------|:---------------|
+| 1       | 30 ns          |
+| 8       | 313 ns         |
+| 64      | 2.31 µs        |
+| 256     | 8.49 µs        |
+
+Single-thread drain,
+
+| N (ops) | Time (ns / µs) |
+|:--------|:---------------|
+| 1       | 37 ns          |
+| 8       | 263 ns         |
+| 64      | 2.17 µs        |
+| 256     | 8.23 µs        |
+
+Push + Drain cycle,
+
+| N (ops) | Time (ns / µs) |
+|:--------|:---------------|
+| 1       | 34 ns          |
+| 8       | 241 ns         |
+| 64      | 2.13 µs        |
+| 256     | 9.95 µs        |
+
+Contention (multi-producer push),
+
+| Threads | Time (µs) |
+|:--------|:----------|
+|       2 |    119 µs |
+|       4 |    199 µs |
+|       8 |    375 µs |
+
+Producer + Consumer,
+
+| Scenario            | Time (µs) |
+|:--------------------|:----------|
+| Concurrent pipeline |    121 µs |
+
+Environment used for benching,
+
+- OS: NixOS (WSL2)
+- Architecture: x86_64
+- Memory: 8 GiB RAM (DDR4)
+- Rust: rustc 1.86.0 w/ cargo 1.86.0
+- Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+- CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
+
 ## FrozenPipe
 
 An high throughput asynchronous IO pipeline for chunk based storage, it uses batches to write requests and flushes
