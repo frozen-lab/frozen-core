@@ -1,5 +1,5 @@
 //! Benchmarks for `bpool` module
-//! Run using: `taskset -c 2 cargo bench --bench bpool --features=bpool`
+//! Run using: `taskset -c 2,3,4 cargo bench --bench bpool --features=bpool`
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use frozen_core::bpool::{BPBackend, BPCfg, BufPool};
@@ -10,14 +10,14 @@ const MID: u8 = 0;
 
 fn new_dynamic() -> BufPool {
     BufPool::new::<MID>(BPCfg {
-        chunk_size: 64,
+        chunk_size: 0x40,
         backend: BPBackend::Dynamic,
     })
 }
 
 fn new_prealloc(cap: usize) -> BufPool {
     BufPool::new::<MID>(BPCfg {
-        chunk_size: 64,
+        chunk_size: 0x40,
         backend: BPBackend::Prealloc { capacity: cap },
     })
 }

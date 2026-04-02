@@ -21,16 +21,12 @@
 //! Single tx latency,
 //!
 //! ```md
-//! | Mode     | N (chunks) | Time (ns / µs) |
-//! |:---------|:-----------|:---------------|
-//! | Dynamic  | 1          | 150 ns         |
-//! | Prealloc | 1          | 262 ns         |
-//! | Dynamic  | 4          | 163 ns         |
-//! | Prealloc | 4          | 595 ns         |
-//! | Dynamic  | 16         | 163 ns         |
-//! | Prealloc | 16         | 1.97 µs        |
-//! | Dynamic  | 64         | 220 ns         |
-//! | Prealloc | 64         | 8.25 µs        |
+//! | N (Chunks) |  Dynamic Time (ns / µs) | Prealloc Time (ns / µs) |
+//! |:-----------|:------------------------|:------------------------|
+//! | 1          | 150 ns                  | 262 ns                  |
+//! | 4          | 163 ns                  | 595 ns                  |
+//! | 0x10       | 163 ns                  | 1.97 µs                 |
+//! | 0x40       | 220 ns                  | 8.25 µs                 |
 //! ```
 //!
 //! Prealloc scaling (batch size),
@@ -71,6 +67,8 @@
 //! | 64         | 229 ns    |
 //! | 128        | 252 ns    |
 //! ```
+//!
+//! Where value of `N` is `N = 0x40`.
 //!
 //! Environment used for benching,
 //!
