@@ -1756,6 +1756,161 @@ mod tests {
         }
     }
 
+    mod fm_tx {
+        use super::*;
+
+        #[test]
+        fn ok_tx_basic_multi_write() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
+
+            let mut tx = mmap.new_tx();
+            unsafe {
+                tx.write(0, |v| *v = 1).unwrap();
+                tx.write(1, |v| *v = 2).unwrap();
+                tx.write(2, |v| *v = 3).unwrap();
+            }
+
+            let epoch = tx.commit().unwrap();
+            mmap.wait_for_durability(epoch).unwrap();
+
+            let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
+            let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
+            let v2 = unsafe { mmap.read(2, |v| *v).unwrap() };
+
+            assert_eq!((v0, v1, v2), (1, 2, 3));
+        }
+
+        #[test]
+        fn ok_tx_single_epoch() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
+
+            let mut tx = mmap.new_tx();
+            unsafe {
+                tx.write(0, |v| *v = 0x0A).unwrap();
+                tx.write(1, |v| *v = 0x14).unwrap();
+            }
+
+            // NOTE: next write must have strictly higher epoch then current one
+
+            let epoch = tx.commit().unwrap();
+            let next_epoch = unsafe { mmap.write(2, |v| *v = 0x1E).unwrap() };
+
+            assert!(next_epoch > epoch);
+        }
+
+        #[test]
+        fn err_tx_out_of_order() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
+
+            let mut tx = mmap.new_tx();
+            unsafe {
+                tx.write(2, |v| *v = 1).unwrap();
+                let res = tx.write(1, |v| *v = 2);
+                assert!(res.is_err());
+            }
+        }
+
+        #[test]
+        fn err_tx_duplicate_index() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
+
+            let mut tx = mmap.new_tx();
+            unsafe {
+                tx.write(1, |v| *v = 1).unwrap();
+                let res = tx.write(1, |v| *v = 2);
+                assert!(res.is_err());
+            }
+        }
+
+        #[test]
+        fn ok_tx_concurrent_non_overlapping() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(path, cfg).unwrap());
+
+            let mut handles = Vec::new();
+            for i in 0..2 {
+                let mmap = mmap.clone();
+                handles.push(thread::spawn(move || {
+                    let mut tx = mmap.new_tx();
+
+                    unsafe {
+                        tx.write(i * 2, |v| *v = i as u64).unwrap();
+                        tx.write(i * 2 + 1, |v| *v = i as u64).unwrap();
+                    }
+
+                    let epoch = tx.commit().unwrap();
+                    mmap.wait_for_durability(epoch).unwrap();
+                }));
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            for i in 0..2 {
+                let v0 = unsafe { mmap.read(i * 2, |v| *v).unwrap() };
+                let v1 = unsafe { mmap.read(i * 2 + 1, |v| *v).unwrap() };
+
+                assert_eq!((v0, v1), (i as u64, i as u64));
+            }
+        }
+
+        #[test]
+        fn ok_tx_overwrite_last_wins() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
+
+            let mut tx = mmap.new_tx();
+            unsafe {
+                tx.write(0, |v| *v = 1).unwrap();
+            }
+
+            tx.commit().unwrap();
+
+            let mut tx2 = mmap.new_tx();
+            unsafe {
+                tx2.write(0, |v| *v = 2).unwrap();
+            }
+
+            let epoch = tx2.commit().unwrap();
+            mmap.wait_for_durability(epoch).unwrap();
+
+            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
+            assert_eq!(val, 2);
+        }
+
+        #[test]
+        fn ok_tx_persists_across_reopen() {
+            let (_dir, path, cfg) = new_tmp();
+
+            {
+                let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
+
+                let mut tx = mmap.new_tx();
+                unsafe {
+                    tx.write(0, |v| *v = 0x3A).unwrap();
+                    tx.write(1, |v| *v = 0x54).unwrap();
+                }
+
+                let epoch = tx.commit().unwrap();
+                mmap.wait_for_durability(epoch).unwrap();
+            }
+
+            {
+                let mmap = FrozenMMap::<u64, MID>::new(&path, cfg).unwrap();
+
+                let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
+                let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
+
+                assert_eq!((v0, v1), (0x3A, 0x54));
+            }
+        }
+    }
+
     mod fm_durability {
         use super::*;
 
