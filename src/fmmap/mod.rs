@@ -754,6 +754,56 @@ where
         mmap_bytes + lock_bytes
     }
 
+    /// Create a new [`FMTransaction`] context for grouping multi write ops into a single atomic operation
+    ///
+    /// ## Overview
+    ///
+    /// The use of [`FMTransaction`] allows to group multiple write ops into a single atomic operation, hence
+    /// creating a transactional write operation, which gives following guarantees,
+    ///
+    /// - All write ops succeed together
+    /// - Single epoch to track durability of all writes ops
+    /// - Same durability guarantee for all the included write ops
+    ///
+    /// Simple, this preserves atomic durability semantics for multi index updates
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_tx");
+    ///
+    /// let cfg = FMCfg {
+    ///     initial_count: 0x0A,
+    ///     flush_duration: std::time::Duration::from_micros(50),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64, MID>::new(&path, cfg).unwrap();
+    ///
+    /// let mut tx = mmap.new_tx();
+    /// unsafe { tx.write(0, |v| *v = 0x0A) }.unwrap();
+    /// unsafe { tx.write(1, |v| *v = 0x14) }.unwrap();
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// mmap.wait_for_durability(epoch).unwrap();
+    ///
+    /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
+    /// let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
+    ///
+    /// assert_eq!((v0, v1), (0x0A, 0x14));
+    /// ```
+    #[inline]
+    pub fn new_tx(&self) -> FMTransaction<'_, T> {
+        FMTransaction {
+            core: &self.core,
+            ops_vec: Vec::new(),
+        }
+    }
+
     /// Delete the underlying [`FrozenFile`] used for [`FrozenMMap`] from fs
     ///
     /// ## Working
@@ -854,6 +904,148 @@ where
             self.total_slots(),
             self.core.curr_length,
         )
+    }
+}
+
+///
+pub struct FMTransaction<'a, T> {
+    core: &'a Core,
+    ops_vec: Vec<(usize, Box<dyn FnOnce(*mut T) + 'a>)>,
+}
+
+impl<'a, T> FMTransaction<'a, T> {
+    /// Append a write op into the [`FMTransaction`]
+    ///
+    /// ## Requirements
+    ///
+    /// Write ops must follow these safety requirements,
+    ///
+    /// - No duplicate indices
+    /// - No out-of-order writes (must be incremental)
+    ///
+    /// Violating this constraint would result in [`FrozenErr`]
+    ///
+    /// ## Safety
+    ///
+    /// Same safety requirements as [`FrozenMMap::write`] apply here
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_tx");
+    ///
+    /// let cfg = FMCfg {
+    ///     initial_count: 0x10,
+    ///     flush_duration: std::time::Duration::from_micros(50),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64, MID>::new(&path, cfg).unwrap();
+    ///
+    /// let mut tx = mmap.new_tx();
+    /// unsafe { tx.write(0, |v| *v = 0x0A) }.unwrap();
+    /// unsafe { tx.write(1, |v| *v = 0x0B) }.unwrap();
+    /// unsafe { tx.write(2, |v| *v = 0x0C) }.unwrap();
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// mmap.wait_for_durability(epoch).unwrap();
+    ///
+    /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
+    /// let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
+    /// let v2 = unsafe { mmap.read(2, |v| *v).unwrap() };
+    ///
+    /// assert_eq!((v0, v1, v2), (0x0A, 0x0B, 0x0C));
+    /// ```
+    #[inline(always)]
+    pub unsafe fn write<F>(&mut self, index: usize, f: F) -> FrozenRes<()>
+    where
+        F: FnOnce(*mut T) + 'a,
+    {
+        // NOTE:
+        //
+        // This check prevents a potential footgun! For a safe transaction all writes must be,
+        // - ordered by index (either incr or decr)
+        // - no multi writes on same index
+        //
+        // If any of these is violated, there is a certain risk of deadlock in multi tx env's
+        if let Some((last_idx, _)) = self.ops_vec.last() {
+            if index <= *last_idx {
+                return new_err(
+                    err::HCF,
+                    "tx writes must be strictly ordered, with no more then single ops on given index",
+                );
+            }
+        }
+
+        self.ops_vec.push((index, Box::new(f)));
+        Ok(())
+    }
+
+    /// Commit the transaction, applying all the writes ops, combined into a single atomic operation
+    ///
+    /// ## Guarantees
+    ///
+    /// - All writes are applied under a single epoch
+    /// - All writes belong to the same durability batch
+    /// - No interleaving with other transactions at epoch level
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_tx");
+    ///
+    /// let cfg = FMCfg {
+    ///     initial_count: 0x10,
+    ///     flush_duration: std::time::Duration::from_micros(50),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64, MID>::new(&path, cfg).unwrap();
+    ///
+    /// let mut tx = mmap.new_tx();
+    /// unsafe { tx.write(0, |v| *v = 0x0A) }.unwrap();
+    /// unsafe { tx.write(2, |v| *v = 0x0C) }.unwrap();
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// mmap.wait_for_durability(epoch).unwrap();
+    ///
+    /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
+    /// let v1 = unsafe { mmap.read(2, |v| *v).unwrap() };
+    ///
+    /// assert_eq!((v0, v1), (0x0A, 0x0C));
+    /// ```
+    #[inline(always)]
+    pub fn commit(self) -> FrozenRes<u64> {
+        if let Some(err) = self.core.get_sync_error() {
+            return Err(err);
+        }
+
+        let _guard = self.core.acquire_io_lock()?;
+
+        // NOTE: we must acquire all locks beforehand, to make sure all the write go through
+        let mut guards = Vec::with_capacity(self.ops_vec.len());
+        for (idx, _) in &self.ops_vec {
+            guards.push(self.core.locks.lock(*idx));
+        }
+
+        for (idx, op) in self.ops_vec {
+            let offset = idx * std::mem::size_of::<T>();
+            let ptr = unsafe { self.core.map.as_mut_ptr(offset) };
+            op(ptr);
+        }
+
+        self.core.dirty.store(true, atomic::Ordering::Release);
+        let epoch = self.core.incr_curr_epoch();
+
+        Ok(epoch)
     }
 }
 
@@ -1560,6 +1752,161 @@ mod tests {
                 let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
                 let val = unsafe { mmap.read(0, |v| *v).unwrap() };
                 assert_eq!(val, VAL);
+            }
+        }
+    }
+
+    mod fm_tx {
+        use super::*;
+
+        #[test]
+        fn ok_tx_basic_multi_write() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
+
+            let mut tx = mmap.new_tx();
+            unsafe {
+                tx.write(0, |v| *v = 1).unwrap();
+                tx.write(1, |v| *v = 2).unwrap();
+                tx.write(2, |v| *v = 3).unwrap();
+            }
+
+            let epoch = tx.commit().unwrap();
+            mmap.wait_for_durability(epoch).unwrap();
+
+            let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
+            let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
+            let v2 = unsafe { mmap.read(2, |v| *v).unwrap() };
+
+            assert_eq!((v0, v1, v2), (1, 2, 3));
+        }
+
+        #[test]
+        fn ok_tx_single_epoch() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
+
+            let mut tx = mmap.new_tx();
+            unsafe {
+                tx.write(0, |v| *v = 0x0A).unwrap();
+                tx.write(1, |v| *v = 0x14).unwrap();
+            }
+
+            // NOTE: next write must have strictly higher epoch then current one
+
+            let epoch = tx.commit().unwrap();
+            let next_epoch = unsafe { mmap.write(2, |v| *v = 0x1E).unwrap() };
+
+            assert!(next_epoch > epoch);
+        }
+
+        #[test]
+        fn err_tx_out_of_order() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
+
+            let mut tx = mmap.new_tx();
+            unsafe {
+                tx.write(2, |v| *v = 1).unwrap();
+                let res = tx.write(1, |v| *v = 2);
+                assert!(res.is_err());
+            }
+        }
+
+        #[test]
+        fn err_tx_duplicate_index() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
+
+            let mut tx = mmap.new_tx();
+            unsafe {
+                tx.write(1, |v| *v = 1).unwrap();
+                let res = tx.write(1, |v| *v = 2);
+                assert!(res.is_err());
+            }
+        }
+
+        #[test]
+        fn ok_tx_concurrent_non_overlapping() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = sync::Arc::new(FrozenMMap::<u64, MID>::new(path, cfg).unwrap());
+
+            let mut handles = Vec::new();
+            for i in 0..2 {
+                let mmap = mmap.clone();
+                handles.push(thread::spawn(move || {
+                    let mut tx = mmap.new_tx();
+
+                    unsafe {
+                        tx.write(i * 2, |v| *v = i as u64).unwrap();
+                        tx.write(i * 2 + 1, |v| *v = i as u64).unwrap();
+                    }
+
+                    let epoch = tx.commit().unwrap();
+                    mmap.wait_for_durability(epoch).unwrap();
+                }));
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            for i in 0..2 {
+                let v0 = unsafe { mmap.read(i * 2, |v| *v).unwrap() };
+                let v1 = unsafe { mmap.read(i * 2 + 1, |v| *v).unwrap() };
+
+                assert_eq!((v0, v1), (i as u64, i as u64));
+            }
+        }
+
+        #[test]
+        fn ok_tx_overwrite_last_wins() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = FrozenMMap::<u64, MID>::new(path, cfg).unwrap();
+
+            let mut tx = mmap.new_tx();
+            unsafe {
+                tx.write(0, |v| *v = 1).unwrap();
+            }
+
+            tx.commit().unwrap();
+
+            let mut tx2 = mmap.new_tx();
+            unsafe {
+                tx2.write(0, |v| *v = 2).unwrap();
+            }
+
+            let epoch = tx2.commit().unwrap();
+            mmap.wait_for_durability(epoch).unwrap();
+
+            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
+            assert_eq!(val, 2);
+        }
+
+        #[test]
+        fn ok_tx_persists_across_reopen() {
+            let (_dir, path, cfg) = new_tmp();
+
+            {
+                let mmap = FrozenMMap::<u64, MID>::new(&path, cfg.clone()).unwrap();
+
+                let mut tx = mmap.new_tx();
+                unsafe {
+                    tx.write(0, |v| *v = 0x3A).unwrap();
+                    tx.write(1, |v| *v = 0x54).unwrap();
+                }
+
+                let epoch = tx.commit().unwrap();
+                mmap.wait_for_durability(epoch).unwrap();
+            }
+
+            {
+                let mmap = FrozenMMap::<u64, MID>::new(&path, cfg).unwrap();
+
+                let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
+                let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
+
+                assert_eq!((v0, v1), (0x3A, 0x54));
             }
         }
     }
