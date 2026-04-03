@@ -754,11 +754,52 @@ where
         mmap_bytes + lock_bytes
     }
 
+    /// Create a new [`FMTransaction`] context for grouping multi write ops into a single atomic operation
     ///
+    /// ## Overview
+    ///
+    /// The use of [`FMTransaction`] allows to group multiple write ops into a single atomic operation, hence
+    /// creating a transactional write operation, which gives following guarantees,
+    ///
+    /// - All write ops succeed together
+    /// - Single epoch to track durability of all writes ops
+    /// - Same durability guarantee for all the included write ops
+    ///
+    /// Simple, this preserves atomic durability semantics for multi index updates
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_tx");
+    ///
+    /// let cfg = FMCfg {
+    ///     initial_count: 0x0A,
+    ///     flush_duration: std::time::Duration::from_micros(50),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64, MID>::new(&path, cfg).unwrap();
+    ///
+    /// let mut tx = mmap.new_tx();
+    /// unsafe { tx.write(0, |v| *v = 0x0A) }.unwrap();
+    /// unsafe { tx.write(1, |v| *v = 0x14) }.unwrap();
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// mmap.wait_for_durability(epoch).unwrap();
+    ///
+    /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
+    /// let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
+    ///
+    /// assert_eq!((v0, v1), (0x0A, 0x14));
+    /// ```
+    #[inline]
     pub fn new_tx(&self) -> FMTransaction<'_, T> {
         FMTransaction {
             core: &self.core,
-            idx_vec: Vec::new(),
             ops_vec: Vec::new(),
         }
     }
@@ -869,31 +910,119 @@ where
 ///
 pub struct FMTransaction<'a, T> {
     core: &'a Core,
-    idx_vec: Vec<usize>,
-    ops_vec: Vec<Box<dyn FnOnce(*mut T) + 'a>>,
+    ops_vec: Vec<(usize, Box<dyn FnOnce(*mut T) + 'a>)>,
 }
 
 impl<'a, T> FMTransaction<'a, T> {
+    /// Append a write op into the [`FMTransaction`]
     ///
-    pub fn write<F>(&mut self, index: usize, f: F) -> FrozenRes<()>
+    /// ## Requirements
+    ///
+    /// Write ops must follow these safety requirements,
+    ///
+    /// - No duplicate indices
+    /// - No out-of-order writes (must be incremental)
+    ///
+    /// Violating this constraint would result in [`FrozenErr`]
+    ///
+    /// ## Safety
+    ///
+    /// Same safety requirements as [`FrozenMMap::write`] apply here
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_tx");
+    ///
+    /// let cfg = FMCfg {
+    ///     initial_count: 0x10,
+    ///     flush_duration: std::time::Duration::from_micros(50),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64, MID>::new(&path, cfg).unwrap();
+    ///
+    /// let mut tx = mmap.new_tx();
+    /// unsafe { tx.write(0, |v| *v = 0x0A) }.unwrap();
+    /// unsafe { tx.write(1, |v| *v = 0x0B) }.unwrap();
+    /// unsafe { tx.write(2, |v| *v = 0x0C) }.unwrap();
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// mmap.wait_for_durability(epoch).unwrap();
+    ///
+    /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
+    /// let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
+    /// let v2 = unsafe { mmap.read(2, |v| *v).unwrap() };
+    ///
+    /// assert_eq!((v0, v1, v2), (0x0A, 0x0B, 0x0C));
+    /// ```
+    #[inline(always)]
+    pub unsafe fn write<F>(&mut self, index: usize, f: F) -> FrozenRes<()>
     where
         F: FnOnce(*mut T) + 'a,
     {
-        if let Some(last) = self.idx_vec.last() {
-            if index <= *last {
+        // NOTE:
+        //
+        // This check prevents a potential footgun! For a safe transaction all writes must be,
+        // - ordered by index (either incr or decr)
+        // - no multi writes on same index
+        //
+        // If any of these is violated, there is a certain risk of deadlock in multi tx env's
+        if let Some((last_idx, _)) = self.ops_vec.last() {
+            if index <= *last_idx {
                 return new_err(
                     err::HCF,
-                    "tx writes must be strictly increasing (ordered, no duplicates)",
+                    "tx writes must be strictly ordered, with no more then single ops on given index",
                 );
             }
         }
 
-        self.idx_vec.push(index);
-        self.ops_vec.push(Box::new(f));
+        self.ops_vec.push((index, Box::new(f)));
         Ok(())
     }
 
+    /// Commit the transaction, applying all the writes ops, combined into a single atomic operation
     ///
+    /// ## Guarantees
+    ///
+    /// - All writes are applied under a single epoch
+    /// - All writes belong to the same durability batch
+    /// - No interleaving with other transactions at epoch level
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_tx");
+    ///
+    /// let cfg = FMCfg {
+    ///     initial_count: 0x10,
+    ///     flush_duration: std::time::Duration::from_micros(50),
+    /// };
+    ///
+    /// let mmap = FrozenMMap::<u64, MID>::new(&path, cfg).unwrap();
+    ///
+    /// let mut tx = mmap.new_tx();
+    /// unsafe { tx.write(0, |v| *v = 0x0A) }.unwrap();
+    /// unsafe { tx.write(2, |v| *v = 0x0C) }.unwrap();
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// mmap.wait_for_durability(epoch).unwrap();
+    ///
+    /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
+    /// let v1 = unsafe { mmap.read(2, |v| *v).unwrap() };
+    ///
+    /// assert_eq!((v0, v1), (0x0A, 0x0C));
+    /// ```
+    #[inline(always)]
     pub fn commit(self) -> FrozenRes<u64> {
         if let Some(err) = self.core.get_sync_error() {
             return Err(err);
@@ -903,14 +1032,13 @@ impl<'a, T> FMTransaction<'a, T> {
 
         // NOTE: we must acquire all locks beforehand, to make sure all the write go through
         let mut guards = Vec::with_capacity(self.ops_vec.len());
-        for idx in &self.idx_vec {
+        for (idx, _) in &self.ops_vec {
             guards.push(self.core.locks.lock(*idx));
         }
 
-        for (idx, op) in self.idx_vec.into_iter().zip(self.ops_vec.into_iter()) {
+        for (idx, op) in self.ops_vec {
             let offset = idx * std::mem::size_of::<T>();
             let ptr = unsafe { self.core.map.as_mut_ptr(offset) };
-
             op(ptr);
         }
 
