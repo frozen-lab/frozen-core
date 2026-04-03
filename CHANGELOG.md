@@ -5,6 +5,7 @@
 - Added benches for `crc32` module
 - Added benches for `bpool` module
 - Added benches for `mpscq` module
+- Impl of `FMTransaction` for transactional writes in `FrozenMMap`
 
 ## `0.0.17`
 
