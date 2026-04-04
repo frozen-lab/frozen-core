@@ -208,12 +208,17 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
 
     /// Submit a write request
     ///
-    /// Returns the epoch representing the durability window of the write
-    ///
     /// ## Working
     ///
     /// The buffer is split into `chunk_size` sized segments and staged using [`BufPool`] before being
     /// written by the background flusher
+    ///
+    /// Returns the epoch representing the durability window of the write
+    ///
+    /// ## Requirements
+    ///
+    /// Length of each data buffer in given `&[buf]` must be of exact `chunk_size`, otherwise the call may cause
+    /// undefined behaviour
     ///
     /// ## Example
     ///
@@ -236,22 +241,26 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     ///
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
-    /// let buf = vec![0x3Bu8; 0x40];
-    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// let data = [0x3Bu8; 0x40];
+    /// let bufs = vec![
+    ///     &data[0x00..0x20],
+    ///     &data[0x20..0x40],
+    /// ];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.wait_for_durability(epoch).unwrap();
     ///
     /// let read = pipe.read(0, 2).unwrap();
-    /// assert_eq!(read, buf);
+    /// assert_eq!(read, data);
     /// ```
     #[inline(always)]
-    pub fn write(&self, buf: &[u8], index: usize) -> FrozenRes<u64> {
+    pub unsafe fn write(&self, buf: &[&[u8]], index: usize) -> FrozenRes<u64> {
         if let Some(err) = self.core.get_sync_error() {
             return Err(err);
         }
 
         let chunk_size = self.core.cfg.chunk_size;
-        let chunks = buf.len().div_ceil(chunk_size);
+        let chunks = buf.len();
 
         let alloc = self.core.pool.allocate(chunks)?;
 
@@ -261,17 +270,10 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
         // potentially stalling the durability progress for the entire `FrozenPipe`
         let _lock = self.core.acquire_io_lock()?;
 
-        let mut src_off = 0usize;
-        for ptr in alloc.slots() {
-            if src_off >= buf.len() {
-                break;
-            }
-
-            let remaining = buf.len() - src_off;
-            let copy = remaining.min(chunk_size);
-
-            unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr().add(src_off), *ptr, copy) };
-            src_off += copy;
+        for (idx, ptr) in alloc.slots().iter().enumerate() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(buf[idx].as_ptr(), *ptr, chunk_size);
+            };
         }
 
         let epoch = self.core.epoch.load(atomic::Ordering::Acquire);
