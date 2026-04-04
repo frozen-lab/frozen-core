@@ -286,7 +286,7 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
         }
 
         let epoch = self.core.epoch.load(atomic::Ordering::Acquire);
-        let req = WriteReq::new(index, chunks, alloc);
+        let req = WriteType::Single(WriteReq::new(index, chunks, alloc));
         self.core.mpscq.push(req);
 
         Ok(epoch)
@@ -545,6 +545,15 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
         self.core.file.total_chunks()
     }
 
+    ///
+    #[inline]
+    pub fn new_tx(&self) -> FPTransaction<'_> {
+        FPTransaction {
+            core: &self.core,
+            ops: Vec::new(),
+        }
+    }
+
     #[inline(always)]
     fn read_2x(&self, index: usize) -> FrozenRes<Vec<u8>> {
         let chunk = self.core.cfg.chunk_size;
@@ -657,7 +666,7 @@ struct Core {
     durable_cv: sync::Condvar,
     closed: atomic::AtomicBool,
     durable_lock: sync::Mutex<()>,
-    mpscq: mpscq::MPSCQueue<WriteReq>,
+    mpscq: mpscq::MPSCQueue<WriteType>,
     error: atomic::AtomicPtr<FrozenErr>,
 }
 
@@ -727,23 +736,44 @@ impl Core {
         self.epoch.fetch_add(1, atomic::Ordering::Release);
     }
 
-    fn write_batch(&self, batch: Vec<WriteReq>) -> FrozenRes<(usize, usize)> {
+    fn write_batch(&self, batch: Vec<WriteType>) -> FrozenRes<(usize, usize)> {
         let mut max_index = 0usize;
         let mut min_index = usize::MAX;
 
-        for req in &batch {
-            let slots = req.alloc.slots();
-            match req.chunks {
-                1 => {
-                    self.file.pwrite(slots[0], req.index)?;
+        for req_type in &batch {
+            match req_type {
+                WriteType::Single(req) => {
+                    let slots = req.alloc.slots();
+                    match req.chunks {
+                        1 => {
+                            self.file.pwrite(slots[0], req.index)?;
+                        }
+                        _ => {
+                            self.file.pwritev(slots, req.index)?;
+                        }
+                    }
+
+                    min_index = min_index.min(req.index);
+                    max_index = max_index.max(req.index + req.chunks);
                 }
-                _ => {
-                    self.file.pwritev(slots, req.index)?;
+
+                WriteType::Transaction(reqs) => {
+                    for req in reqs {
+                        let slots = req.alloc.slots();
+                        match req.chunks {
+                            1 => {
+                                self.file.pwrite(slots[0], req.index)?;
+                            }
+                            _ => {
+                                self.file.pwritev(slots, req.index)?;
+                            }
+                        }
+
+                        min_index = min_index.min(req.index);
+                        max_index = max_index.max(req.index + req.chunks);
+                    }
                 }
             }
-
-            min_index = min_index.min(req.index);
-            max_index = max_index.max(req.index + req.chunks);
         }
 
         Ok((min_index, max_index))
@@ -884,6 +914,49 @@ impl Core {
 
 unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
+
+///
+pub struct FPTransaction<'a> {
+    core: &'a Core,
+    ops: Vec<WriteReq>,
+}
+
+impl<'a> FPTransaction<'a> {
+    ///
+    #[inline(always)]
+    pub unsafe fn write(&mut self, buf: &[&[u8]], index: usize) -> FrozenRes<()> {
+        let chunk_size = self.core.cfg.chunk_size;
+        let chunks = buf.len();
+
+        let alloc = self.core.pool.allocate(chunks)?;
+        for (i, ptr) in alloc.slots().iter().enumerate() {
+            std::ptr::copy_nonoverlapping(buf[i].as_ptr(), *ptr, chunk_size);
+        }
+
+        self.ops.push(WriteReq::new(index, chunks, alloc));
+        Ok(())
+    }
+
+    ///
+    #[inline(always)]
+    pub fn commit(self) -> FrozenRes<u64> {
+        if let Some(err) = self.core.get_sync_error() {
+            return Err(err);
+        }
+
+        let _lock = self.core.acquire_io_lock()?;
+        let epoch = self.core.epoch.load(atomic::Ordering::Acquire);
+        self.core.mpscq.push(WriteType::Transaction(self.ops));
+
+        Ok(epoch)
+    }
+}
+
+#[derive(Debug)]
+enum WriteType {
+    Single(WriteReq),
+    Transaction(Vec<WriteReq>),
+}
 
 #[derive(Debug)]
 struct WriteReq {
