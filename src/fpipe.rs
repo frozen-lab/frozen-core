@@ -32,13 +32,17 @@
 //!
 //! let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
 //!
-//! let buf = vec![1u8; 0x40];
-//! let epoch = pipe.write(&buf, 0).unwrap();
+//! let data = vec![1u8; 0x40];
+//! let bufs = vec![
+//!     &data[0x00..0x20],
+//!     &data[0x20..0x40],
+//! ];
 //!
+//! let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
 //! pipe.wait_for_durability(epoch).unwrap();
 //!
 //! let read = pipe.read(0, 2).unwrap();
-//! assert_eq!(read, buf);
+//! assert_eq!(read, data);
 //! ```
 
 use crate::{
@@ -134,13 +138,17 @@ pub struct FPCfg {
 ///
 /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
 ///
-/// let buf = vec![0x3Bu8; 0x40];
-/// let epoch = pipe.write(&buf, 0).unwrap();
+/// let data = vec![1u8; 0x40];
+/// let bufs = vec![
+///     &data[0x00..0x20],
+///     &data[0x20..0x40],
+/// ];
 ///
+/// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
 /// pipe.wait_for_durability(epoch).unwrap();
 ///
 /// let read = pipe.read(0, 2).unwrap();
-/// assert_eq!(read, buf);
+/// assert_eq!(read, data);
 /// ```
 #[derive(Debug)]
 pub struct FrozenPipe<const MODULE_ID: u8> {
@@ -175,13 +183,14 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     ///
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
-    /// let buf = vec![1; 0x20];
-    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// let data = vec![1u8; 0x20];
+    /// let bufs = vec![&data[0x00..0x20]];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.wait_for_durability(epoch).unwrap();
     ///
     /// let read = pipe.read(0, 1).unwrap();
-    /// assert_eq!(read, buf);
+    /// assert_eq!(read, data);
     /// ```
     pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FPCfg) -> FrozenRes<Self> {
         let file = ffile::FrozenFile::new::<MODULE_ID>(ffile::FFCfg {
@@ -309,8 +318,9 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
     /// let data = vec![0xAAu8; 0x20];
-    /// let epoch = pipe.write(&data, 0).unwrap();
+    /// let bufs = vec![&data[0x00..0x20]];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.wait_for_durability(epoch).unwrap();
     ///
     /// let read = pipe.read_single(0).unwrap();
@@ -352,13 +362,14 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     ///
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
-    /// let buf = vec![0xBBu8; 0x20 * 2];
-    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// let data = vec![0xBBu8; 0x20 * 2];
+    /// let bufs = vec![&data[0x00..0x20], &data[0x20..0x40]];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.wait_for_durability(epoch).unwrap();
     ///
     /// let read = pipe.read(0, 2).unwrap();
-    /// assert_eq!(read, buf);
+    /// assert_eq!(read, data);
     /// ```
     #[inline(always)]
     pub fn read(&self, index: usize, count: usize) -> FrozenRes<Vec<u8>> {
@@ -396,9 +407,10 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     ///
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
-    /// let buf = vec![1u8; 0x20];
-    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// let data = vec![1u8; 0x20];
+    /// let bufs = vec![&data[0x00..0x20]];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.wait_for_durability(epoch).unwrap();
     /// ```
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
@@ -430,9 +442,10 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     ///
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
-    /// let buf = vec![0x0Au8; 0x20];
-    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// let data = vec![1u8; 0x20];
+    /// let bufs = vec![&data[0x00..0x20]];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.force_durability(epoch).unwrap();
     /// ```
     pub fn force_durability(&self, epoch: u64) -> FrozenRes<()> {
