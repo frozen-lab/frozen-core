@@ -41,7 +41,7 @@ To use the `error` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.17", features = ["error"] }
+frozen-core = { version = "0.0.18", features = ["error"] }
 ```
 
 ## Hints
@@ -52,7 +52,7 @@ To use the `hints` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.17", features = ["hints"] }
+frozen-core = { version = "0.0.18", features = ["hints"] }
 ```
 
 ## FrozenFile
@@ -63,13 +63,13 @@ To use the `ffile` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.17", features = ["ffile"] }
+frozen-core = { version = "0.0.18", features = ["ffile"] }
 ```
 
 `FrozenFile` is currently available on the following platforms,
 
 | Platform                              | Support |
-|---------------------------------------|:-------:|
+|:--------------------------------------|:--------|
 | `aarch64-unknown-linux-gnu`           | ✅      |
 | `x86_64-unknown-linux-gnu`            | ✅      |
 | `aarch64-pc-windows-msvc`             | ❌      |
@@ -85,13 +85,13 @@ To use the `fmmap` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.17", features = ["fmmap"] }
+frozen-core = { version = "0.0.18", features = ["fmmap"] }
 ```
 
 `FrozenMMap` is currently available on the following platforms,
 
 | Platform                              | Support |
-|---------------------------------------|:-------:|
+|:--------------------------------------|:--------|
 | `aarch64-unknown-linux-gnu`           | ✅      |
 | `x86_64-unknown-linux-gnu`            | ✅      |
 | `aarch64-pc-windows-msvc`             | ❌      |
@@ -114,26 +114,111 @@ To use the `crc32` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.17", features = ["crc32"] }
+frozen-core = { version = "0.0.18", features = ["crc32"] }
 ```
 
 `Crc32C` is available on following architectures,
 
 | Architecture    | Support |
-|-----------------|:-------:|
+|:----------------|:--------|
 | `aarch64`       | ✅      |
 | `x86_64`        | ✅      |
+
+Look at following benches for the throughout and latency measurements,
+
+| Mode | Size    | Time (ns / µs)        | Throughput (GiB/s) |
+|:-----|:--------|:----------------------|:-------------------|
+| 1x   | 4 KiB   | 318 ns                | 11.97              |
+| 2x   | 4 KiB   | 340 ns                | 11.24              |
+| 4x   | 4 KiB   | 451 ns                | 8.46               |
+| 1x   | 64 KiB  | 5.44 µs               | 11.23              |
+| 2x   | 64 KiB  | 5.26 µs               | 11.60              |
+| 4x   | 64 KiB  | 7.50 µs               | 8.14               |
+| 1x   | 1 MiB   | 89.80 µs              | 10.88              |
+| 2x   | 1 MiB   | 90.56 µs              | 10.78              |
+| 4x   | 1 MiB   | 120.04 µs             | 8.13               |
+
+Environment used for benching,
+
+- OS: NixOS (WSL2)
+- Architecture: x86_64
+- Memory: 8 GiB RAM (DDR4)
+- Backend: Hardware (SSE4.2)
+- Rust: rustc 1.86.0 w/ cargo 1.86.0
+- Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+- CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
 
 ## BPool
 
 Lock-free buffer pool used for staging IO buffers.
 
+It offers following backends,
+
+- **Dynamic:** fastest, low latency, heap allocated
+- **Prealloc:** stable under contention, bounded memory, lock free reuse
+
 To use the `bpool` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.17", features = ["bpool"] }
+frozen-core = { version = "0.0.18", features = ["bpool"] }
 ```
+
+Following are latency measurements for allocation across different backends and configurations.
+
+> [!NOTE]
+> All timings represent **allocation + drop (RAII lifecycle)**
+
+Single tx latency,
+
+| N (Chunks) |  Dynamic Time (ns / µs) | Prealloc Time (ns / µs) |
+|:-----------|:------------------------|:------------------------|
+| 1          | 150 ns                  | 262 ns                  |
+| 4          | 163 ns                  | 595 ns                  |
+| 16         | 163 ns                  | 1.97 µs                 |
+| 64         | 220 ns                  | 8.25 µs                 |
+
+Prealloc scaling (batch size),
+
+| N (chunks) | Time (ns / µs) |
+|:-----------|:---------------|
+| 1          | 253 ns         |
+| 8          | 1.13 µs        |
+| 32         | 3.97 µs        |
+| 128        | 14.84 µs       |
+
+Contention (multi tx),
+
+| Threads | Time (µs) |
+|:--------|:----------|
+|       2 |    132 µs |
+|       4 |    243 µs |
+|       8 |    519 µs |
+
+Blocking behavior (Prealloc),
+
+| Scenario        | Time (µs) |
+|:----------------|:----------|
+| Pool exhaustion |   68.6 µs |
+
+Fallback (Prealloc -> Dynamic),
+
+| N (chunks) | Time (ns) |
+|:-----------|:----------|
+| 32         | 201 ns    |
+| 64         | 229 ns    |
+| 128        | 252 ns    |
+
+Where value of `N` is `N = 64`.
+
+Environment used for benching,
+
+- OS: NixOS (WSL2)
+- Architecture: x86_64
+- Memory: 8 GiB RAM (DDR4)
+- Rust: rustc 1.86.0 w/ cargo 1.86.0
+- Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+- CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
 
 ## MPSCQ
 
@@ -143,8 +228,63 @@ To use the `mpscq` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.17", features = ["mpscq"] }
+frozen-core = { version = "0.0.18", features = ["mpscq"] }
 ```
+
+Following are latency measurements for push, drain, and combined operations,
+
+> [!NOTE]
+> All timings represent **end-to-end operation cost (including allocation & reclamation)**
+
+Single-thread push,
+
+| N (ops) | Time (ns / µs) |
+|:--------|:---------------|
+| 1       | 30 ns          |
+| 8       | 313 ns         |
+| 64      | 2.31 µs        |
+| 256     | 8.49 µs        |
+
+Single-thread drain,
+
+| N (ops) | Time (ns / µs) |
+|:--------|:---------------|
+| 1       | 37 ns          |
+| 8       | 263 ns         |
+| 64      | 2.17 µs        |
+| 256     | 8.23 µs        |
+
+Push + Drain cycle,
+
+| N (ops) | Time (ns / µs) |
+|:--------|:---------------|
+| 1       | 34 ns          |
+| 8       | 241 ns         |
+| 64      | 2.13 µs        |
+| 256     | 9.95 µs        |
+
+Contention (multi-producer push),
+
+| Threads | Time (µs) |
+|:--------|:----------|
+|       2 |    119 µs |
+|       4 |    199 µs |
+|       8 |    375 µs |
+
+Producer + Consumer,
+
+| Scenario            | Time (µs) |
+|:--------------------|:----------|
+| Concurrent pipeline |    121 µs |
+
+Environment used for benching,
+
+- OS: NixOS (WSL2)
+- Architecture: x86_64
+- Memory: 8 GiB RAM (DDR4)
+- Rust: rustc 1.86.0 w/ cargo 1.86.0
+- Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+- CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
 
 ## FrozenPipe
 
@@ -155,5 +295,5 @@ To use the `fpipe` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.17", features = ["fpipe"] }
+frozen-core = { version = "0.0.18", features = ["fpipe"] }
 ```

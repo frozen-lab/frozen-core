@@ -1,6 +1,6 @@
 [package]
 edition = "2024"
-version = "0.0.17"
+version = "0.0.18"
 name = "frozen-core"
 exclude = ["shell.nix"]
 description = "Custom implementations and core utilities for frozen-lab crates"
@@ -11,6 +11,15 @@ keywords = [
 ]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/frozen-lab/frozen-core"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+incremental = false
+opt-level = 3
+
+[profile.bench]
+inherits = "release"
 
 [features]
 crc32 = []
@@ -45,3 +54,19 @@ libc = "0.2.178"
 
 [dev-dependencies]
 tempfile = "3.20.0"
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "crc32"
+harness = false
+required-features = ["crc32"]
+
+[[bench]]
+name = "bpool"
+harness = false
+required-features = ["bpool"]
+
+[[bench]]
+name = "mpscq"
+harness = false
+required-features = ["mpscq"]

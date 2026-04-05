@@ -1,5 +1,13 @@
 # Changelog
 
+## `0.0.18`
+
+- Added benches for `crc32` module
+- Added benches for `bpool` module
+- Added benches for `mpscq` module
+- Impl of `FMTransaction` for transactional writes in `FrozenMMap`
+- Impl of `FPTransaction` for transactional writes in `FrozenPipe`
+
 ## `0.0.17`
 
 - `FrozenMMap`

@@ -32,13 +32,17 @@
 //!
 //! let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
 //!
-//! let buf = vec![1u8; 0x40];
-//! let epoch = pipe.write(&buf, 0).unwrap();
+//! let data = vec![1u8; 0x40];
+//! let bufs = vec![
+//!     &data[0x00..0x20],
+//!     &data[0x20..0x40],
+//! ];
 //!
+//! let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
 //! pipe.wait_for_durability(epoch).unwrap();
 //!
 //! let read = pipe.read(0, 2).unwrap();
-//! assert_eq!(read, buf);
+//! assert_eq!(read, data);
 //! ```
 
 use crate::{
@@ -74,6 +78,9 @@ mod err {
 
     /// (1026) lock poisoned
     pub const LPN: ErrCode = ErrCode::new(0x402, "lock poisoned internally");
+
+    /// (1027) internal fuck up (hault and catch fire)
+    pub const HCF: ErrCode = ErrCode::new(0x403, "hault and catch fire");
 }
 
 #[inline]
@@ -134,13 +141,17 @@ pub struct FPCfg {
 ///
 /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
 ///
-/// let buf = vec![0x3Bu8; 0x40];
-/// let epoch = pipe.write(&buf, 0).unwrap();
+/// let data = vec![1u8; 0x40];
+/// let bufs = vec![
+///     &data[0x00..0x20],
+///     &data[0x20..0x40],
+/// ];
 ///
+/// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
 /// pipe.wait_for_durability(epoch).unwrap();
 ///
 /// let read = pipe.read(0, 2).unwrap();
-/// assert_eq!(read, buf);
+/// assert_eq!(read, data);
 /// ```
 #[derive(Debug)]
 pub struct FrozenPipe<const MODULE_ID: u8> {
@@ -175,13 +186,14 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     ///
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
-    /// let buf = vec![1; 0x20];
-    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// let data = vec![1u8; 0x20];
+    /// let bufs = vec![&data[0x00..0x20]];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.wait_for_durability(epoch).unwrap();
     ///
     /// let read = pipe.read(0, 1).unwrap();
-    /// assert_eq!(read, buf);
+    /// assert_eq!(read, data);
     /// ```
     pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FPCfg) -> FrozenRes<Self> {
         let file = ffile::FrozenFile::new::<MODULE_ID>(ffile::FFCfg {
@@ -208,12 +220,17 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
 
     /// Submit a write request
     ///
-    /// Returns the epoch representing the durability window of the write
-    ///
     /// ## Working
     ///
     /// The buffer is split into `chunk_size` sized segments and staged using [`BufPool`] before being
     /// written by the background flusher
+    ///
+    /// Returns the epoch representing the durability window of the write
+    ///
+    /// ## Requirements
+    ///
+    /// Length of each data buffer in given `&[buf]` must be of exact `chunk_size`, otherwise the call may cause
+    /// undefined behaviour
     ///
     /// ## Example
     ///
@@ -236,22 +253,26 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     ///
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
-    /// let buf = vec![0x3Bu8; 0x40];
-    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// let data = [0x3Bu8; 0x40];
+    /// let bufs = vec![
+    ///     &data[0x00..0x20],
+    ///     &data[0x20..0x40],
+    /// ];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.wait_for_durability(epoch).unwrap();
     ///
     /// let read = pipe.read(0, 2).unwrap();
-    /// assert_eq!(read, buf);
+    /// assert_eq!(read, data);
     /// ```
     #[inline(always)]
-    pub fn write(&self, buf: &[u8], index: usize) -> FrozenRes<u64> {
+    pub unsafe fn write(&self, buf: &[&[u8]], index: usize) -> FrozenRes<u64> {
         if let Some(err) = self.core.get_sync_error() {
             return Err(err);
         }
 
         let chunk_size = self.core.cfg.chunk_size;
-        let chunks = buf.len().div_ceil(chunk_size);
+        let chunks = buf.len();
 
         let alloc = self.core.pool.allocate(chunks)?;
 
@@ -261,21 +282,14 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
         // potentially stalling the durability progress for the entire `FrozenPipe`
         let _lock = self.core.acquire_io_lock()?;
 
-        let mut src_off = 0usize;
-        for ptr in alloc.slots() {
-            if src_off >= buf.len() {
-                break;
-            }
-
-            let remaining = buf.len() - src_off;
-            let copy = remaining.min(chunk_size);
-
-            unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr().add(src_off), *ptr, copy) };
-            src_off += copy;
+        for (idx, ptr) in alloc.slots().iter().enumerate() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(buf[idx].as_ptr(), *ptr, chunk_size);
+            };
         }
 
         let epoch = self.core.epoch.load(atomic::Ordering::Acquire);
-        let req = WriteReq::new(index, chunks, alloc);
+        let req = WriteType::Single(WriteReq::new(index, chunks, alloc));
         self.core.mpscq.push(req);
 
         Ok(epoch)
@@ -307,8 +321,9 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
     /// let data = vec![0xAAu8; 0x20];
-    /// let epoch = pipe.write(&data, 0).unwrap();
+    /// let bufs = vec![&data[0x00..0x20]];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.wait_for_durability(epoch).unwrap();
     ///
     /// let read = pipe.read_single(0).unwrap();
@@ -350,13 +365,14 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     ///
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
-    /// let buf = vec![0xBBu8; 0x20 * 2];
-    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// let data = vec![0xBBu8; 0x20 * 2];
+    /// let bufs = vec![&data[0x00..0x20], &data[0x20..0x40]];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.wait_for_durability(epoch).unwrap();
     ///
     /// let read = pipe.read(0, 2).unwrap();
-    /// assert_eq!(read, buf);
+    /// assert_eq!(read, data);
     /// ```
     #[inline(always)]
     pub fn read(&self, index: usize, count: usize) -> FrozenRes<Vec<u8>> {
@@ -394,9 +410,10 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     ///
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
-    /// let buf = vec![1u8; 0x20];
-    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// let data = vec![1u8; 0x20];
+    /// let bufs = vec![&data[0x00..0x20]];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.wait_for_durability(epoch).unwrap();
     /// ```
     pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
@@ -428,9 +445,10 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     ///
     /// let pipe = FrozenPipe::<MODULE_ID>::new(path, cfg).unwrap();
     ///
-    /// let buf = vec![0x0Au8; 0x20];
-    /// let epoch = pipe.write(&buf, 0).unwrap();
+    /// let data = vec![1u8; 0x20];
+    /// let bufs = vec![&data[0x00..0x20]];
     ///
+    /// let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
     /// pipe.force_durability(epoch).unwrap();
     /// ```
     pub fn force_durability(&self, epoch: u64) -> FrozenRes<()> {
@@ -528,6 +546,64 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
     #[inline]
     pub fn total_chunks(&self) -> FrozenRes<usize> {
         self.core.file.total_chunks()
+    }
+
+    /// Create a new [`FPTransaction`] context to group multiple write ops into a single atomic operation
+    ///
+    /// ## Overview
+    ///
+    /// Use of [`FPTransaction`] allows to group multiple write ops into a single atomic operation, similar to
+    /// what a transaction represents in database systems
+    ///
+    /// - All writes ops succeed together
+    /// - Single epoch is assigned to track durability for the transaction
+    /// - Durability guarantee is same for all writes included in the transaction
+    ///
+    /// Simply, this preserves atomic durability semantics for multi index updates
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+    /// use frozen_core::bpool::BPBackend;
+    /// use std::time::Duration;
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tx_multi");
+    ///
+    /// let pipe = FrozenPipe::<MID>::new(
+    ///     path,
+    ///     FPCfg {
+    ///         chunk_size: 0x20,
+    ///         initial_chunk_amount: 4,
+    ///         backend: BPBackend::Dynamic,
+    ///         flush_duration: Duration::from_micros(50),
+    ///     },
+    /// ).unwrap();
+    ///
+    /// let a = vec![1u8; 0x20];
+    /// let b = vec![2u8; 0x20];
+    ///
+    /// let mut tx = pipe.new_tx();
+    /// unsafe {
+    ///     tx.write(&[&a], 0).unwrap();
+    ///     tx.write(&[&b], 1).unwrap();
+    /// }
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// pipe.wait_for_durability(epoch).unwrap();
+    ///
+    /// let read = pipe.read(0, 2).unwrap();
+    /// assert_eq!(read, [a, b].concat());
+    /// ```
+    #[inline]
+    pub fn new_tx(&self) -> FPTransaction<'_> {
+        FPTransaction {
+            core: &self.core,
+            ops: Vec::new(),
+        }
     }
 
     #[inline(always)]
@@ -642,7 +718,7 @@ struct Core {
     durable_cv: sync::Condvar,
     closed: atomic::AtomicBool,
     durable_lock: sync::Mutex<()>,
-    mpscq: mpscq::MPSCQueue<WriteReq>,
+    mpscq: mpscq::MPSCQueue<WriteType>,
     error: atomic::AtomicPtr<FrozenErr>,
 }
 
@@ -712,23 +788,44 @@ impl Core {
         self.epoch.fetch_add(1, atomic::Ordering::Release);
     }
 
-    fn write_batch(&self, batch: Vec<WriteReq>) -> FrozenRes<(usize, usize)> {
+    fn write_batch(&self, batch: Vec<WriteType>) -> FrozenRes<(usize, usize)> {
         let mut max_index = 0usize;
         let mut min_index = usize::MAX;
 
-        for req in &batch {
-            let slots = req.alloc.slots();
-            match req.chunks {
-                1 => {
-                    self.file.pwrite(slots[0], req.index)?;
+        for req_type in &batch {
+            match req_type {
+                WriteType::Single(req) => {
+                    let slots = req.alloc.slots();
+                    match req.chunks {
+                        1 => {
+                            self.file.pwrite(slots[0], req.index)?;
+                        }
+                        _ => {
+                            self.file.pwritev(slots, req.index)?;
+                        }
+                    }
+
+                    min_index = min_index.min(req.index);
+                    max_index = max_index.max(req.index + req.chunks);
                 }
-                _ => {
-                    self.file.pwritev(slots, req.index)?;
+
+                WriteType::Transaction(reqs) => {
+                    for req in reqs {
+                        let slots = req.alloc.slots();
+                        match req.chunks {
+                            1 => {
+                                self.file.pwrite(slots[0], req.index)?;
+                            }
+                            _ => {
+                                self.file.pwritev(slots, req.index)?;
+                            }
+                        }
+
+                        min_index = min_index.min(req.index);
+                        max_index = max_index.max(req.index + req.chunks);
+                    }
                 }
             }
-
-            min_index = min_index.min(req.index);
-            max_index = max_index.max(req.index + req.chunks);
         }
 
         Ok((min_index, max_index))
@@ -870,6 +967,191 @@ impl Core {
 unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
+/// A context to group multiple write ops into a single atomic operation
+///
+/// ## Overview
+///
+/// Use of [`FPTransaction`] allows to group multiple write ops into a single atomic operation, similar to
+/// what a transaction represents in database systems
+///
+/// - All writes ops succeed together
+/// - Single epoch is assigned to track durability for the transaction
+/// - Durability guarantee is same for all writes included in the transaction
+///
+/// Simply, this preserves atomic durability semantics for multi index updates
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::fpipe::{FPCfg, FrozenPipe};
+/// use frozen_core::bpool::BPBackend;
+/// use std::time::Duration;
+///
+/// const MID: u8 = 0;
+///
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("tx_multi");
+///
+/// let pipe = FrozenPipe::<MID>::new(
+///     path,
+///     FPCfg {
+///         chunk_size: 0x20,
+///         initial_chunk_amount: 4,
+///         backend: BPBackend::Dynamic,
+///         flush_duration: Duration::from_micros(50),
+///     },
+/// ).unwrap();
+///
+/// let a = vec![0x0Au8; 0x20];
+/// let b = vec![0x0Bu8; 0x20];
+///
+/// let mut tx = pipe.new_tx();
+/// unsafe {
+///     tx.write(&[&a], 0).unwrap();
+///     tx.write(&[&b], 1).unwrap();
+/// }
+///
+/// let epoch = tx.commit().unwrap();
+/// pipe.wait_for_durability(epoch).unwrap();
+///
+/// let read = pipe.read(0, 2).unwrap();
+/// assert_eq!(read, [a, b].concat());
+/// ```
+pub struct FPTransaction<'a> {
+    core: &'a Core,
+    ops: Vec<WriteReq>,
+}
+
+impl<'a> FPTransaction<'a> {
+    /// Append a write op into the [`FPTransaction`]
+    ///
+    /// ## Safety
+    ///
+    /// Same safety requirements as [`FrozenPipe::write`] apply here
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::{FPCfg, FrozenPipe};
+    /// use frozen_core::bpool::BPBackend;
+    /// use std::time::Duration;
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tx_multi");
+    ///
+    /// let pipe = FrozenPipe::<MID>::new(
+    ///     path,
+    ///     FPCfg {
+    ///         chunk_size: 0x20,
+    ///         initial_chunk_amount: 4,
+    ///         backend: BPBackend::Dynamic,
+    ///         flush_duration: Duration::from_micros(50),
+    ///     },
+    /// ).unwrap();
+    ///
+    /// let a = vec![0x0Au8; 0x20];
+    /// let b = vec![0x0Bu8; 0x20];
+    ///
+    /// let mut tx = pipe.new_tx();
+    /// unsafe {
+    ///     tx.write(&[&a], 0).unwrap();
+    ///     tx.write(&[&b], 1).unwrap();
+    /// }
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// pipe.wait_for_durability(epoch).unwrap();
+    ///
+    /// let read = pipe.read(0, 2).unwrap();
+    /// assert_eq!(read, [a, b].concat());
+    /// ```
+    #[inline(always)]
+    pub unsafe fn write(&mut self, buf: &[&[u8]], index: usize) -> FrozenRes<()> {
+        let chunk_size = self.core.cfg.chunk_size;
+        let chunks = buf.len();
+
+        let alloc = self.core.pool.allocate(chunks)?;
+        for (i, ptr) in alloc.slots().iter().enumerate() {
+            std::ptr::copy_nonoverlapping(buf[i].as_ptr(), *ptr, chunk_size);
+        }
+
+        self.ops.push(WriteReq::new(index, chunks, alloc));
+        Ok(())
+    }
+
+    /// Commit the transaction, applying all the writes ops, combined into a single atomic operation
+    ///
+    /// ## Guarantees
+    ///
+    /// - All writes are applied under a single epoch
+    /// - All writes belong to the same durability batch
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::{FPCfg, FrozenPipe};
+    /// use frozen_core::bpool::BPBackend;
+    /// use std::time::Duration;
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tx_multi");
+    ///
+    /// let pipe = FrozenPipe::<MID>::new(
+    ///     path,
+    ///     FPCfg {
+    ///         chunk_size: 0x20,
+    ///         initial_chunk_amount: 4,
+    ///         backend: BPBackend::Dynamic,
+    ///         flush_duration: Duration::from_micros(50),
+    ///     },
+    /// ).unwrap();
+    ///
+    /// let a = vec![0x0Au8; 0x20];
+    /// let b = vec![0x0Bu8; 0x20];
+    ///
+    /// let mut tx = pipe.new_tx();
+    /// unsafe {
+    ///     tx.write(&[&a], 0).unwrap();
+    ///     tx.write(&[&b], 1).unwrap();
+    /// }
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// pipe.wait_for_durability(epoch).unwrap();
+    ///
+    /// let read = pipe.read(0, 2).unwrap();
+    /// assert_eq!(read, [a, b].concat());
+    /// ```
+    #[inline(always)]
+    pub fn commit(self) -> FrozenRes<u64> {
+        if let Some(err) = self.core.get_sync_error() {
+            return Err(err);
+        }
+
+        // protection against a potential footgun ;-)
+        if hints::unlikely(self.ops.is_empty()) {
+            return new_err(
+                err::HCF,
+                "Transaction does not contain any write ops for a commit to succeed",
+            );
+        }
+
+        let _lock = self.core.acquire_io_lock()?;
+        let epoch = self.core.epoch.load(atomic::Ordering::Acquire);
+        self.core.mpscq.push(WriteType::Transaction(self.ops));
+
+        Ok(epoch)
+    }
+}
+
+#[derive(Debug)]
+enum WriteType {
+    Single(WriteReq),
+    Transaction(Vec<WriteReq>),
+}
+
 #[derive(Debug)]
 struct WriteReq {
     index: usize,
@@ -938,8 +1220,9 @@ mod tests {
         fn ok_write_and_wait() {
             let (_dir, pipe) = new_env();
 
-            let buf = vec![0xAB; CHUNK];
-            let epoch = pipe.write(&buf, 0).unwrap();
+            let data = vec![0xAB; CHUNK];
+            let buf = vec![&data[0..CHUNK]];
+            let epoch = unsafe { pipe.write(&buf, 0) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
         }
 
@@ -947,8 +1230,10 @@ mod tests {
         fn ok_write_multiple_chunks() {
             let (_dir, pipe) = new_env();
 
-            let buf = vec![0xAA; CHUNK * 4];
-            let epoch = pipe.write(&buf, 0).unwrap();
+            let data = vec![0xAA; CHUNK * 2];
+            let bufs = vec![&data[0..CHUNK], &data[CHUNK..(CHUNK * 2)]];
+
+            let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
         }
 
@@ -956,20 +1241,22 @@ mod tests {
         fn ok_force_durability() {
             let (_dir, pipe) = new_env();
 
-            let buf = vec![1u8; CHUNK];
-            let epoch = pipe.write(&buf, 0).unwrap();
+            let data = vec![1u8; CHUNK];
+            let bufs = vec![&data[0..CHUNK]];
+            let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
             pipe.force_durability(epoch).unwrap();
         }
 
         #[test]
         fn ok_write_epoch_monotonic() {
             let (_dir, pipe) = new_env();
-            let buf = vec![1u8; CHUNK];
+            let data = vec![1u8; CHUNK];
+            let buf = vec![&data[0..CHUNK]];
 
-            let e1 = pipe.write(&buf, 0).unwrap();
+            let e1 = unsafe { pipe.write(&buf, 0) }.unwrap();
             pipe.wait_for_durability(e1).unwrap();
 
-            let e2 = pipe.write(&buf, 1).unwrap();
+            let e2 = unsafe { pipe.write(&buf, 1) }.unwrap();
             pipe.wait_for_durability(e2).unwrap();
 
             assert!(e2 >= e1);
@@ -978,9 +1265,10 @@ mod tests {
         #[test]
         fn ok_write_large() {
             let (_dir, pipe) = new_env();
-            let buf = vec![0xAB; CHUNK * 0x80];
+            let data = vec![0xAB; CHUNK * 0x80];
+            let bufs: Vec<&[u8]> = data.chunks_exact(CHUNK).collect();
 
-            let epoch = pipe.write(&buf, 0).unwrap();
+            let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
         }
 
@@ -989,8 +1277,9 @@ mod tests {
             let (_dir, pipe) = new_env();
 
             for i in 0..0x10 {
-                let buf = vec![i as u8; CHUNK];
-                let epoch = pipe.write(&buf, i).unwrap();
+                let data = vec![i as u8; CHUNK];
+                let buf = vec![&data[0..CHUNK]];
+                let epoch = unsafe { pipe.write(&buf, i) }.unwrap();
                 pipe.wait_for_durability(epoch).unwrap();
             }
         }
@@ -1010,15 +1299,17 @@ mod tests {
 
             let p2 = pipe.clone();
             let t = thread::spawn(move || {
-                let buf = vec![1u8; CHUNK];
-                let epoch = p2.write(&buf, 0).unwrap();
+                let data = vec![1u8; CHUNK];
+                let buf = vec![&data[0..CHUNK]];
+                let epoch = unsafe { p2.write(&buf, 0) }.unwrap();
                 p2.wait_for_durability(epoch).unwrap();
             });
 
             thread::sleep(Duration::from_millis(0x0A));
 
-            let buf = vec![2u8; CHUNK];
-            let epoch = pipe.write(&buf, 1).unwrap();
+            let data = vec![2u8; CHUNK];
+            let buf = vec![&data[0..CHUNK]];
+            let epoch = unsafe { pipe.write(&buf, 1) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
 
             t.join().unwrap();
@@ -1032,48 +1323,55 @@ mod tests {
         fn ok_read_single_after_write() {
             let (_dir, pipe) = new_env();
 
-            let buf = vec![0xAB; CHUNK];
-            let epoch = pipe.write(&buf, 0).unwrap();
+            let data = vec![0xAB; CHUNK];
+            let buf = vec![&data[0..CHUNK]];
+            let epoch = unsafe { pipe.write(&buf, 0) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
 
             let read = pipe.read_single(0).unwrap();
-            assert_eq!(read, buf);
+            assert_eq!(read, data);
         }
 
         #[test]
         fn ok_read_2x() {
             let (_dir, pipe) = new_env();
 
-            let buf = vec![0xAA; CHUNK * 2];
-            let epoch = pipe.write(&buf, 0).unwrap();
+            let data = vec![0xAA; CHUNK * 2];
+            let buf = vec![&data[0..CHUNK], &data[CHUNK..(CHUNK * 2)]];
+
+            let epoch = unsafe { pipe.write(&buf, 0) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
 
             let read = pipe.read(0, 2).unwrap();
-            assert_eq!(read, buf);
+            assert_eq!(read, data);
         }
 
         #[test]
         fn ok_read_4x() {
             let (_dir, pipe) = new_env();
 
-            let buf = vec![0xBB; CHUNK * 4];
-            let epoch = pipe.write(&buf, 0).unwrap();
+            let data = vec![0xBB; CHUNK * 4];
+            let bufs: Vec<&[u8]> = data.chunks_exact(CHUNK).collect();
+
+            let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
 
             let read = pipe.read(0, 4).unwrap();
-            assert_eq!(read, buf);
+            assert_eq!(read, data);
         }
 
         #[test]
         fn ok_read_multi_generic() {
             let (_dir, pipe) = new_env();
 
-            let buf = vec![0xCC; CHUNK * 6];
-            let epoch = pipe.write(&buf, 0).unwrap();
+            let data = vec![0xCC; CHUNK * 6];
+            let bufs: Vec<&[u8]> = data.chunks_exact(CHUNK).collect();
+
+            let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
 
             let read = pipe.read(0, 6).unwrap();
-            assert_eq!(read, buf);
+            assert_eq!(read, data);
         }
 
         #[test]
@@ -1081,8 +1379,10 @@ mod tests {
             let (_dir, pipe) = new_env();
 
             for i in 0..2 {
-                let buf = vec![i as u8; CHUNK];
-                let epoch = pipe.write(&buf, i).unwrap();
+                let data = vec![i as u8; CHUNK];
+                let buf = vec![&data[0..CHUNK]];
+
+                let epoch = unsafe { pipe.write(&buf, i) }.unwrap();
                 pipe.wait_for_durability(epoch).unwrap();
             }
 
@@ -1096,28 +1396,32 @@ mod tests {
         fn ok_overwrite_same_index() {
             let (_dir, pipe) = new_env();
 
-            let buf1 = vec![0xAA; CHUNK];
-            let e1 = pipe.write(&buf1, 0).unwrap();
+            let data1 = vec![0xAA; CHUNK];
+            let buf1 = vec![&data1[0..CHUNK]];
+            let e1 = unsafe { pipe.write(&buf1, 0) }.unwrap();
             pipe.wait_for_durability(e1).unwrap();
 
-            let buf2 = vec![0xBB; CHUNK];
-            let e2 = pipe.write(&buf2, 0).unwrap();
+            let data2 = vec![0xBB; CHUNK];
+            let buf2 = vec![&data2[0..CHUNK]];
+            let e2 = unsafe { pipe.write(&buf2, 0) }.unwrap();
             pipe.wait_for_durability(e2).unwrap();
 
             let read = pipe.read_single(0).unwrap();
-            assert_eq!(read, buf2);
+            assert_eq!(read, data2);
         }
 
         #[test]
         fn ok_large_read_multi() {
             let (_dir, pipe) = new_env();
 
-            let buf = vec![0x7A; CHUNK * 0x10];
-            let epoch = pipe.write(&buf, 0).unwrap();
+            let data = vec![0x7A; CHUNK * 0x10];
+            let bufs: Vec<&[u8]> = data.chunks_exact(CHUNK).collect();
+
+            let epoch = unsafe { pipe.write(&bufs, 0) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
 
             let read = pipe.read(0, 0x10).unwrap();
-            assert_eq!(read, buf);
+            assert_eq!(read, data);
         }
 
         #[test]
@@ -1128,13 +1432,13 @@ mod tests {
             let pipe = Arc::new(pipe);
 
             for i in 0..THREADS {
-                let buf = vec![i as u8; CHUNK];
-                let epoch = pipe.write(&buf, i).unwrap();
+                let data = vec![i as u8; CHUNK];
+                let buf = vec![&data[0..CHUNK]];
+                let epoch = unsafe { pipe.write(&buf, i) }.unwrap();
                 pipe.wait_for_durability(epoch).unwrap();
             }
 
             let mut handles = Vec::new();
-
             for i in 0..THREADS {
                 let pipe = pipe.clone();
 
@@ -1158,8 +1462,9 @@ mod tests {
                 let pipe = pipe.clone();
                 thread::spawn(move || {
                     for i in 0..4 {
-                        let buf = vec![i as u8; CHUNK];
-                        let epoch = pipe.write(&buf, i).unwrap();
+                        let data = vec![i as u8; CHUNK];
+                        let buf = vec![&data[0..CHUNK]];
+                        let epoch = unsafe { pipe.write(&buf, i) }.unwrap();
                         pipe.wait_for_durability(epoch).unwrap();
                     }
                 })
@@ -1184,12 +1489,13 @@ mod tests {
 
             pipe.grow(8).unwrap();
 
-            let buf = vec![0x5A; CHUNK];
-            let epoch = pipe.write(&buf, INIT).unwrap();
+            let data = vec![0x5A; CHUNK];
+            let buf = vec![&data[0..CHUNK]];
+            let epoch = unsafe { pipe.write(&buf, INIT) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
 
             let read = pipe.read_single(INIT).unwrap();
-            assert_eq!(read, buf);
+            assert_eq!(read, data);
         }
     }
 
@@ -1202,8 +1508,9 @@ mod tests {
 
             let mut epochs = Vec::new();
             for i in 0..4 {
-                let buf = vec![i as u8; CHUNK];
-                epochs.push(pipe.write(&buf, i).unwrap());
+                let data = vec![i as u8; CHUNK];
+                let buf = vec![&data[0..CHUNK]];
+                epochs.push(unsafe { pipe.write(&buf, i) }.unwrap());
             }
 
             for e in epochs {
@@ -1233,8 +1540,9 @@ mod tests {
             let (_dir, pipe) = new_env();
             pipe.grow(0x10).unwrap();
 
-            let buf = vec![0xBB; CHUNK];
-            let epoch = pipe.write(&buf, INIT).unwrap();
+            let data = vec![0xBB; CHUNK];
+            let buf = vec![&data[0..CHUNK]];
+            let epoch = unsafe { pipe.write(&buf, INIT) }.unwrap();
             pipe.wait_for_durability(epoch).unwrap();
         }
 
@@ -1247,8 +1555,9 @@ mod tests {
             let p2 = pipe.clone();
             let writer = thread::spawn(move || {
                 for i in 0..INIT {
-                    let buf = vec![1u8; CHUNK];
-                    let epoch = p2.write(&buf, i).unwrap();
+                    let data = vec![1u8; CHUNK];
+                    let buf = vec![&data[0..CHUNK]];
+                    let epoch = unsafe { p2.write(&buf, i) }.unwrap();
                     p2.wait_for_durability(epoch).unwrap();
                 }
             });
@@ -1260,6 +1569,163 @@ mod tests {
 
             let new_len = pipe.core.file.length().unwrap();
             assert_eq!(new_len, curr_len + (0x3A * pipe.core.cfg.chunk_size));
+        }
+    }
+
+    mod fp_tx {
+        use super::*;
+
+        #[test]
+        fn ok_tx_basic_multi_write() {
+            let (_dir, pipe) = new_env();
+
+            let a = vec![1u8; CHUNK];
+            let b = vec![2u8; CHUNK];
+            let c = vec![3u8; CHUNK];
+
+            let mut tx = pipe.new_tx();
+            unsafe {
+                tx.write(&[&a], 0).unwrap();
+                tx.write(&[&b], 1).unwrap();
+                tx.write(&[&c], 2).unwrap();
+            }
+
+            let epoch = tx.commit().unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+
+            let read = pipe.read(0, 3).unwrap();
+            assert_eq!(read, [a, b, c].concat());
+        }
+
+        #[test]
+        fn ok_tx_single_epoch() {
+            let (_dir, pipe) = new_env();
+
+            let a = vec![0x0Au8; CHUNK];
+            let b = vec![0x14u8; CHUNK];
+
+            let mut tx = pipe.new_tx();
+            unsafe {
+                tx.write(&[&a], 0).unwrap();
+                tx.write(&[&b], 1).unwrap();
+            }
+
+            let epoch = tx.commit().unwrap();
+
+            let c = vec![0x1Eu8; CHUNK];
+            let next_epoch = unsafe { pipe.write(&[&c], 2) }.unwrap();
+
+            assert!(next_epoch >= epoch);
+        }
+
+        #[test]
+        fn ok_tx_overwrite_last_wins() {
+            let (_dir, pipe) = new_env();
+
+            let a = vec![1u8; CHUNK];
+            let b = vec![2u8; CHUNK];
+
+            let mut tx1 = pipe.new_tx();
+            unsafe {
+                tx1.write(&[&a], 0).unwrap();
+            }
+
+            let e1 = tx1.commit().unwrap();
+            pipe.wait_for_durability(e1).unwrap();
+
+            let mut tx2 = pipe.new_tx();
+            unsafe {
+                tx2.write(&[&b], 0).unwrap();
+            }
+
+            let epoch = tx2.commit().unwrap();
+            pipe.wait_for_durability(epoch).unwrap();
+
+            let read = pipe.read_single(0).unwrap();
+            assert_eq!(read, b);
+        }
+
+        #[test]
+        fn ok_tx_concurrent_non_overlapping() {
+            let (_dir, pipe) = new_env();
+            let pipe = Arc::new(pipe);
+
+            let mut handles = Vec::new();
+            for i in 0..2 {
+                let pipe = pipe.clone();
+
+                handles.push(thread::spawn(move || {
+                    let data = vec![i as u8; CHUNK];
+
+                    let mut tx = pipe.new_tx();
+                    unsafe {
+                        tx.write(&[&data], i * 2).unwrap();
+                        tx.write(&[&data], i * 2 + 1).unwrap();
+                    }
+
+                    let epoch = tx.commit().unwrap();
+                    pipe.wait_for_durability(epoch).unwrap();
+                }));
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            for i in 0..2 {
+                let v0 = pipe.read_single(i * 2).unwrap();
+                let v1 = pipe.read_single(i * 2 + 1).unwrap();
+
+                assert_eq!(v0, vec![i as u8; CHUNK]);
+                assert_eq!(v1, vec![i as u8; CHUNK]);
+            }
+        }
+
+        #[test]
+        fn ok_tx_persists_across_reopen() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("tmp_pipe_tx");
+
+            let cfg = FPCfg {
+                chunk_size: CHUNK,
+                initial_chunk_amount: INIT,
+                flush_duration: FLUSH_DURATION,
+                backend: bpool::BPBackend::Dynamic,
+            };
+
+            {
+                let pipe = FrozenPipe::<MID>::new(&path, cfg.clone()).unwrap();
+
+                let a = vec![0x3Au8; CHUNK];
+                let b = vec![0x54u8; CHUNK];
+
+                let mut tx = pipe.new_tx();
+                unsafe {
+                    tx.write(&[&a], 0).unwrap();
+                    tx.write(&[&b], 1).unwrap();
+                }
+
+                let epoch = tx.commit().unwrap();
+                pipe.wait_for_durability(epoch).unwrap();
+            }
+
+            {
+                let pipe = FrozenPipe::<MID>::new(&path, cfg).unwrap();
+
+                let v0 = pipe.read_single(0).unwrap();
+                let v1 = pipe.read_single(1).unwrap();
+
+                assert_eq!(v0, vec![0x3A; CHUNK]);
+                assert_eq!(v1, vec![0x54; CHUNK]);
+            }
+        }
+
+        #[test]
+        fn err_tx_empty_commit() {
+            let (_dir, pipe) = new_env();
+
+            let tx = pipe.new_tx();
+            assert!(tx.commit().is_err());
         }
     }
 
@@ -1280,8 +1746,9 @@ mod tests {
 
                 handles.push(thread::spawn(move || {
                     for i in 0..ITERS {
-                        let buf = vec![t as u8; CHUNK];
-                        let epoch = pipe.write(&buf, i).unwrap();
+                        let data = vec![t as u8; CHUNK];
+                        let buf = vec![&data[0..CHUNK]];
+                        let epoch = unsafe { pipe.write(&buf, i) }.unwrap();
                         pipe.wait_for_durability(epoch).unwrap();
                     }
                 }));
@@ -1309,8 +1776,9 @@ mod tests {
                 handles.push(thread::spawn(move || {
                     barrier.wait();
 
-                    let buf = vec![i as u8; CHUNK];
-                    let epoch = pipe.write(&buf, i).unwrap();
+                    let data = vec![i as u8; CHUNK];
+                    let buf = vec![&data[0..CHUNK]];
+                    let epoch = unsafe { pipe.write(&buf, i) }.unwrap();
                     pipe.wait_for_durability(epoch).unwrap();
                 }));
             }
@@ -1328,8 +1796,9 @@ mod tests {
         fn ok_wait_blocks_until_flush() {
             let (_dir, pipe) = new_env();
 
-            let buf = vec![0x55; CHUNK];
-            let epoch = pipe.write(&buf, 0).unwrap();
+            let data = vec![0x55; CHUNK];
+            let buf = vec![&data[0..CHUNK]];
+            let epoch = unsafe { pipe.write(&buf, 0) }.unwrap();
 
             let start = Instant::now();
             pipe.wait_for_durability(epoch).unwrap();
@@ -1347,8 +1816,9 @@ mod tests {
                 let pipe = pipe.clone();
 
                 handles.push(thread::spawn(move || {
-                    let buf = vec![i as u8; CHUNK];
-                    let epoch = pipe.write(&buf, i).unwrap();
+                    let data = vec![i as u8; CHUNK];
+                    let buf = vec![&data[0..CHUNK]];
+                    let epoch = unsafe { pipe.write(&buf, i) }.unwrap();
                     pipe.force_durability(epoch).unwrap();
                 }));
             }
@@ -1366,8 +1836,9 @@ mod tests {
         fn ok_drop_with_pending_writes() {
             let (_dir, pipe) = new_env();
 
-            let buf = vec![0xAA; CHUNK];
-            pipe.write(&buf, 0).unwrap();
+            let data = vec![0xAA; CHUNK];
+            let buf = vec![&data[0..CHUNK]];
+            unsafe { pipe.write(&buf, 0) }.unwrap();
             drop(pipe);
         }
 
@@ -1378,8 +1849,9 @@ mod tests {
 
             let p2 = pipe.clone();
             let handle = thread::spawn(move || {
-                let buf = vec![1u8; CHUNK];
-                let epoch = p2.write(&buf, 0).unwrap();
+                let data = vec![1u8; CHUNK];
+                let buf = vec![&data[0..CHUNK]];
+                let epoch = unsafe { p2.write(&buf, 0) }.unwrap();
                 p2.wait_for_durability(epoch).unwrap();
             });
 
@@ -1397,8 +1869,9 @@ mod tests {
             let p2 = pipe.clone();
             let handle = thread::spawn(move || {
                 for i in 0..0x10 {
-                    let buf = vec![1u8; CHUNK];
-                    let epoch = p2.write(&buf, i).unwrap();
+                    let data = vec![1u8; CHUNK];
+                    let buf = vec![&data[0..CHUNK]];
+                    let epoch = unsafe { p2.write(&buf, i) }.unwrap();
                     p2.wait_for_durability(epoch).unwrap();
                 }
             });
