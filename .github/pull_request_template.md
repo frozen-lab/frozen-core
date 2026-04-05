@@ -9,7 +9,6 @@ List of changes made for this release
 - [ ] All unit tests passing
 - [ ] All doctests passing
 - [ ] No lints or warnings
-
 - [ ] Updated README
 - [ ] Updated CHANGELOG
 - [ ] Version bump
