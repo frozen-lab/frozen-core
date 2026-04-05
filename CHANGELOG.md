@@ -6,6 +6,7 @@
 - Added benches for `bpool` module
 - Added benches for `mpscq` module
 - Impl of `FMTransaction` for transactional writes in `FrozenMMap`
+- Impl of `FPTransaction` for transactional writes in `FrozenPipe`
 
 ## `0.0.17`
 
