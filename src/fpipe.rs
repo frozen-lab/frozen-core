@@ -545,7 +545,56 @@ impl<const MODULE_ID: u8> FrozenPipe<MODULE_ID> {
         self.core.file.total_chunks()
     }
 
+    /// Create a new [`FPTransaction`] context to group multiple write ops into a single atomic operation
     ///
+    /// ## Overview
+    ///
+    /// Use of [`FPTransaction`] allows to group multiple write ops into a single atomic operation, similar to
+    /// what a transaction represents in database systems
+    ///
+    /// - All writes ops succeed together
+    /// - Single epoch is assigned to track durability for the transaction
+    /// - Durability guarantee is same for all writes included in the transaction
+    ///
+    /// Simply, this preserves atomic durability semantics for multi index updates
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::{FrozenPipe, FPCfg};
+    /// use frozen_core::bpool::BPBackend;
+    /// use std::time::Duration;
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tx_multi");
+    ///
+    /// let pipe = FrozenPipe::<MID>::new(
+    ///     path,
+    ///     FPCfg {
+    ///         chunk_size: 0x20,
+    ///         initial_chunk_amount: 4,
+    ///         backend: BPBackend::Dynamic,
+    ///         flush_duration: Duration::from_micros(50),
+    ///     },
+    /// ).unwrap();
+    ///
+    /// let a = vec![1u8; 0x20];
+    /// let b = vec![2u8; 0x20];
+    ///
+    /// let mut tx = pipe.new_tx();
+    /// unsafe {
+    ///     tx.write(&[&a], 0).unwrap();
+    ///     tx.write(&[&b], 1).unwrap();
+    /// }
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// pipe.wait_for_durability(epoch).unwrap();
+    ///
+    /// let read = pipe.read(0, 2).unwrap();
+    /// assert_eq!(read, [a, b].concat());
+    /// ```
     #[inline]
     pub fn new_tx(&self) -> FPTransaction<'_> {
         FPTransaction {
@@ -915,14 +964,105 @@ impl Core {
 unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
+/// A context to group multiple write ops into a single atomic operation
 ///
+/// ## Overview
+///
+/// Use of [`FPTransaction`] allows to group multiple write ops into a single atomic operation, similar to
+/// what a transaction represents in database systems
+///
+/// - All writes ops succeed together
+/// - Single epoch is assigned to track durability for the transaction
+/// - Durability guarantee is same for all writes included in the transaction
+///
+/// Simply, this preserves atomic durability semantics for multi index updates
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::fpipe::{FPCfg, FrozenPipe};
+/// use frozen_core::bpool::BPBackend;
+/// use std::time::Duration;
+///
+/// const MID: u8 = 0;
+///
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("tx_multi");
+///
+/// let pipe = FrozenPipe::<MID>::new(
+///     path,
+///     FPCfg {
+///         chunk_size: 0x20,
+///         initial_chunk_amount: 4,
+///         backend: BPBackend::Dynamic,
+///         flush_duration: Duration::from_micros(50),
+///     },
+/// ).unwrap();
+///
+/// let a = vec![0x0Au8; 0x20];
+/// let b = vec![0x0Bu8; 0x20];
+///
+/// let mut tx = pipe.new_tx();
+/// unsafe {
+///     tx.write(&[&a], 0).unwrap();
+///     tx.write(&[&b], 1).unwrap();
+/// }
+///
+/// let epoch = tx.commit().unwrap();
+/// pipe.wait_for_durability(epoch).unwrap();
+///
+/// let read = pipe.read(0, 2).unwrap();
+/// assert_eq!(read, [a, b].concat());
+/// ```
 pub struct FPTransaction<'a> {
     core: &'a Core,
     ops: Vec<WriteReq>,
 }
 
 impl<'a> FPTransaction<'a> {
+    /// Append a write op into the [`FPTransaction`]
     ///
+    /// ## Safety
+    ///
+    /// Same safety requirements as [`FrozenPipe::write`] apply here
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::{FPCfg, FrozenPipe};
+    /// use frozen_core::bpool::BPBackend;
+    /// use std::time::Duration;
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tx_multi");
+    ///
+    /// let pipe = FrozenPipe::<MID>::new(
+    ///     path,
+    ///     FPCfg {
+    ///         chunk_size: 0x20,
+    ///         initial_chunk_amount: 4,
+    ///         backend: BPBackend::Dynamic,
+    ///         flush_duration: Duration::from_micros(50),
+    ///     },
+    /// ).unwrap();
+    ///
+    /// let a = vec![0x0Au8; 0x20];
+    /// let b = vec![0x0Bu8; 0x20];
+    ///
+    /// let mut tx = pipe.new_tx();
+    /// unsafe {
+    ///     tx.write(&[&a], 0).unwrap();
+    ///     tx.write(&[&b], 1).unwrap();
+    /// }
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// pipe.wait_for_durability(epoch).unwrap();
+    ///
+    /// let read = pipe.read(0, 2).unwrap();
+    /// assert_eq!(read, [a, b].concat());
+    /// ```
     #[inline(always)]
     pub unsafe fn write(&mut self, buf: &[&[u8]], index: usize) -> FrozenRes<()> {
         let chunk_size = self.core.cfg.chunk_size;
@@ -937,7 +1077,50 @@ impl<'a> FPTransaction<'a> {
         Ok(())
     }
 
+    /// Commit the transaction, applying all the writes ops, combined into a single atomic operation
     ///
+    /// ## Guarantees
+    ///
+    /// - All writes are applied under a single epoch
+    /// - All writes belong to the same durability batch
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fpipe::{FPCfg, FrozenPipe};
+    /// use frozen_core::bpool::BPBackend;
+    /// use std::time::Duration;
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tx_multi");
+    ///
+    /// let pipe = FrozenPipe::<MID>::new(
+    ///     path,
+    ///     FPCfg {
+    ///         chunk_size: 0x20,
+    ///         initial_chunk_amount: 4,
+    ///         backend: BPBackend::Dynamic,
+    ///         flush_duration: Duration::from_micros(50),
+    ///     },
+    /// ).unwrap();
+    ///
+    /// let a = vec![0x0Au8; 0x20];
+    /// let b = vec![0x0Bu8; 0x20];
+    ///
+    /// let mut tx = pipe.new_tx();
+    /// unsafe {
+    ///     tx.write(&[&a], 0).unwrap();
+    ///     tx.write(&[&b], 1).unwrap();
+    /// }
+    ///
+    /// let epoch = tx.commit().unwrap();
+    /// pipe.wait_for_durability(epoch).unwrap();
+    ///
+    /// let read = pipe.read(0, 2).unwrap();
+    /// assert_eq!(read, [a, b].concat());
+    /// ```
     #[inline(always)]
     pub fn commit(self) -> FrozenRes<u64> {
         if let Some(err) = self.core.get_sync_error() {
