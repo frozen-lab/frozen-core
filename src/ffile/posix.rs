@@ -6,13 +6,7 @@ use libc::{
     EMSGSIZE, ENOENT, ENOLCK, ENOSPC, ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX, LOCK_NB,
     O_CLOEXEC, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, _SC_IOV_MAX,
 };
-use std::{
-    ffi::CStr,
-    mem,
-    sync::{atomic, OnceLock},
-};
-
-static IOV_MAX_CACHE: OnceLock<usize> = OnceLock::new();
+use std::{ffi::CStr, mem, sync::atomic};
 
 /// placeholder value for when current fd is closed
 pub(in crate::ffile) const CLOSED_FD: TFileId = TFileId::MIN;
@@ -20,15 +14,15 @@ pub(in crate::ffile) const CLOSED_FD: TFileId = TFileId::MIN;
 /// max allowed retries for `EINTR`, `EBUSY` and `EAGAIN` errors
 const MAX_RETRIES: usize = 0x0A;
 
-/// max iovecs allowed for single readv/writev calls
-const MAX_IOVECS: usize = 0x200;
-
 /// Maximum number of [`libc::iovec`] descriptors allocated on the stack
 const STACK_IOV: usize = 0x40;
 
 /// Custom impl of `std::fs::File` for POSIX systems
 #[derive(Debug)]
-pub(super) struct POSIXFile(atomic::AtomicI32);
+pub(super) struct POSIXFile {
+    max_iovs: usize,
+    fd: atomic::AtomicI32,
+}
 
 unsafe impl Send for POSIXFile {}
 unsafe impl Sync for POSIXFile {}
@@ -37,7 +31,7 @@ impl POSIXFile {
     /// Read file descriptor of [`POSIXFile`]
     #[inline]
     pub(super) fn fd(&self) -> TFileId {
-        self.0.load(atomic::Ordering::Acquire)
+        self.fd.load(atomic::Ordering::Acquire)
     }
 
     /// Check if [`POSIXFile`] exists on storage device or not
@@ -67,12 +61,16 @@ impl POSIXFile {
     /// durability we need
     pub(super) unsafe fn new(path: &std::path::Path) -> FrozenRes<Self> {
         let fd = open_raw(path, prep_flags())?;
+        let max_iovs = read_max_iovec_config()?;
 
         // best-effort call to provide a hint to the kernel that the file will be accessed in a random pattern
         #[cfg(target_os = "linux")]
         f_advise_raw(fd)?;
 
-        Ok(Self(atomic::AtomicI32::new(fd)))
+        Ok(Self {
+            max_iovs,
+            fd: atomic::AtomicI32::new(fd),
+        })
     }
 
     /// Acquire an exclusive advisory lock on [`POSIXFile`]
@@ -115,7 +113,7 @@ impl POSIXFile {
     /// this provides strong durability for the storage engine, and if `EIO` occurs, anyhow,
     /// we treat it as `err::HCF` i.e. impl failure
     pub(super) unsafe fn close(&self) -> FrozenRes<()> {
-        let fd = self.0.swap(CLOSED_FD, atomic::Ordering::AcqRel);
+        let fd = self.fd.swap(CLOSED_FD, atomic::Ordering::AcqRel);
         if fd == CLOSED_FD {
             return Ok(());
         }
@@ -375,9 +373,6 @@ impl POSIXFile {
     /// - The caller must not try to read byound current length of `[POSIXFile]`
     #[inline(always)]
     pub(super) unsafe fn preadv(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenRes<()> {
-        let fd = self.fd();
-        let max_iovs = read_max_iovecs();
-
         let (mut heap, mut stack) = build_iovecs(bufs, chunk_size);
         let (iov_ptr, iovs_len) = if let Some(ref mut s) = stack {
             (s.as_mut_ptr(), bufs.len())
@@ -385,12 +380,14 @@ impl POSIXFile {
             (heap.as_mut_ptr(), heap.len())
         };
 
+        let fd = self.fd();
+
         let mut head = 0usize;
         let mut off = offset as off_t;
 
         while head < iovs_len {
             let remaining_iov = iovs_len - head;
-            let cnt = remaining_iov.min(max_iovs) as c_int;
+            let cnt = remaining_iov.min(self.max_iovs) as c_int;
             let ptr = iov_ptr.add(head);
 
             let res = preadv(fd, ptr, cnt, off);
@@ -457,9 +454,6 @@ impl POSIXFile {
     /// - The caller must not try to write byound current length of `[POSIXFile]`
     #[inline(always)]
     pub(super) unsafe fn pwritev(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenRes<()> {
-        let fd = self.fd();
-        let max_iovs = read_max_iovecs();
-
         let (mut heap, mut stack) = build_iovecs(bufs, chunk_size);
         let (iov_ptr, iovs_len) = if let Some(ref mut s) = stack {
             (s.as_mut_ptr(), bufs.len())
@@ -467,12 +461,14 @@ impl POSIXFile {
             (heap.as_mut_ptr(), heap.len())
         };
 
+        let fd = self.fd();
+
         let mut head = 0usize;
         let mut off = offset as off_t;
 
         while head < iovs_len {
             let remaining_iov = iovs_len - head;
-            let cnt = remaining_iov.min(max_iovs) as c_int;
+            let cnt = remaining_iov.min(self.max_iovs) as c_int;
             let ptr = iov_ptr.add(head);
 
             let res = pwritev(fd, ptr, cnt, off);
@@ -1120,23 +1116,23 @@ unsafe fn err_msg(errno: i32) -> String {
     CStr::from_ptr(ptr).to_string_lossy().into_owned()
 }
 
-/// fetch max allowed `iovecs` per `preadv` & `pwritev` syscalls
-fn read_max_iovecs() -> usize {
-    *IOV_MAX_CACHE.get_or_init(|| unsafe {
-        let res = sysconf(_SC_IOV_MAX);
-        if res <= 0 {
-            MAX_IOVECS
-        } else {
-            res as usize
-        }
-    })
-}
-
 fn extract_parent_dir(path: &std::path::Path) -> std::path::PathBuf {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => std::path::Path::new(".").to_path_buf(),
     }
+}
+
+/// Fetch max allowed `iovecs` per `preadv` & `pwritev` syscalls from the system configs
+///
+/// Usually, on modern systems the value is set to *1024* while the minimum allowable limit is set at *16*
+unsafe fn read_max_iovec_config() -> FrozenRes<usize> {
+    let res = sysconf(_SC_IOV_MAX);
+    if res <= 0 {
+        return new_err_default(err::HCF);
+    }
+
+    Ok(res as usize)
 }
 
 /// Provide access pattern hint using `posix_fadvise(POSIX_FADV_RANDOM)`
@@ -1566,9 +1562,9 @@ mod tests {
             let (_dir, path) = tmp_path();
 
             unsafe {
-                let count = read_max_iovecs() + 5;
-
                 let file = POSIXFile::new(&path).unwrap();
+
+                let count = file.max_iovs + 5;
                 file.grow(0, count * 0x40).unwrap();
 
                 let mut buffers: Vec<Vec<u8>> = (0..count).map(|i| vec![i as u8; 0x40]).collect();
@@ -1671,10 +1667,10 @@ mod tests {
             let (_dir, path) = tmp_path();
 
             unsafe {
-                let count = read_max_iovecs() * 3 + 17; // force multiple internal loops
                 let page = 0x40usize;
-
                 let file = POSIXFile::new(&path).unwrap();
+
+                let count = file.max_iovs * 3 + 17; // force multiple internal loops
                 file.grow(0, count * page).unwrap();
 
                 let mut buffers: Vec<Vec<u8>> = (0..count).map(|i| vec![(i % 0xFB) as u8; page]).collect();
@@ -1702,10 +1698,10 @@ mod tests {
                 let threads = 6usize;
                 let page = 0x40usize;
 
-                let per_thread = read_max_iovecs() * 2 + 0x0B;
-                let total_pages = threads * per_thread;
-
                 let file = std::sync::Arc::new(POSIXFile::new(&path).unwrap());
+
+                let per_thread = file.max_iovs * 2 + 0x0B;
+                let total_pages = threads * per_thread;
                 file.grow(0, total_pages * page).unwrap();
 
                 let mut handles = Vec::new();
@@ -1789,16 +1785,6 @@ mod tests {
                     }
                 }
             }
-        }
-
-        #[test]
-        fn ok_read_max_iovecs() {
-            let first = read_max_iovecs();
-            let second = read_max_iovecs();
-
-            assert!(first > 0, "IOV_MAX must be positive");
-            assert!(first >= MAX_IOVECS && second >= MAX_IOVECS);
-            assert_eq!(first, second, "value must be cached and stable");
         }
 
         #[test]
