@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.19`
+
+- Fixed handling of `_SC_IOV_MAX` in POSIX impl of FrozenFile
+
 ## `0.0.18`
 
 - Added benches for `crc32` module
