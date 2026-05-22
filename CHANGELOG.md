@@ -2,7 +2,11 @@
 
 ## `0.0.19`
 
-- Fixed handling of `_SC_IOV_MAX` in POSIX impl of FrozenFile
+- `FrozenFile`
+  - Fixed handling of `_SC_IOV_MAX` in POSIX impl of FrozenFile
+  - Increased max number of iovecs allowed on stack (1Kib -> 2Kib)
+  - Improved docs
+  - Improved test coverage
 
 ## `0.0.18`
 
