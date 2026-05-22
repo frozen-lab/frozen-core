@@ -129,9 +129,9 @@ pub struct FFCfg {
 
     /// Size (in bytes) of a single chunk on fs
     ///
-    /// A chunk is a smalled fixed size allocation and addressing unit used by
-    /// [`FrozenFile`] for all the write/read ops, which are operated by index
-    /// of the chunk and not the offset of the byte
+    /// A chunk is a small fixed size allocation and addressing unit used by [`FrozenFile`]
+    /// for all the write/read ops, which are operated by index of the chunk and not the offset
+    /// of the byte
     pub chunk_size: usize,
 
     /// Number of chunks to pre-allocate when [`FrozenFile`] is initialized

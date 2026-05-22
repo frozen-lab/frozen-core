@@ -381,7 +381,6 @@ impl POSIXFile {
         };
 
         let fd = self.fd();
-
         let mut head = 0usize;
         let mut off = offset as off_t;
 
@@ -462,7 +461,6 @@ impl POSIXFile {
         };
 
         let fd = self.fd();
-
         let mut head = 0usize;
         let mut off = offset as off_t;
 
