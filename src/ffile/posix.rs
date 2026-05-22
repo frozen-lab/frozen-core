@@ -8,14 +8,24 @@ use libc::{
 };
 use std::{ffi::CStr, mem, sync::atomic};
 
-/// placeholder value for when current fd is closed
+/// Placeholder value for when current fd is closed
 pub(in crate::ffile) const CLOSED_FD: TFileId = TFileId::MIN;
 
-/// max allowed retries for `EINTR`, `EBUSY` and `EAGAIN` errors
-const MAX_RETRIES: usize = 0x0A;
+/// Max allowed retries for `EINTR`, `EBUSY` and `EAGAIN` errors
+const MAX_RETRIES: usize = 0x0C;
 
 /// Maximum number of [`libc::iovec`] descriptors allocated on the stack
-const STACK_IOV: usize = 0x40;
+///
+/// Each [`libc::iovec`] occupies 16 bytes on 64-bit systems,
+///
+/// - 8 bytes for `iov_base`
+/// - 8 bytes for `iov_len`
+///
+/// With `STACK_IOV = 128`, the total stack usage is `128 * 16 = 2048 bytes` (2 KiB)
+///
+/// *NOTE:* Larger batches automatically fallback to heap allocation to avoid excessive stack growth across
+/// deep call chains or small-thread-stack environments.
+const STACK_IOV: usize = 0x80;
 
 /// Custom impl of `std::fs::File` for POSIX systems
 #[derive(Debug)]
@@ -38,8 +48,8 @@ impl POSIXFile {
     ///
     /// ## How it works
     ///
-    /// By using `access(path)` syscall w/ `F_OK`, we check whether the calling process
-    /// can resolve the given `path` in underlying fs
+    /// By using `access(path)` syscall w/ `F_OK`, we check whether the calling process can resolve the
+    /// given `path` in underlying fs
     pub(super) unsafe fn exists(path: &std::path::Path) -> FrozenRes<bool> {
         let cpath = path_to_cstring(path)?;
         Ok(access(cpath.as_ptr(), F_OK) == 0)
@@ -49,16 +59,15 @@ impl POSIXFile {
     ///
     /// ## Crash safe durability
     ///
-    /// In POSIX systems, `open(O_CREATE)` only creates the directory entry in memory, it may be
-    /// visible immediately, but the file entry is not crash durable on many fs
+    /// In POSIX systems, `open(O_CREATE)` only creates the directory entry in memory, it may be visible immediately,
+    /// but the file entry is not crash durable on many fs
     ///
-    /// On some linux systems, journaling fs (ext4, xfs, etc) often replay their journal on mount
-    /// after a crash is observed, which usually restores recent directory updates, i.e. our newly created
-    /// file entry, as a result newly created file often survive the crash
+    /// On some linux systems, journaling fs (ext4, xfs, etc) often replay their journal on mount after a crash is
+    /// observed, which usually restores recent directory updates, i.e. our newly created file entry, as a result newly
+    /// created file often survive the crash
     ///
-    /// In our case, when a new [`FrozenFile`] is created, we zero-extend it using `ftruncate()`,
-    /// and perform `fdatasync()` or `fcntl(F_FULLSYNC)`, which in result provides us the crash safe
-    /// durability we need
+    /// In our case, when a new [`FrozenFile`] is created, we zero-extend it using `ftruncate()`, and perform `fdatasync()`
+    /// or `fcntl(F_FULLSYNC)`, which in result provides us the crash safe durability we need
     pub(super) unsafe fn new(path: &std::path::Path) -> FrozenRes<Self> {
         let fd = open_raw(path, prep_flags())?;
         let max_iovs = read_max_iovec_config()?;
@@ -77,23 +86,22 @@ impl POSIXFile {
     ///
     /// ## Purpose
     ///
-    /// We must ensure that only a single [`POSIXFile`] instance, across all processes, can operate on
-    /// the underlying file, at a given time
+    /// We must ensure that only a single [`POSIXFile`] instance, across all processes, can operate on the
+    /// underlying file, at a given time
     ///
-    /// So, we acquire an exclusive lock, for the entire file, after open, so if another process tries,
-    /// it could hault or choose not to exists anymore, to avoid multiple open handles across the same
-    /// underlying file
+    /// So, we acquire an exclusive lock, for the entire file, after open, so if another process tries, it could
+    /// hault or choose not to exists anymore, to avoid multiple open handles across the same underlying file
     ///
     /// ## Advisory Semantics
     ///
-    /// We use `flock(fd)`, which provides advisory locking only, the kernel does not prevent
-    /// other processes from calling `open()`, but any cooperating process attempting
-    /// to acquire the same exclusive lock will fail with `EWOULDBLOCK` i.e. [`err::LCK`]
+    /// We use `flock(fd)`, which provides advisory locking only, the kernel does not prevent other processes from
+    /// calling `open()`, but any cooperating process attempting to acquire the same exclusive lock will fail
+    /// with `EWOULDBLOCK` i.e. [`err::LCK`]
     ///
     /// ## Why do we retry?
     ///
-    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
-    /// guaranteed, so the syscall must be retried
+    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is guaranteed,
+    /// so the syscall must be retried
     pub(super) unsafe fn flock(&self) -> FrozenRes<()> {
         flock_raw(self.fd())
     }
@@ -104,14 +112,14 @@ impl POSIXFile {
     ///
     /// ## Sync Error (`err::SYN`)
     ///
-    /// In POSIX systems, kernel may report delayed write/sync failures when closing, this are
-    /// durability errors, fatal for us
+    /// In POSIX systems, kernel may report delayed write/sync failures when closing, this are durability errors,
+    /// fatal for us
     ///
-    /// we can easily tackle this error for each bach of writes by enforcing hard durability
-    /// guaranties right after the write ops, and making sure they are completed without errors
+    /// we can easily tackle this error for each bach of writes by enforcing hard durability guarantees right after
+    /// the write ops, and making sure they are completed without errors
     ///
-    /// this provides strong durability for the storage engine, and if `EIO` occurs, anyhow,
-    /// we treat it as `err::HCF` i.e. impl failure
+    /// this provides strong durability for the storage engine, and if `EIO` occurs, anyhow, we treat it as `err::HCF`
+    /// i.e. impl failure
     pub(super) unsafe fn close(&self) -> FrozenRes<()> {
         let fd = self.fd.swap(CLOSED_FD, atomic::Ordering::AcqRel);
         if fd == CLOSED_FD {
@@ -188,10 +196,9 @@ impl POSIXFile {
     ///
     /// in all these scenerios, either the `st_size` is correctly updated or not updated at all
     ///
-    /// if either of `fallocate` or `f_preallocate` has failed, not supported by fs, etc. as long as
-    /// `ftruncate` succeeds, our future write ops (pwrite and pwritev) will work fine, this is mainly
-    /// cause `fallocate` and `f_preallocate` are best-effort operations for us to reduce the latency
-    /// for write ops
+    /// if either of `fallocate` or `f_preallocate` has failed, not supported by fs, etc. as long as `ftruncate` succeeds,
+    /// our future write ops (pwrite and pwritev) will work fine, this is mainly cause `fallocate` and `f_preallocate` are
+    /// best-effort operations for us to reduce the latency for write ops
     pub(super) unsafe fn grow(&self, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
         let fd = self.fd();
 
@@ -215,8 +222,8 @@ impl POSIXFile {
     ///
     /// ## Why do we retry?
     ///
-    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
-    /// guaranteed, so the syscall must be retried
+    /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is guaranteed,
+    /// so the syscall must be retried
     ///
     /// ## `F_FULLFSYNC` vs `fsync`
     ///
@@ -266,7 +273,7 @@ impl POSIXFile {
     /// specified range, which result in reduced latency for `fdatasync` and `fcntl(F_FULLSYNC)` syscalls
     ///
     /// This syscall, by itself, does not guarantee any kind of durability, and must always be paired with
-    /// strong sync calls like `fdatasync()` and `fcntl(F_FULLSYNC)`
+    /// strong sync call i.e. `fdatasync()`
     ///
     /// ## Why do we retry?
     ///
@@ -1798,6 +1805,78 @@ mod tests {
             unsafe {
                 let msg = err_msg(libc::ENOENT);
                 assert!(!msg.is_empty(), "ENOENT must produce message");
+            }
+        }
+    }
+
+    mod config {
+        use super::*;
+
+        #[test]
+        fn ok_read_max_iovec_config() {
+            unsafe {
+                let max = read_max_iovec_config().unwrap();
+                assert!(max >= 0x10, "POSIX guarantees minimum 16");
+            }
+        }
+    }
+
+    mod file_exists {
+        use super::*;
+
+        #[test]
+        fn ok_exists_true_on_existing_file() {
+            let (_dir, path) = tmp_path();
+
+            unsafe {
+                let file = POSIXFile::new(&path).unwrap();
+                assert!(POSIXFile::exists(&path).unwrap());
+                file.close().unwrap();
+            }
+        }
+
+        #[test]
+        fn ok_exists_false_on_missing_file() {
+            let (_dir, path) = tmp_path();
+            unsafe { assert!(!POSIXFile::exists(&path).unwrap()) };
+        }
+    }
+
+    mod build_iovec {
+        use super::*;
+
+        #[test]
+        fn ok_build_iovecs_stack_boundary() {
+            unsafe {
+                let mut bufs: Vec<Vec<u8>> = (0..STACK_IOV).map(|_| vec![0u8; 0x40]).collect();
+                let ptrs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+                let (heap, stack) = build_iovecs(&ptrs, 0x40);
+
+                assert!(heap.is_empty());
+
+                let stack = stack.expect("stack allocation expected");
+                for (i, iov) in stack.iter().enumerate().take(STACK_IOV) {
+                    assert_eq!(iov.iov_base, ptrs[i] as *mut c_void);
+                    assert_eq!(iov.iov_len, 0x40);
+                }
+            }
+        }
+
+        #[test]
+        fn ok_build_iovecs_heap_boundary() {
+            unsafe {
+                let count = STACK_IOV + 1;
+                let mut bufs: Vec<Vec<u8>> = (0..count).map(|_| vec![0u8; 0x40]).collect();
+                let ptrs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+                let (heap, stack) = build_iovecs(&ptrs, 0x40);
+
+                assert!(stack.is_none());
+                assert_eq!(heap.len(), count);
+
+                for (i, iov) in heap.iter().enumerate() {
+                    assert_eq!(iov.iov_base, ptrs[i] as *mut c_void);
+                    assert_eq!(iov.iov_len, 0x40);
+                }
             }
         }
     }

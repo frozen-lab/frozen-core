@@ -44,7 +44,7 @@ use crate::error::{ErrCode, FrozenErr, FrozenRes};
 /// Domain Id for [`FrozenFile`] is **17**
 const ERRDOMAIN: u8 = 0x11;
 
-/// File descriptor for [`FrozenFile`]
+/// File descriptor of [`FrozenFile`]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub type TFileId = libc::c_int;
 
@@ -122,19 +122,21 @@ pub(in crate::ffile) fn new_err_default<R>(code: ErrCode) -> FrozenRes<R> {
 /// Config for [`FrozenFile`]
 #[derive(Debug, Clone)]
 pub struct FFCfg {
-    /// Path for the file
+    /// Absolute path for/of the file
     ///
-    /// *NOTE:* The caller must make sure that the parent directory exists
+    /// *NOTE:* The caller must make sure that the path represents a file and all the parent directories included in
+    /// the path do exists
     pub path: std::path::PathBuf,
 
-    /// Size (in bytes) of a single chunk on fs
+    /// Size (in bytes) of a single chunk in file
     ///
-    /// A chunk is a small fixed size allocation and addressing unit used by [`FrozenFile`]
-    /// for all the write/read ops, which are operated by index of the chunk and not the offset
-    /// of the byte
+    /// A chunk is a small fixed size allocation and addressing unit used by [`FrozenFile`] for all the write/read ops.
+    /// These ops are operated by index of the chunk and not the offset of the byte
+    ///
+    /// *NOTE:* Chunk size when power of 2, is cache efficient and good for performance
     pub chunk_size: usize,
 
-    /// Number of chunks to pre-allocate when [`FrozenFile`] is initialized
+    /// Number of chunks to pre-allocate on fs when [`FrozenFile`] is initialized
     ///
     /// Initial file length will be `chunk_size * initial_chunk_amount` (bytes)
     pub initial_chunk_amount: usize,
@@ -196,11 +198,11 @@ impl FrozenFile {
     /// Get file descriptor for [`FrozenFile`]
     #[inline]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn fd(&self) -> i32 {
+    pub fn fd(&self) -> TFileId {
         self.get_file().fd()
     }
 
-    /// Check if [`FrozenFile`] exists on the fs
+    /// Check if the [`FrozenFile`] exists on the fs
     pub fn exists(&self) -> FrozenRes<bool> {
         unsafe { TFile::exists(&self.cfg.path) }
     }
@@ -213,14 +215,17 @@ impl FrozenFile {
     ///
     /// ## Important
     ///
-    /// The `cfg` must not change any of its properties for the entire life of [`FrozenFile`],
-    /// one must use config stores like [`Rta`](https://crates.io/crates/rta) to store config
+    /// The provided [`FFCfg`] must remain identical across all reopen cycles of the [`FrozenFile`].
+    ///
+    /// Changing any of the feilds after initial creation, may violate internal layout invariants and
+    /// cause the file to be treated as corrupted.
     ///
     /// ## Multiple Instances
     ///
-    /// We acquire an exclusive lock for the entire file, this protects against operating with
-    /// multiple simultenious instance of [`FrozenFile`], when trying to call [`FrozenFile::new`]
-    /// when already called, [`FFileErr::Lck`] error will be thrown
+    /// Every instance of [`FrozenFile`] tries to acquire an exclusive lock, which protects against operating with
+    /// multiple simultenious instances.
+    ///
+    /// If trying to call [`FrozenFile::new`] when already called, [`FFileErr::Lck`] error will be thrown.
     ///
     /// ## Example
     ///
@@ -250,9 +255,9 @@ impl FrozenFile {
 
         let file = slf.get_file();
 
-        // INFO: right after open is successful, we must obtain an exclusive lock on the entire file, hence when
-        // another instance of [`FrozenFile`], when trying to access the same file, would correctly fail, while
-        // again obtaining the lock
+        // INFO: right after open is successful, we must obtain an exclusive lock on the entire file. So the
+        // another instance of [`FrozenFile`] will try to access the same lock, would correctly fail with
+        // [`FFileErr::Lck`] error.
         unsafe { file.flock() }?;
 
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
@@ -265,14 +270,15 @@ impl FrozenFile {
         match curr_len {
             0 => slf.grow(cfg.initial_chunk_amount)?,
             _ => {
-                // NOTE: we can treat this invariants as errors only because, our system guarantees,
+                // NOTE: we can treat these invariants as errors only because, our system guarantees,
                 // whenever file size is updated, i.e. has grown, it'll always be a multiple of `chunk_size`,
-                // and will have minimum of `chunk_size * initial_chunk_amount` (bytes) as the length, although
-                // it only holds true when any of params in `cfg` are never updated after the file is created
+                // and will have minimum of `chunk_size * initial_chunk_amount` (bytes) as it's length, although
+                // it only holds true when any of the params in provided `cfg` are never updated after the initial
+                // creation of the file
+                //
+                // INFO: when true, we close the file to avoid resource leaks
                 if (curr_len < init_len) || (curr_len % cfg.chunk_size != 0) {
-                    // INFO:
-                    // - close the file to avoid resource leaks
-                    // - we supress the close error, as we are already in an errored state
+                    // NOTE: we supress the close error as we are already in an errored state
                     let _ = unsafe { file.close() };
                     return new_err_default(err::CPT);
                 }
@@ -288,7 +294,10 @@ impl FrozenFile {
         unsafe { file.sync() }
     }
 
-    /// Initiates writeback (best-effort) of dirty pages in the specified range
+    /// A best-effort call to prompt kernel to start flushing dirty pages in the specified range
+    ///
+    /// This call, by itself, does not guarantee any kind of durability, and must always be paired with
+    /// strong sync call i.e. [`FrozenFile::sync`]
     #[cfg(target_os = "linux")]
     pub fn sync_range(&self, index: usize, count: usize) -> FrozenRes<()> {
         let offset = self.cfg.chunk_size * index;
@@ -328,6 +337,34 @@ impl FrozenFile {
     }
 
     /// Read a single chunk at given `index` w/ `pread` syscall
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_frozen_file");
+    ///
+    /// let cfg = FFCfg {
+    ///     chunk_size: 0x10,
+    ///     path: path.to_path_buf(),
+    ///     initial_chunk_amount: 0x0A,
+    /// };
+    ///
+    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    ///
+    /// let mut data = [7u8; 0x10];
+    /// file.pwrite(data.as_mut_ptr(), 2).unwrap();
+    /// file.sync().unwrap();
+    ///
+    /// let mut buf = [0u8; 0x10];
+    /// file.pread(buf.as_mut_ptr(), 2).unwrap();
+    ///
+    /// assert_eq!(buf, data);
+    /// ```
     #[inline(always)]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -339,6 +376,34 @@ impl FrozenFile {
     }
 
     /// Write a single chunk at given `index` w/ `pwrite` syscall
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_frozen_file");
+    ///
+    /// let cfg = FFCfg {
+    ///     chunk_size: 0x10,
+    ///     path: path.to_path_buf(),
+    ///     initial_chunk_amount: 0x0A,
+    /// };
+    ///
+    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    ///
+    /// let mut data = [9u8; 0x10];
+    /// file.pwrite(data.as_mut_ptr(), 4).unwrap();
+    /// file.sync().unwrap();
+    ///
+    /// let mut buf = [0u8; 0x10];
+    /// file.pread(buf.as_mut_ptr(), 4).unwrap();
+    ///
+    /// assert_eq!(buf, data);
+    /// ```
     #[inline(always)]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -350,6 +415,39 @@ impl FrozenFile {
     }
 
     /// Read multiple chunks starting from given `index` till `bufs.len()` w/ `preadv` syscall
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_frozen_file");
+    ///
+    /// let cfg = FFCfg {
+    ///     chunk_size: 0x10,
+    ///     path: path.to_path_buf(),
+    ///     initial_chunk_amount: 0x0A,
+    /// };
+    ///
+    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    ///
+    /// let mut write_bufs = [[1u8; 0x10], [2u8; 0x10]];
+    /// let ptrs: Vec<*mut u8> = write_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+    ///
+    /// file.pwritev(&ptrs, 0).unwrap();
+    /// file.sync().unwrap();
+    ///
+    /// let mut read_bufs = [[0u8; 0x10], [0u8; 0x10]];
+    /// let rptrs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+    ///
+    /// file.preadv(&rptrs, 0).unwrap();
+    ///
+    /// assert!(read_bufs[0].iter().all(|b| *b == 1));
+    /// assert!(read_bufs[1].iter().all(|b| *b == 2));
+    /// ```
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn preadv(&self, bufs: &[*mut u8], index: usize) -> FrozenRes<()> {
@@ -360,6 +458,40 @@ impl FrozenFile {
     }
 
     /// Write multiple chunks starting from given `index` till `bufs.len()` w/ `pwritev` syscall
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    ///
+    /// const MID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_frozen_file");
+    ///
+    /// let cfg = FFCfg {
+    ///     chunk_size: 0x10,
+    ///     path: path.to_path_buf(),
+    ///     initial_chunk_amount: 0x0A,
+    /// };
+    ///
+    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    ///
+    /// let mut bufs = [[3u8; 0x10], [4u8; 0x10]];
+    /// let ptrs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+    ///
+    /// file.pwritev(&ptrs, 2).unwrap();
+    /// file.sync().unwrap();
+    ///
+    /// let mut a = [0u8; 0x10];
+    /// let mut b = [0u8; 0x10];
+    ///
+    /// file.pread(a.as_mut_ptr(), 2).unwrap();
+    /// file.pread(b.as_mut_ptr(), 3).unwrap();
+    ///
+    /// assert!(a.iter().all(|v| *v == 3));
+    /// assert!(b.iter().all(|v| *v == 4));
+    /// ```
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn pwritev(&self, bufs: &[*mut u8], index: usize) -> FrozenRes<()> {
@@ -370,6 +502,8 @@ impl FrozenFile {
     }
 
     /// Grow file size of [`FrozenFile`] by given `count` of chunks
+    ///
+    /// After successful execution, updated file length will be `current_length + (count * chunk_size)`
     ///
     /// ## Example
     ///
