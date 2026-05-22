@@ -28,7 +28,7 @@ jobs:
             arch: aarch64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -48,7 +48,7 @@ jobs:
     needs: lints
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -80,7 +80,7 @@ jobs:
     needs: lints
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
