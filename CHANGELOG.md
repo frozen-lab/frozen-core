@@ -1,5 +1,13 @@
 # Changelog
 
+## `0.0.19`
+
+- `FrozenFile`
+  - Fixed handling of `_SC_IOV_MAX` in POSIX impl of FrozenFile
+  - Increased max number of iovecs allowed on stack (1Kib -> 2Kib)
+  - Improved docs
+  - Improved test coverage
+
 ## `0.0.18`
 
 - Added benches for `crc32` module
