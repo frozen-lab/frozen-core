@@ -23,6 +23,7 @@ inherits = "release"
 
 [features]
 crc32 = []
+bufpool = ["error", "hints"]
 error = []
 hints = []
 mpscq = []

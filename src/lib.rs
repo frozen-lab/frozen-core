@@ -2,6 +2,9 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../README.md")]
 
+#[cfg(any(test, feature = "bufpool"))]
+pub mod bufpool;
+
 #[cfg(any(test, feature = "error"))]
 pub mod error;
 
