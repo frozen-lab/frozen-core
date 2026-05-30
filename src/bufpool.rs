@@ -2,6 +2,7 @@
 #![allow(unused)]
 
 use crate::{error::FrozenRes, hints::unlikely};
+use std::{alloc, ptr};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BufPoolCfg {
@@ -19,20 +20,46 @@ impl BufPool {
     pub fn allocate(&self, required: usize) -> FrozenRes<BufPoolAllocation> {
         let capacity = self.cfg.buffer_size * required;
 
-        let mut slice = Vec::<u8>::with_capacity(capacity);
-        let base_ptr = slice.as_mut_ptr();
-
-        // NOTE: We manually disable the destructor to pin the allocated buffers in the memory. As the allocated
-        // buffers are used for IO, and may require till the caller decides to drop them. This also enables us
-        // to manually construct the slice back into a vector and drop the allocated memory by using the default
-        // destructor of `Vec` object.
-        std::mem::forget(slice);
+        let layout = create_layout(capacity);
+        let pointer = unsafe { allocate_layout(layout) };
 
         Ok(BufPoolAllocation {
-            base_ptr,
+            layout,
+            pointer,
             buffers: required,
             buffer_size: self.cfg.buffer_size,
         })
+    }
+}
+
+/// Creates a array layout with given `capacity`
+///
+/// *NOTE:* Use of `unwrap` is totally safe as the panic, if any, would be caught by unit tests and would be the
+/// indication of incorrect impl and not any runtime failures
+#[inline]
+fn create_layout(capacity: usize) -> alloc::Layout {
+    alloc::Layout::array::<u8>(capacity).unwrap()
+}
+
+/// Allocate a memory slice with given allocation `layout`
+///
+/// ## Allocation Failure
+///
+/// If the allocator is unable to satisfy the request (typically due to an OOM condition), [`alloc::alloc`] returns
+/// a null pointer. In such cases we delegate to [`alloc::handle_alloc_error`], matching the behavior of std library
+/// types such as [`Vec`], [`Box`] and [`String`].
+///
+/// This path aborts the process and never returns. Allocation failures are therefore treated as fatal runtime conditions
+/// rather than recoverable errors.
+///
+/// Under normal operation this path should never be reached, as memory usage is expected to be bounded by the buffer
+/// pools memory budget and backpressure mechanisms.
+#[inline]
+fn allocate_layout(layout: alloc::Layout) -> ptr::NonNull<u8> {
+    let ptr = unsafe { alloc::alloc(layout) };
+    match ptr::NonNull::new(ptr) {
+        Some(p) => p,
+        None => alloc::handle_alloc_error(layout),
     }
 }
 
@@ -40,7 +67,8 @@ impl BufPool {
 pub struct BufPoolAllocation {
     buffers: usize,
     buffer_size: usize,
-    base_ptr: *mut u8,
+    layout: alloc::Layout,
+    pointer: ptr::NonNull<u8>,
 }
 
 impl BufPoolAllocation {
@@ -49,7 +77,7 @@ impl BufPoolAllocation {
     #[inline]
     pub fn iter_mut(&mut self) -> BufPoolAllocationIter {
         BufPoolAllocationIter {
-            base_ptr: self.base_ptr,
+            pointer: self.pointer,
             buffer_size: self.buffer_size,
             remaining: self.buffers,
         }
@@ -63,16 +91,13 @@ impl Drop for BufPoolAllocation {
             return;
         }
 
-        // NOTE: after allocation, we manually pin the buffers in memory by disabling the default destructor of
-        // the allocated vector. So, in order to free the allocated memory, we must recreate the vector from the
-        // base pointer and let the default destructor do its thing ;)
-        let _ = unsafe { Vec::from_raw_parts(self.base_ptr, capacity, capacity) };
+        unsafe { alloc::dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }
 
 #[derive(Debug)]
 pub struct BufPoolAllocationIter {
-    base_ptr: *mut u8,
+    pointer: ptr::NonNull<u8>,
     buffer_size: usize,
     remaining: usize,
 }
@@ -86,11 +111,11 @@ impl Iterator for BufPoolAllocationIter {
             return None;
         }
 
-        let ptr = self.base_ptr;
+        let ptr = self.pointer;
 
-        self.base_ptr = unsafe { self.base_ptr.add(self.buffer_size) };
+        self.pointer = unsafe { self.pointer.add(self.buffer_size) };
         self.remaining -= 1;
 
-        Some(ptr)
+        Some(ptr.as_ptr())
     }
 }
