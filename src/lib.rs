@@ -28,3 +28,5 @@ pub mod fmmap;
 
 #[cfg(any(test, feature = "fpipe"))]
 pub mod fpipe;
+
+pub mod utils;
