@@ -36,6 +36,9 @@ pub struct BufPool {
     shutdown_lock: sync::Mutex<()>,
 }
 
+unsafe impl Send for BufPool {}
+unsafe impl Sync for BufPool {}
+
 impl BufPool {
     #[inline]
     pub fn new(cfg: BufPoolCfg) -> Self {
@@ -135,7 +138,16 @@ pub struct BufPoolAllocation {
     required_bytes: usize,
 }
 
+unsafe impl Send for BufPoolAllocation {}
+
 impl BufPoolAllocation {
+    #[inline]
+    pub fn buffer(&self, index: usize) -> *mut u8 {
+        let pool = unsafe { self.pool.as_ref() };
+        let pointer = unsafe { self.pointer.add(pool.cfg.buffer_size.bytes() * index) };
+        pointer.as_ptr()
+    }
+
     /// *NOTE:* Even though it does not mutates the `self` here, we require a mutable self to make this function
     /// a one-time use only.
     #[inline]
