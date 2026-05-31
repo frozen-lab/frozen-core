@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use crate::{error::FrozenRes, hints::unlikely, utils::BufferSize};
+use crate::utils::BufferSize;
 use std::{alloc, ptr, sync, sync::atomic};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,12 +59,12 @@ impl BufPool {
     /// limit acts as a guidline to safely operate arithmatic operations across storage engine's, including but not
     /// limited to [`frozen_core`].
     #[inline(always)]
-    pub fn allocate(&self, required: usize) -> FrozenRes<BufPoolAllocation> {
+    pub fn allocate(&self, required: usize) -> BufPoolAllocation {
         let required_bytes = self.cfg.buffer_size.bytes() * required;
         loop {
             let current_bytes = self.allocated_memory.load(atomic::Ordering::Acquire);
             if current_bytes + required_bytes > self.cfg.max_memory {
-                self.backpressure(required_bytes)?;
+                self.backpressure(required_bytes);
                 continue;
             }
 
@@ -83,45 +83,45 @@ impl BufPool {
         let pointer = allocate_layout(layout);
         self.active_allocations.fetch_add(1, atomic::Ordering::Relaxed);
 
-        Ok(BufPoolAllocation {
+        BufPoolAllocation {
             layout,
             pointer,
             required_bytes,
             buffers: required,
             pool: ptr::NonNull::from(self),
-        })
+        }
     }
 
+    /// Applies backpressure until enough memory budget is available for the allocation
+    ///
+    /// ## Why we ignore [`std::sync::PoisonError`]?
+    ///
+    /// The mutex used for lock, is solely used as a parking primitive for [`Condvar`] and does not protect any mutable
+    /// state. All the pool invariants and accounting are maintained via atomics and are completely seperated from
+    /// the mutex.
+    ///
+    /// A poisoned mutex only indicates that another tx panicked while holding the lock, and indicates an inconsistent
+    /// state of the protected value. Since no state can be left partially modified under this lock, there is no
+    /// possible consistency risk to recover from and propagating the poison error would only introduce unnecessary
+    /// failures into the allocation path.
+    ///
+    /// Therefore, as best effort, we consume the [`std::sync::PoisonError`] and continue operating with the recovered
+    /// guard.
     #[inline]
-    fn backpressure(&self, required_bytes: usize) -> FrozenRes<()> {
-        let mut guard = self
-            .allocation_lock
-            .lock()
-            .map_err(|error| err::new_err(err::LPN, error, self.cfg.module_id))?;
-
+    fn backpressure(&self, required_bytes: usize) {
+        let mut guard = self.allocation_lock.lock().unwrap_or_else(|e| e.into_inner());
         while self.allocated_memory.load(atomic::Ordering::Acquire) + required_bytes > self.cfg.max_memory {
-            guard = self
-                .allocation_cv
-                .wait(guard)
-                .map_err(|error| err::new_err(err::LPN, error, self.cfg.module_id))?;
+            guard = self.allocation_cv.wait(guard).unwrap_or_else(|e| e.into_inner());
         }
-
-        Ok(())
     }
 }
 
 impl Drop for BufPool {
+    /// *NOTE:* See [`BufPool::backpressure`] for rationale behind poison recovery
     fn drop(&mut self) {
-        let mut guard = match self.shutdown_lock.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-
+        let mut guard = self.shutdown_lock.lock().unwrap_or_else(|e| e.into_inner());
         while self.active_allocations.load(atomic::Ordering::Acquire) != 0 {
-            guard = match self.shutdown_cv.wait(guard) {
-                Ok(g) => g,
-                Err(_) => break,
-            };
+            guard = self.shutdown_cv.wait(guard).unwrap_or_else(|e| e.into_inner());
         }
     }
 }
@@ -151,12 +151,8 @@ impl BufPoolAllocation {
 
 impl Drop for BufPoolAllocation {
     fn drop(&mut self) {
-        if unlikely(self.required_bytes == 0) {
-            return;
-        }
-
-        deallocate_memory(self.pointer, self.layout);
         let pool = unsafe { self.pool.as_ref() };
+        deallocate_memory(self.pointer, self.layout);
 
         pool.allocated_memory
             .fetch_sub(self.required_bytes, atomic::Ordering::Release);
@@ -199,7 +195,10 @@ impl Iterator for BufPoolAllocationIter {
 /// indication of incorrect impl and not any runtime failures
 #[inline]
 fn create_layout(required_bytes: usize) -> alloc::Layout {
-    alloc::Layout::array::<u8>(required_bytes).unwrap()
+    match alloc::Layout::array::<u8>(required_bytes) {
+        Ok(layout) => layout,
+        Err(e) => panic!("Invalid layout: {e}"),
+    }
 }
 
 /// Allocate a memory slice with given allocation `layout`
@@ -236,19 +235,4 @@ fn allocate_layout(layout: alloc::Layout) -> ptr::NonNull<u8> {
 #[inline]
 fn deallocate_memory(pointer: ptr::NonNull<u8>, layout: alloc::Layout) {
     unsafe { alloc::dealloc(pointer.as_ptr(), layout) };
-}
-
-mod err {
-    use crate::error::{ErrCode, FrozenErr};
-
-    /// Domain Id for [`BufPool`] is **19**
-    const ERRDOMAIN: u8 = 0x13;
-
-    /// (02) lock/guard poisoned while waiting
-    pub const LPN: ErrCode = ErrCode::new(0x02, "lock poisoned while waiting");
-
-    #[inline]
-    pub fn new_err<E: std::fmt::Display>(code: ErrCode, error: E, mid: u8) -> FrozenErr {
-        FrozenErr::new_raw(mid, ERRDOMAIN, code, error)
-    }
 }
