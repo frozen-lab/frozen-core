@@ -33,6 +33,10 @@ where
 ///
 /// The value of each variant is the buffer size in bytes.
 ///
+/// *NOTE:* The [`BufferSize::S16384`] is an upper limit for available buffer sizes, as it is large enough to never
+/// create any sort of inconvience for the user, and small enough to never create overflow issues in arithmatic
+/// operation across storage engine/s.
+///
 /// ## Example
 ///
 /// ```
@@ -71,6 +75,12 @@ pub enum BufferSize {
 
     /// 4 KiB (4096 bytes)
     S4096 = 0x1000,
+
+    /// 8 KiB (8192 bytes)
+    S8192 = 0x2000,
+
+    /// 16 KiB (16384 bytes)
+    S16384 = 0x4000,
 }
 
 impl BufferSize {

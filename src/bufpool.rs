@@ -50,6 +50,14 @@ impl BufPool {
         }
     }
 
+    /// ## Constraints
+    ///
+    /// The number of buffers required should never exceed `u16::MAX`. This is an abstract soft limit and should be
+    /// enforced via public interface to avoid any weird exhaustion issues or bugs across the storage system.
+    ///
+    /// As `u16::MAX` is large enough value to almost never cause any problems for a single write operation, this soft
+    /// limit acts as a guidline to safely operate arithmatic operations across storage engine's, including but not
+    /// limited to [`frozen_core`].
     #[inline(always)]
     pub fn allocate(&self, required: usize) -> FrozenRes<BufPoolAllocation> {
         let required_bytes = self.cfg.buffer_size.bytes() * required;
