@@ -3,6 +3,8 @@
 use crate::utils::BufferSize;
 use std::{alloc, ptr, sync, sync::atomic};
 
+pub type BufferPointer = *mut u8;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BufPoolCfg {
     /// Identifier used for error propagation by [`frozen_core::error::FrozenErr`]
@@ -42,6 +44,12 @@ unsafe impl Sync for BufPool {}
 impl BufPool {
     #[inline]
     pub fn new(cfg: BufPoolCfg) -> Self {
+        // sanity check
+        debug_assert!(
+            cfg.buffer_size.bytes() < cfg.max_memory,
+            "MAX_MEMORY should always be larger then the BUFFER_SIZE"
+        );
+
         Self {
             cfg,
             active_allocations: atomic::AtomicUsize::new(0),
@@ -63,6 +71,13 @@ impl BufPool {
     /// limited to [`frozen_core`].
     #[inline(always)]
     pub fn allocate(&self, required: usize) -> BufPoolAllocation {
+        // sanity checks
+        debug_assert!(required > 0, "required buffers must never be 0");
+        debug_assert!(
+            required * self.cfg.buffer_size.bytes() <= self.cfg.max_memory,
+            "Total required bytes must be smaller then the MAX_MEMORY allowed to avoid deadlock"
+        );
+
         let required_bytes = self.cfg.buffer_size.bytes() * required;
         loop {
             let current_bytes = self.allocated_memory.load(atomic::Ordering::Acquire);
@@ -142,10 +157,18 @@ unsafe impl Send for BufPoolAllocation {}
 
 impl BufPoolAllocation {
     #[inline]
-    pub fn buffer(&self, index: usize) -> *mut u8 {
-        let pool = unsafe { self.pool.as_ref() };
-        let pointer = unsafe { self.pointer.add(pool.cfg.buffer_size.bytes() * index) };
-        pointer.as_ptr()
+    pub const fn first(&self) -> BufferPointer {
+        self.pointer.as_ptr()
+    }
+
+    #[inline]
+    pub const fn length(&self) -> usize {
+        self.buffers
+    }
+
+    #[inline]
+    pub const fn allocated_bytes(&self) -> usize {
+        self.required_bytes
     }
 
     /// *NOTE:* Even though it does not mutates the `self` here, we require a mutable self to make this function
@@ -184,7 +207,7 @@ pub struct BufPoolAllocationIter {
 }
 
 impl Iterator for BufPoolAllocationIter {
-    type Item = *mut u8;
+    type Item = BufferPointer;
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
@@ -209,7 +232,7 @@ impl Iterator for BufPoolAllocationIter {
 fn create_layout(required_bytes: usize) -> alloc::Layout {
     match alloc::Layout::array::<u8>(required_bytes) {
         Ok(layout) => layout,
-        Err(e) => panic!("Invalid layout: {e}"),
+        Err(e) => panic!("Invalid Layout: {e}"),
     }
 }
 
@@ -247,4 +270,323 @@ fn allocate_layout(layout: alloc::Layout) -> ptr::NonNull<u8> {
 #[inline]
 fn deallocate_memory(pointer: ptr::NonNull<u8>, layout: alloc::Layout) {
     unsafe { alloc::dealloc(pointer.as_ptr(), layout) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MOD_ID: u8 = 0;
+    const BUF_SIZE: BufferSize = BufferSize::S32;
+
+    #[inline]
+    fn create_bufpool(max_mem: usize) -> BufPool {
+        BufPool::new(BufPoolCfg {
+            buffer_size: BUF_SIZE,
+            max_memory: max_mem,
+            module_id: MOD_ID,
+        })
+    }
+
+    #[test]
+    #[should_panic]
+    fn err_new_with_invalid_cfg() {
+        create_bufpool(BUF_SIZE.bytes() >> 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn err_alloc_zero() {
+        let bpool = create_bufpool(BUF_SIZE.bytes());
+        let _ = bpool.allocate(0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn err_alloc_more_then_max_memory() {
+        let bpool = create_bufpool(BUF_SIZE.bytes());
+        let _ = bpool.allocate(2);
+    }
+
+    #[test]
+    fn ok_alloc_single() {
+        let bpool = create_bufpool(BUF_SIZE.bytes() * 2);
+        let alloc = bpool.allocate(1);
+
+        assert_eq!(alloc.buffers, 1);
+        assert_eq!(alloc.required_bytes, BUF_SIZE.bytes());
+    }
+
+    #[test]
+    fn ok_alloc_multiple() {
+        let bpool = create_bufpool(BUF_SIZE.bytes() * 0x14);
+        let alloc = bpool.allocate(0x10);
+
+        assert_eq!(alloc.buffers, 0x10);
+        assert_eq!(alloc.required_bytes, BUF_SIZE.bytes() * 0x10);
+    }
+
+    #[test]
+    fn ok_alloc_max_memory() {
+        let bpool = create_bufpool(BUF_SIZE.bytes() * 0x0A);
+        let alloc = bpool.allocate(0x0A);
+
+        assert_eq!(alloc.buffers, 0x0A);
+        assert_eq!(alloc.required_bytes, BUF_SIZE.bytes() * 0x0A);
+    }
+
+    #[test]
+    fn ok_alloc_updates_memory_accounting() {
+        let bpool = create_bufpool(BUF_SIZE.bytes() * 0x14);
+        let alloc = bpool.allocate(0x10);
+
+        assert_eq!(
+            bpool.allocated_memory.load(atomic::Ordering::Acquire),
+            BUF_SIZE.bytes() * 0x10
+        );
+        drop(alloc);
+        assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn ok_alloc_updates_active_allocation_tracking() {
+        let bpool = create_bufpool(BUF_SIZE.bytes() * 0x2A);
+
+        let alloc1 = bpool.allocate(0x10);
+        let alloc2 = bpool.allocate(0x10);
+
+        assert_eq!(bpool.active_allocations.load(atomic::Ordering::Acquire), 2);
+        let _ = (drop(alloc1), drop(alloc2));
+        assert_eq!(bpool.active_allocations.load(atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn ok_alloc_decrments_allocated_memory_after_deallocations() {
+        let bpool = create_bufpool(BUF_SIZE.bytes() * 0x80);
+        let allocations: Vec<_> = (0..0x20).map(|_| bpool.allocate(2)).collect();
+
+        assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), 0x20 * 0x40);
+        drop(allocations);
+        assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn ok_backpressure_blocks_till_memory_is_deallocated() {
+        let bpool = sync::Arc::new(create_bufpool(BUF_SIZE.bytes() * 2));
+        let alloc = bpool.allocate(1);
+
+        let pool2 = bpool.clone();
+        let barrier = sync::Arc::new(sync::Barrier::new(2));
+        let barrier2 = barrier.clone();
+
+        let handle = std::thread::spawn(move || {
+            barrier2.wait();
+
+            let start = std::time::Instant::now();
+            let _alloc = pool2.allocate(2);
+
+            start.elapsed()
+        });
+
+        barrier.wait();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(alloc);
+
+        let elapsed = handle.join().expect("allocation thread should not panic");
+        assert!(elapsed >= std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn ok_concurrent_allocations() {
+        let pool = sync::Arc::new(create_bufpool(BUF_SIZE.bytes() * 0x1000));
+
+        let mut handles = Vec::new();
+        for _ in 0..0x0A {
+            let pool = pool.clone();
+
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..0x64 {
+                    drop(pool.allocate(1));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(pool.allocated_memory.load(atomic::Ordering::Acquire), 0);
+        assert_eq!(pool.active_allocations.load(atomic::Ordering::Acquire), 0);
+    }
+
+    mod drop {
+        use super::*;
+
+        #[test]
+        fn ok_partial_drop_updates_accounting() {
+            let bpool = create_bufpool(BUF_SIZE.bytes() * 0x0A);
+
+            let alloc1 = bpool.allocate(2);
+            let alloc2 = bpool.allocate(2);
+
+            assert_eq!(
+                bpool.allocated_memory.load(atomic::Ordering::Acquire),
+                BUF_SIZE.bytes() * 4
+            );
+            drop(alloc1);
+
+            assert_eq!(
+                bpool.allocated_memory.load(atomic::Ordering::Acquire),
+                BUF_SIZE.bytes() * 2
+            );
+            drop(alloc2);
+
+            assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), 0);
+        }
+
+        #[test]
+        fn ok_drop_waits_for_active_allocations() {
+            let bpool = sync::Arc::new(create_bufpool(BUF_SIZE.bytes() * 0x1A));
+            let alloc = bpool.allocate(0x10);
+
+            let handle = std::thread::spawn(move || {
+                drop(bpool);
+            });
+
+            std::thread::sleep(std::time::Duration::from_millis(0x64));
+            assert!(!handle.is_finished());
+            drop(alloc);
+
+            handle.join().unwrap();
+        }
+    }
+
+    mod memory_tests {
+        use super::*;
+
+        #[test]
+        fn ok_create_layout() {
+            let layout = create_layout(0x1000);
+
+            assert_eq!(layout.align(), 1);
+            assert_eq!(layout.size(), 0x1000);
+        }
+
+        #[test]
+        #[should_panic(expected = "Invalid Layout")]
+        fn err_create_layout() {
+            create_layout(usize::MAX);
+        }
+
+        #[test]
+        fn ok_allocate_layout() {
+            let layout = create_layout(0x10);
+            let pointer = allocate_layout(layout);
+            let raw_ptr = pointer.as_ptr();
+
+            assert!(!raw_ptr.is_null());
+            deallocate_memory(pointer, layout);
+        }
+
+        #[test]
+        fn ok_allocate_layout_allows_write() {
+            let layout = create_layout(0x80);
+            let pointer = allocate_layout(layout);
+
+            unsafe {
+                pointer.as_ptr().write(0x40);
+                assert_eq!(pointer.as_ptr().read(), 0x40);
+            }
+
+            deallocate_memory(pointer, layout);
+        }
+
+        #[test]
+        fn ok_allocate_layout_allows_write_to_entire_slice() {
+            let layout = create_layout(0x200);
+            let pointer = allocate_layout(layout);
+
+            unsafe {
+                for i in 0..0x200 {
+                    pointer.as_ptr().add(i).write((i % 0xFF) as u8);
+                }
+
+                for i in 0..0x200 {
+                    assert_eq!(pointer.as_ptr().add(i).read(), (i % 0xFF) as u8);
+                }
+            }
+
+            deallocate_memory(pointer, layout);
+        }
+    }
+
+    mod alloc_struct {
+        use super::*;
+
+        #[test]
+        fn ok_first_returns_ptr_to_first_buf_from_alloc() {
+            let bpool = create_bufpool(BUF_SIZE.bytes() * 0x20);
+            let alloc = bpool.allocate(0x10);
+
+            assert_eq!(alloc.first(), alloc.pointer.as_ptr());
+        }
+
+        #[test]
+        fn ok_length_returns_length_of_alloc() {
+            let bpool = create_bufpool(BUF_SIZE.bytes() * 0x20);
+            let alloc = bpool.allocate(0x10);
+
+            assert_eq!(alloc.length(), alloc.buffers);
+        }
+
+        #[test]
+        fn ok_allocated_bytes_return_total_allocated_bytes() {
+            let bpool = create_bufpool(BUF_SIZE.bytes() * 0x20);
+            let alloc = bpool.allocate(0x10);
+
+            assert_eq!(alloc.allocated_bytes(), alloc.buffers * BUF_SIZE.bytes());
+        }
+
+        #[test]
+        fn ok_alloc_can_be_shared_across_threads() {
+            let pool = sync::Arc::new(create_bufpool(BUF_SIZE.bytes() * 2));
+            let alloc = pool.allocate(1);
+
+            std::thread::spawn(move || {
+                drop(alloc);
+            })
+            .join()
+            .unwrap();
+        }
+    }
+
+    mod iterator {
+        use super::*;
+
+        #[test]
+        fn ok_iter_mut_yeilds_all_buffers() {
+            let bpool = create_bufpool(BUF_SIZE.bytes() * 0x0A);
+            let mut alloc = bpool.allocate(4);
+
+            let ptrs: Vec<_> = alloc.iter_mut().collect();
+            assert_eq!(ptrs.len(), 4);
+
+            assert_eq!(ptrs[1] as usize - ptrs[0] as usize, 0x20);
+            assert_eq!(ptrs[2] as usize - ptrs[1] as usize, 0x20);
+            assert_eq!(ptrs[3] as usize - ptrs[2] as usize, 0x20);
+        }
+
+        #[test]
+        fn ok_iter_mut_yeilds_none_when_exhausted() {
+            let bpool = create_bufpool(BUF_SIZE.bytes() * 0x0A);
+            let mut alloc = bpool.allocate(2);
+            let mut iter = alloc.iter_mut();
+
+            assert!(iter.next().is_some());
+            assert!(iter.next().is_some());
+            assert!(iter.next().is_none());
+            assert!(iter.next().is_none());
+        }
+    }
 }
