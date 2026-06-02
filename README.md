@@ -69,20 +69,16 @@ frozen-core = { version = "0.0.20", features = ["bufpool"] }
 
 Following are the latency and throughput meansurements for allocation and deallocations,
 
-```md
 | Buffers  | Latency  |
 |:---------|:---------|
 | 1        | 246 ns   |
 | 0x10     | 251 ns   |
 | 0x400    | 300 ns   |
-```
 
-```md
 | Metric              | Value         |
 |:--------------------|:--------------|
 | Allocations / sec   | ~3.94 Million |
 | Avg latency / alloc | ~254 ns       |
-```
 
 > [!NOTE]
 > All measurements include _allocation_ + _deallocation_ + _drop_ (RAII lifecycle) 
