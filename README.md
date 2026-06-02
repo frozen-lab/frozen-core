@@ -266,48 +266,12 @@ frozen-core = { version = "0.0.20", features = ["mpscq"] }
 Following are latency measurements for push, drain, and combined operations,
 
 > [!NOTE]
-> All timings represent **end-to-end operation cost (including allocation & reclamation)**
+> All timings represent end-to-end operation cost (including allocation & deallocation)
 
-Single-thread push,
-
-| N (ops) | Time (ns / µs) |
-|:--------|:---------------|
-| 1       | 30 ns          |
-| 8       | 313 ns         |
-| 64      | 2.31 µs        |
-| 256     | 8.49 µs        |
-
-Single-thread drain,
-
-| N (ops) | Time (ns / µs) |
-|:--------|:---------------|
-| 1       | 37 ns          |
-| 8       | 263 ns         |
-| 64      | 2.17 µs        |
-| 256     | 8.23 µs        |
-
-Push + Drain cycle,
-
-| N (ops) | Time (ns / µs) |
-|:--------|:---------------|
-| 1       | 34 ns          |
-| 8       | 241 ns         |
-| 64      | 2.13 µs        |
-| 256     | 9.95 µs        |
-
-Contention (multi-producer push),
-
-| Threads | Time (µs) |
-|:--------|:----------|
-|       2 |    119 µs |
-|       4 |    199 µs |
-|       8 |    375 µs |
-
-Producer + Consumer,
-
-| Scenario            | Time (µs) |
-|:--------------------|:----------|
-| Concurrent pipeline |    121 µs |
+| Operation | Average Latency |
+|:----------|:----------------|
+| Push      | ~36 ns          |
+| Drain     | ~37 ns          |
 
 Environment used for benching,
 
