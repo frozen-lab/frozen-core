@@ -1,6 +1,6 @@
 [package]
 edition = "2024"
-version = "0.0.19"
+version = "0.0.20"
 name = "frozen-core"
 exclude = ["shell.nix"]
 description = "Custom implementations and core utilities for frozen-lab crates"
@@ -23,6 +23,7 @@ inherits = "release"
 
 [features]
 crc32 = []
+bufpool = ["error", "hints"]
 error = []
 hints = []
 mpscq = []
@@ -65,6 +66,11 @@ required-features = ["crc32"]
 name = "bpool"
 harness = false
 required-features = ["bpool"]
+
+[[bench]]
+name = "bufpool"
+harness = false
+required-features = ["bufpool"]
 
 [[bench]]
 name = "mpscq"

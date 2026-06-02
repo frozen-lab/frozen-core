@@ -11,6 +11,7 @@ Custom implementations and core utilities for [frozen-lab](https://github.com/fr
 - [`notes`](#notes)
 - [`error`](#frozenerr)
 - [`hints`](#hints)
+- [`bufpool`](#bufpool)
 - [`ffile`](#frozenfile)
 - [`fmmap`](#frozenmmap)
 - [`crc32`](#crc32)
@@ -41,7 +42,7 @@ To use the `error` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["error"] }
+frozen-core = { version = "0.0.20", features = ["error"] }
 ```
 
 ## Hints
@@ -52,8 +53,39 @@ To use the `hints` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["hints"] }
+frozen-core = { version = "0.0.20", features = ["hints"] }
 ```
+
+## BufPool
+
+A buffer pool implementation with dynamic memory allocations.
+
+To use the `bufpool` module, add it as a dependency in your `Cargo.toml`:
+
+```toml
+[dependencies]
+frozen-core = { version = "0.0.20", features = ["bufpool"] }
+```
+
+Following are the latency and throughput meansurements for allocation and deallocations,
+
+```md
+| Buffers  | Latency  |
+|:---------|:---------|
+| 1        | 246 ns   |
+| 0x10     | 251 ns   |
+| 0x400    | 300 ns   |
+```
+
+```md
+| Metric              | Value         |
+|:--------------------|:--------------|
+| Allocations / sec   | ~3.94 Million |
+| Avg latency / alloc | ~254 ns       |
+```
+
+> [!NOTE]
+> All measurements include _allocation_ + _deallocation_ + _drop_ (RAII lifecycle) 
 
 ## FrozenFile
 
@@ -63,7 +95,7 @@ To use the `ffile` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["ffile"] }
+frozen-core = { version = "0.0.20", features = ["ffile"] }
 ```
 
 `FrozenFile` is currently available on the following platforms,
@@ -85,7 +117,7 @@ To use the `fmmap` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["fmmap"] }
+frozen-core = { version = "0.0.20", features = ["fmmap"] }
 ```
 
 `FrozenMMap` is currently available on the following platforms,
@@ -114,7 +146,7 @@ To use the `crc32` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["crc32"] }
+frozen-core = { version = "0.0.20", features = ["crc32"] }
 ```
 
 `Crc32C` is available on following architectures,
@@ -161,7 +193,7 @@ To use the `bpool` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["bpool"] }
+frozen-core = { version = "0.0.20", features = ["bpool"] }
 ```
 
 Following are latency measurements for allocation across different backends and configurations.
@@ -228,7 +260,7 @@ To use the `mpscq` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["mpscq"] }
+frozen-core = { version = "0.0.20", features = ["mpscq"] }
 ```
 
 Following are latency measurements for push, drain, and combined operations,
@@ -295,5 +327,5 @@ To use the `fpipe` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["fpipe"] }
+frozen-core = { version = "0.0.20", features = ["fpipe"] }
 ```
