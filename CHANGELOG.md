@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.20`
+
+- Implementation of `bufpool` module
+
 ## `0.0.19`
 
 - `FrozenFile`
