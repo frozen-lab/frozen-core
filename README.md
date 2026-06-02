@@ -11,6 +11,7 @@ Custom implementations and core utilities for [frozen-lab](https://github.com/fr
 - [`notes`](#notes)
 - [`error`](#frozenerr)
 - [`hints`](#hints)
+- [`bufpool`](#bufpool)
 - [`ffile`](#frozenfile)
 - [`fmmap`](#frozenmmap)
 - [`crc32`](#crc32)
@@ -54,6 +55,37 @@ To use the `hints` module, add it as a dependency in your `Cargo.toml`:
 [dependencies]
 frozen-core = { version = "0.0.19", features = ["hints"] }
 ```
+
+## BufPool
+
+A buffer pool implementation with dynamic memory allocations.
+
+To use the `bufpool` module, add it as a dependency in your `Cargo.toml`:
+
+```toml
+[dependencies]
+frozen-core = { version = "0.0.20", features = ["bufpool"] }
+```
+
+Following are the latency and throughput meansurements for allocation and deallocations,
+
+```md
+| Buffers  | Latency  |
+|:---------|:---------|
+| 1        | 246 ns   |
+| 0x10     | 251 ns   |
+| 0x400    | 300 ns   |
+```
+
+```md
+| Metric              | Value         |
+|:--------------------|:--------------|
+| Allocations / sec   | ~3.94 Million |
+| Avg latency / alloc | ~254 ns       |
+```
+
+> [!NOTE]
+> All measurements include _allocation_ + _deallocation_ + _drop_ (RAII lifecycle) 
 
 ## FrozenFile
 
