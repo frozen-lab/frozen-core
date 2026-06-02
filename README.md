@@ -42,7 +42,7 @@ To use the `error` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["error"] }
+frozen-core = { version = "0.0.20", features = ["error"] }
 ```
 
 ## Hints
@@ -53,7 +53,7 @@ To use the `hints` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["hints"] }
+frozen-core = { version = "0.0.20", features = ["hints"] }
 ```
 
 ## BufPool
@@ -95,7 +95,7 @@ To use the `ffile` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["ffile"] }
+frozen-core = { version = "0.0.20", features = ["ffile"] }
 ```
 
 `FrozenFile` is currently available on the following platforms,
@@ -117,7 +117,7 @@ To use the `fmmap` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["fmmap"] }
+frozen-core = { version = "0.0.20", features = ["fmmap"] }
 ```
 
 `FrozenMMap` is currently available on the following platforms,
@@ -146,7 +146,7 @@ To use the `crc32` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["crc32"] }
+frozen-core = { version = "0.0.20", features = ["crc32"] }
 ```
 
 `Crc32C` is available on following architectures,
@@ -193,7 +193,7 @@ To use the `bpool` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["bpool"] }
+frozen-core = { version = "0.0.20", features = ["bpool"] }
 ```
 
 Following are latency measurements for allocation across different backends and configurations.
@@ -260,7 +260,7 @@ To use the `mpscq` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["mpscq"] }
+frozen-core = { version = "0.0.20", features = ["mpscq"] }
 ```
 
 Following are latency measurements for push, drain, and combined operations,
@@ -327,5 +327,5 @@ To use the `fpipe` module, add it as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.19", features = ["fpipe"] }
+frozen-core = { version = "0.0.20", features = ["fpipe"] }
 ```
