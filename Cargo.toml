@@ -56,11 +56,6 @@ harness = false
 required-features = ["crc32"]
 
 [[bench]]
-name = "bpool"
-harness = false
-required-features = ["bpool"]
-
-[[bench]]
 name = "bufpool"
 harness = false
 required-features = ["bufpool"]
