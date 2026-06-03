@@ -101,10 +101,7 @@ impl<T> MPSCQueue<T> {
 
         loop {
             unsafe { (*node).next = head };
-            match self
-                .head
-                .compare_exchange_weak(head, node, atomic::Ordering::AcqRel, atomic::Ordering::Relaxed)
-            {
+            match self.head.compare_exchange_weak(head, node, atomic::Ordering::AcqRel, atomic::Ordering::Relaxed) {
                 Ok(_) => return,
                 Err(h) => head = h,
             }
@@ -157,9 +154,7 @@ impl<T> MPSCQueue<T> {
 
 impl<T> Default for MPSCQueue<T> {
     fn default() -> Self {
-        Self {
-            head: atomic::AtomicPtr::new(ptr::null_mut()),
-        }
+        Self { head: atomic::AtomicPtr::new(ptr::null_mut()) }
     }
 }
 
@@ -182,10 +177,7 @@ struct Node<T> {
 
 impl<T> Node<T> {
     fn new(value: T) -> *mut Self {
-        Box::into_raw(Box::new(Self {
-            next: ptr::null_mut(),
-            value,
-        }))
+        Box::into_raw(Box::new(Self { next: ptr::null_mut(), value }))
     }
 }
 

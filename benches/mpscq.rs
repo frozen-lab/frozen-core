@@ -1,7 +1,7 @@
 //! Benchmarks for `mpscq` module
 //! Run using: `taskset -c 2,3,4 cargo bench --bench mpscq --features=mpscq`
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use frozen_core::mpscq::MPSCQueue;
 use std::hint::black_box;
 

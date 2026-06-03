@@ -57,10 +57,7 @@ impl FrozenError {
     /// ```
     #[inline(always)]
     pub fn new(module: u8, domain: u8, code: ErrCode, errmsg: &str) -> Self {
-        Self {
-            id: error_id(module, domain, code.reason),
-            context: format!("[{}] {}", code.detail, errmsg),
-        }
+        Self { id: error_id(module, domain, code.reason), context: format!("[{}] {}", code.detail, errmsg) }
     }
 
     /// Construct a new [`FrozenError`] from raw [`Error`] object
@@ -79,10 +76,7 @@ impl FrozenError {
     /// ```
     #[inline(always)]
     pub fn new_raw<E: std::fmt::Display>(module: u8, domain: u8, code: ErrCode, err: E) -> Self {
-        Self {
-            id: error_id(module, domain, code.reason),
-            context: format!("[{}] {}", code.detail, err),
-        }
+        Self { id: error_id(module, domain, code.reason), context: format!("[{}] {}", code.detail, err) }
     }
 
     /// Compare two errors by their encoded id's
