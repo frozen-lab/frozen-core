@@ -1,6 +1,6 @@
 [package]
 edition = "2024"
-version = "0.0.20"
+version = "0.0.21"
 name = "frozen-core"
 description = "Custom implementations and core utilities for frozen-lab crates"
 readme = "README.md"
