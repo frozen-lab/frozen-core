@@ -1,11 +1,10 @@
 ---
 name: Performance
 about: Performance optimization
-title: 'PERF: '
+title: 'perf: '
 labels: performance
 assignees: adityamotale
 type: Task
-
 ---
 
 ## Summary
@@ -14,14 +13,6 @@ Briefly describe the performance problem or improvement opportunity. It may incl
 
 - What is slow / inefficient?
 - Where is it observed? (module / function / feature)
-
-## Current Observed Behavior
-
-Describe the current performance characteristics, including (but not limited to),
-
-- Throughput / latency (if known)
-- Bench results (if available)
-- Observed limitations (e.g. Hardware limitations)
 
 ## Proposed Optimization
 
@@ -38,7 +29,3 @@ Estimate the imporvements, including (but not limited to),
 - Throughput (e.g. +2x)
 - Latency reduction (e.g. 24%)
 - Resource usage (CPU, memory)
-
-## Notes
-
-Add any additional context, constraints or references

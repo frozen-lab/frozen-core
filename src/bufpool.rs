@@ -1,45 +1,67 @@
-//! A buffer pool implementation with dynamic memory allocations
+//! A low-latency memory-budgeted buffer pool to manage fixed-sized buffer allocations
 //!
-//! ## Memory Allocation
+//! ## Memory Allocations
 //!
-//! Allocations are directly allocated using the global memory allocator rather then maintaining a pre-allocated
-//! memory pool.
+//! All the allocations are allocated using the global memory allocator as requested (on-the-fly).
 //!
-//! Every allocation reserves a memory budget and only after is allowed to allocate memory, otherwise faced with
-//! backpressure to limit the total size of memory used. So the memory usage stays bounded through memory budgeting
-//! rather then a fixed-capacity memory pool.
+//! While a single allocation retunred as [`BufPoolAllocation`] is a large contineous slice of
+//! memory w/ size as `BufPoolCfg::buffer_size.bytes() * n_buffers`.
+//!
+//! Memory layout structure,
+//!
+//! ```text
+//! allocation = [[buf0][buf1][buf2]]
+//! where,
+//!   - every buffer is of size `buffer_size`
+//!   - each buffer is pointed using `*mut u8`
+//! ```
+//!
+//! ## Backpressure
+//!
+//! Every allocation reserves a memory budget and is only allowed to allocate memory if enough
+//! budget (i.e. memory space) is available. Otherwise, the caller is blocked/polled till enough
+//! space is available.
+//!
+//! When the [`BufPoolAllocation`] and all its references are dropped, the underlying memory is
+//! deallocated while relaxing the budget and dropping the backpressure (if any).
+//!
+//! _NOTE:_ There is no faireness guarantee for the caller's who are polled when faced with
+//! backpressure, as the waiting callers are awaken opportunistically.
 //!
 //! ## Benchmarks
 //!
-//! Allocation latency for `N` buffers,
+//! Observed measurements of latency and throughput,
+//!
+//! ```md
+//! | Metric                       | Value              |
+//! |:-----------------------------|:-------------------|
+//! | Allocation Latency (avg)     | ~254 nanosecond    |
+//! | Allocation Throughput (avg)  | ~3.94 million/sec  |
+//! ```
+//!
+//! _NOTE:_ All measurements includes the complete RAII lifecycle (i.e. allocation + deallocation).
+//!
+//! Observed allocation latency for `N` buffers,
 //!
 //! ```md
 //! | Buffers  | Latency  |
 //! |:---------|:---------|
-//! | 1        | 246 ns   |
+//! | 0x01     | 246 ns   |
 //! | 0x10     | 251 ns   |
 //! | 0x400    | 300 ns   |
 //! ```
 //!
-//! Allocation throughput,
-//!
-//! ```md
-//! | Metric              | Value         |
-//! |:--------------------|:--------------|
-//! | Allocations / sec   | ~3.94 Million |
-//! | Avg latency / alloc | ~254 ns       |
-//! ```
-//!
-//! *NOTE:* Measurements include allocation and deallocation.
+//! _INFO:_ As seen, the allocation latency stays near constant irrespective to the size of buffers
+//! and the allocated bytes.
 //!
 //! Environment used for benching,
 //!
-//! - OS: NixOS (WSL2)
-//! - Architecture: x86_64
-//! - Memory: 8 GiB RAM (DDR4)
-//! - Rust: rustc 1.86.0 w/ cargo 1.86.0
-//! - Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
-//! - CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
+//! * OS: NixOS (WSL2)
+//! * Architecture: x86_64
+//! * Memory: 8 GiB RAM (DDR4)
+//! * Rust: rustc 1.86.0 w/ cargo 1.86.0
+//! * Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+//! * CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
 //!
 //! ## Example
 //!
@@ -49,35 +71,34 @@
 //!     utils::BufferSize,
 //! };
 //!
+//! const BUF_SIZE: BufferSize = BufferSize::S16;
+//!
 //! let pool = BufPool::new(BufPoolCfg {
-//!     module_id: 0,
-//!     buffer_size: BufferSize::S16,
-//!     max_memory: 0x0A * 0x100,
+//!     buffer_size: BUF_SIZE,
+//!     max_memory: BUF_SIZE as usize * 0x40,
 //! });
 //!
 //! let alloc = pool.allocate(0x2A);
 //!
 //! assert_eq!(alloc.length(), 0x2A);
 //! assert!(!alloc.first().is_null());
-//! assert_eq!(alloc.allocated_bytes(), BufferSize::S16.bytes() * 0x2A);
+//! assert_eq!(alloc.allocated_bytes(), BUF_SIZE as usize * 0x2A);
 //!
 //! let ptrs: Vec<BufferPointer> = alloc.iter().collect();
 //! assert_eq!(ptrs.len(), 0x2A);
 //! ```
 
-use crate::utils::BufferSize;
 use std::{alloc, ptr, sync, sync::atomic};
 
-/// Raw pointer to a single buffer in memory allocated using [`BufPool::allocate`]
+/// An unsafe pointer to an individual in memory buffer
 ///
 /// ## Safety
 ///
-/// As the pointer is untyped and uninitialized, caller are responsible for:
+/// The pointer is untyped and uninitialized. Caller is responsible for:
 ///
-/// - Writes stay within the buffer boundry
-/// - Reads only occur after initilization (write)
-///
-/// *NOTE:* The pointer must never outlive the lifetime of [`BufPoolAllocation`] object.
+/// * Writes stay within the bounds, while the size of each buffer is [`BufPoolCfg::buffer_size`]
+/// * Reads should only occur after initilization/write is completed on the buffer
+/// * The pointer must not outlive the lifetime of [`BufPoolAllocation`] object
 ///
 /// ## Example
 ///
@@ -87,15 +108,17 @@ use std::{alloc, ptr, sync, sync::atomic};
 ///     utils::BufferSize,
 /// };
 ///
+/// const BUF_SIZE: BufferSize = BufferSize::S16;
+/// const BUFFER: [u8; BUF_SIZE as usize] = [1u8; BUF_SIZE as usize];
+///
 /// let pool = BufPool::new(BufPoolCfg {
-///     module_id: 0,
-///     buffer_size: BufferSize::S16,
-///     max_memory: 0x0A * 0x10,
+///     buffer_size: BUF_SIZE,
+///     max_memory: BUF_SIZE as usize * 0x0A,
 /// });
 ///
 /// let alloc = pool.allocate(1);
 /// unsafe {
-///     alloc.first().write(0xAA);
+///     std::ptr::copy_nonoverlapping(BUFFER.as_ptr(), alloc.first(), BUF_SIZE as usize);
 /// }
 /// ```
 pub type BufferPointer = *mut u8;
@@ -107,10 +130,11 @@ pub type BufferPointer = *mut u8;
 /// ```
 /// use frozen_core::{bufpool::BufPoolCfg, utils::BufferSize};
 ///
+/// const BUF_SIZE: BufferSize = BufferSize::S64;
+///
 /// let cfg = BufPoolCfg {
-///     module_id: 0,
-///     max_memory: 0x10000,
-///     buffer_size: BufferSize::S64,
+///     buffer_size: BUF_SIZE,
+///     max_memory: BUF_SIZE as usize * 0x1000,
 /// };
 ///
 /// assert_ne!(cfg.max_memory, 0);
@@ -118,42 +142,59 @@ pub type BufferPointer = *mut u8;
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BufPoolCfg {
-    /// Identifier used for error propagation by [`frozen_core::error::FrozenErr`]
-    pub module_id: u8,
+    /// Size (in bytes) of an indivdual buffer unit allocated
+    pub buffer_size: crate::utils::BufferSize,
 
-    /// Size (in bytes) of a single buffer unit returned via [`BufPoolAllocation`] upon successful allocation
-    pub buffer_size: BufferSize,
-
-    /// Maximum allowed memory (in bytes) to be allocated by [`BufPool`]
+    /// Maximum allowed memory (in bytes) to be simultaneosuly allocated by [`BufPool`]
     ///
-    /// *IMPORTANT:* When trying to allocate more memory then [`BufPoolCfg::max_memory`] via [`BufPool::allocate`],
-    /// a deadlock will take place due to memory budgeting in place. Caller must make sure the value is high enough
-    /// to avoid this scenerio.
+    /// _IMPORTANT:_ When trying to allocate more memory then [`BufPoolCfg::max_memory`] via
+    /// [`BufPool::allocate`], a deadlock will happen due to memory budgeting in place. The caller
+    /// must make sure the `max_meory` is high enough to avoid this scenerio.
     ///
-    /// After the limit is exhausted, incoming allocation request are polled using backpressure to limit the size
-    /// of memory being used. The polling ends when existing allocations are dropped from memory decrementing current
-    /// memory usage.
-    ///
-    /// Backpressure can be handy while running in resource constrained environments to help limit the amount of
-    /// resources being used by the system.
-    ///
-    /// *NOTE:* To avoid backpressure, set the `max_memory` to an arbitrary large value. This would not have any direct
-    /// impact on performance or resource usage, just that it'll try not to constrain the caller.
+    /// _NOTE:_ To avoid backpressure, set the `max_memory` to an arbitrary large value. This
+    /// would not have any direct impact on performance or resource usage, and will avoid
+    /// backpressure under heavy workload.
     pub max_memory: usize,
 }
 
-/// A buffer pool implementation with dynamic memory allocations
+/// An implementation of a low-latency memory-budgeted buffer pool managing fixed-sized buffer
+/// allocations
 ///
-/// ## Memory Budgeting
+/// ## Blocking `drop`
 ///
-/// The total amout of memory simultenously allocated by the pool is limited by [`BufPoolCfg::max_memory`]. The caller
-/// is blocked until previous allocations are dropped and previously allocated memory is deallocated.
+/// Dropping the [`BufPool`] instance from memory blocks unitl all the allocated instances of
+/// [`BufPoolAllocations`] and all there references are dropped from memory.
 ///
-/// ## Graceful Shutdown
+/// This is in place to avoid memory leaks, as well as to enable sending [`BufPoolAllocation`]
+/// objects across threads while being tied to the lifecyle of [`BufPool`].
 ///
-/// Dropping the [`BufPool`] blocks until all the allocated [`BufPoolAllocation`] and there reference are dropped from
-/// memory. This is done to prevent memory leaks, as well as to enable transfer of [`BufPoolAllocation`] across
-/// threads.
+/// ## Memory Allocations
+///
+/// All the allocations are allocated using the global memory allocator as requested (on-the-fly).
+///
+/// While a single allocation retunred as [`BufPoolAllocation`] is a large contineous slice of
+/// memory w/ size as `BufPoolCfg::buffer_size.bytes() * n_buffers`.
+///
+/// Memory layout structure,
+///
+/// ```text
+/// allocation = [[buf0][buf1][buf2]]
+/// where,
+///   - every buffer is of size `buffer_size`
+///   - each buffer is pointed using `*mut u8`
+/// ```
+///
+/// ## Backpressure
+///
+/// Every allocation reserves a memory budget and is only allowed to allocate memory if enough
+/// budget (i.e. memory space) is available. Otherwise, the caller is blocked/polled till enough
+/// space is available.
+///
+/// When the [`BufPoolAllocation`] and all its references are dropped, the underlying memory is
+/// deallocated while relaxing the budget and dropping the backpressure (if any).
+///
+/// _NOTE:_ There is no faireness guarantee for the caller's who are polled when faced with
+/// backpressure, as the waiting callers are awaken opportunistically.
 ///
 /// ## Example
 ///
@@ -163,20 +204,21 @@ pub struct BufPoolCfg {
 ///     utils::BufferSize,
 /// };
 ///
+/// const BUF_SIZE: BufferSize = BufferSize::S16;
+///
 /// let pool = BufPool::new(BufPoolCfg {
-///     module_id: 0,
-///     buffer_size: BufferSize::S16,
-///     max_memory: 0x0A * 0x100,
+///     buffer_size: BUF_SIZE,
+///     max_memory: BUF_SIZE as usize * 0x40,
 /// });
 ///
-/// let alloc = pool.allocate(0x2A);
+/// let alloc = pool.allocate(0x30);
 ///
-/// assert_eq!(alloc.length(), 0x2A);
+/// assert_eq!(alloc.length(), 0x30);
 /// assert!(!alloc.first().is_null());
-/// assert_eq!(alloc.allocated_bytes(), BufferSize::S16.bytes() * 0x2A);
+/// assert_eq!(alloc.allocated_bytes(), BUF_SIZE as usize * 0x30);
 ///
 /// let ptrs: Vec<BufferPointer> = alloc.iter().collect();
-/// assert_eq!(ptrs.len(), 0x2A);
+/// assert_eq!(ptrs.len(), 0x30);
 /// ```
 #[derive(Debug)]
 pub struct BufPool {
@@ -195,13 +237,10 @@ unsafe impl Sync for BufPool {}
 impl BufPool {
     /// Create a new instance of [`BufPool`]
     ///
-    /// *NOTE:* There are no pre-allocated buffers, and all the allocations are allocated using gloabl allocator
-    /// on-the-fly
-    ///
     /// ## Debug Assertions
     ///
-    /// In debug builds, this function uses `debug_assertion` to prevent invalid configurations. Caller must refer
-    /// to [`BufPoolCfg`] for detailed info on the config params.
+    /// In debug builds, this function uses `debug_assertion` to prevent invalid configurations.
+    /// Caller must refer to [`BufPoolCfg`] for details about the config params.
     ///
     /// ## Example
     ///
@@ -211,21 +250,24 @@ impl BufPool {
     ///     utils::BufferSize,
     /// };
     ///
+    /// const BUF_SIZE: BufferSize = BufferSize::S16;
+    ///
     /// let pool = BufPool::new(BufPoolCfg {
-    ///     module_id: 0,
-    ///     buffer_size: BufferSize::S16,
-    ///     max_memory: 0x10 * 0x0A,
+    ///     buffer_size: BUF_SIZE,
+    ///     max_memory: BUF_SIZE as usize * 0x0A,
     /// });
     ///
     /// let alloc = pool.allocate(1);
+    ///
     /// assert_eq!(alloc.length(), 1);
+    /// assert_eq!(alloc.allocated_bytes(), BUF_SIZE as usize);
     /// ```
     #[inline]
     pub fn new(cfg: BufPoolCfg) -> Self {
         // sanity check
         debug_assert!(
             cfg.buffer_size.bytes() < cfg.max_memory,
-            "MAX_MEMORY should always be larger then the BUFFER_SIZE"
+            "MAX_MEMORY must always be larger than the BUFFER_SIZE"
         );
 
         Self {
@@ -241,44 +283,38 @@ impl BufPool {
 
     /// Allocate `required` number of buffers each of [`BufPoolCfg::buffer_size`] size
     ///
-    /// ## Backpressure
+    /// ## Allocation Layout
     ///
-    /// If allocating requested memory (i.e. `required * BufPoolCfg::buffer_size`) would exceed the configured memory
-    /// budget, i.e. [`BufPoolCfg::max_memory`], the caller is blocked until previous allocations are dropped and
-    /// previously allocated memory is deallocated.
-    ///
-    /// ## Memory Layout
-    ///
-    /// All the buffers in the [`BufPoolAlocation`] object, are stored contiguously in memory as a single block of
-    /// memory,
+    /// The allocation is a large contineous slice of memory w/ size as
     ///
     /// ```text
-    /// let allocated_buffer = vec![u8; required * BUFFER_SIZE];
+    /// BufPoolCfg::buffer_size.bytes() * n_buffers
     /// ```
     ///
-    /// ## Memory Allocation
+    /// Memory layout structure,
     ///
-    /// Allocations are directly allocated using the global memory allocator rather then maintaining a pre-allocated
-    /// memory pool.
-    ///
-    /// Every allocation reserves a memory budget and only after is allowed to allocate memory, otherwise faced with
-    /// backpressure to limit the total size of memory used. So the memory usage stays bounded through memory budgeting
-    /// rather then a fixed-capacity memory pool.
+    /// ```text
+    /// allocation = [[buf0][buf1][buf2]]
+    /// where,
+    ///   - every buffer is of size `buffer_size`
+    ///   - each buffer is pointed using `*mut u8`
+    /// ```
     ///
     /// ## RAII Safety
     ///
-    /// The allocated object, i.e. [`BufPoolAllocation`], is RAII safe, as the the underlying memory is deallocated as
-    /// soon as the last referece to the object is dropped, while also relaxing the memory budget to eliminate the
-    /// backpressure (if any).
+    /// The allocation object, i.e. [`BufPoolAllocation`], is RAII safe. The allocated memory is
+    /// automatically deallocated as soon as the last reference to the object is dropped, while also
+    /// relaxing the memory budget to eliminate backpressure (if any).
     ///
     /// ## Important Considerations
     ///
-    /// The number of buffers required should never exceed `u16::MAX`. This is an abstract soft limit and should be
-    /// enforced via public interface to avoid any weird exhaustion issues or bugs across the storage system.
+    /// The number of buffers required should never exceed `u16::MAX`. This is an abstract soft
+    /// limit and should be enforced by the public interface to avoid any weird exhaustion issues
+    /// or unknown bugs across the storage system.
     ///
-    /// As `u16::MAX` is large enough value to almost never cause any problems for a single write operation, this soft
-    /// limit acts as a guidline to safely operate arithmatic operations across storage engine's, including but not
-    /// limited to [`frozen_core`].
+    /// As `u16::MAX` is large enough value to almost never cause any problems for a single write
+    /// operation, this soft limit acts as a guidline to safely operate with arithmatic operations
+    /// across storage engine(s), including but not limited to [`frozen_core`].
     ///
     /// ## Example
     ///
@@ -288,17 +324,18 @@ impl BufPool {
     ///     utils::BufferSize,
     /// };
     ///
+    /// const BUF_SIZE: BufferSize = BufferSize::S16;
+    ///
     /// let pool = BufPool::new(BufPoolCfg {
-    ///     module_id: 0,
-    ///     buffer_size: BufferSize::S16,
-    ///     max_memory: 0x0A * 0x14,
+    ///     buffer_size: BUF_SIZE,
+    ///     max_memory: BUF_SIZE as usize * 0x14,
     /// });
     ///
     /// let alloc = pool.allocate(0x0A);
     ///
     /// assert_eq!(alloc.length(), 0x0A);
     /// assert!(!alloc.first().is_null());
-    /// assert_eq!(alloc.allocated_bytes(), BufferSize::S16.bytes() * 0x0A);
+    /// assert_eq!(alloc.allocated_bytes(), BUF_SIZE as usize * 0x0A);
     ///
     /// let ptrs: Vec<BufferPointer> = alloc.iter().collect();
     /// assert_eq!(ptrs.len(), 0x0A);
@@ -339,30 +376,25 @@ impl BufPool {
         let pointer = allocate_layout(layout);
         self.active_allocations.fetch_add(1, atomic::Ordering::Relaxed);
 
-        BufPoolAllocation {
-            layout,
-            pointer,
-            required_bytes,
-            buffers: required,
-            pool: ptr::NonNull::from(self),
-        }
+        BufPoolAllocation { layout, pointer, required_bytes, buffers: required, pool: ptr::NonNull::from(self) }
     }
 
     /// Applies backpressure until enough memory budget is available for the allocation
     ///
-    /// ## Why we ignore [`std::sync::PoisonError`]?
+    /// ## Why we ignore [`std::sync::PoisonError`]
     ///
-    /// The mutex used for lock, is solely used as a parking primitive for [`Condvar`] and does not protect any mutable
-    /// state. All the pool invariants and accounting are maintained via atomics and are completely seperated from
-    /// the mutex.
+    /// The mutex used for lock, is solely used as a parking primitive for [`Condvar`] and does not
+    /// protect any mutable state. All the pool invariants and accounting are maintained via
+    /// atomics and are completely seperated from the mutex.
     ///
-    /// A poisoned mutex only indicates that another tx panicked while holding the lock, and indicates an inconsistent
-    /// state of the protected value. Since no state can be left partially modified under this lock, there is no
-    /// possible consistency risk to recover from and propagating the poison error would only introduce unnecessary
-    /// failures into the allocation path.
+    /// A poisoned mutex only indicates that another tx panicked while holding the lock, and
+    /// indicates an inconsistent state of the protected value. Since no state can be left
+    /// partially modified under this lock, there is no possible consistency risk to recover from
+    /// and propagating the poison error would only introduce unnecessary failures into the
+    /// allocation path.
     ///
-    /// Therefore, as best effort, we consume the [`std::sync::PoisonError`] and continue operating with the recovered
-    /// guard.
+    /// Therefore, as best effort, we consume the [`std::sync::PoisonError`] and continue operating
+    /// with the recovered guard.
     #[inline]
     fn backpressure(&self, required_bytes: usize) {
         let mut guard = self.allocation_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -373,8 +405,9 @@ impl BufPool {
 }
 
 impl Drop for BufPool {
-    /// *NOTE:* See [`BufPool::backpressure`] for rationale behind poison recovery
     fn drop(&mut self) {
+        // NOTE: See [`BufPool::backpressure`] implementation for rationale behind poison recovery
+
         let mut guard = self.shutdown_lock.lock().unwrap_or_else(|e| e.into_inner());
         while self.active_allocations.load(atomic::Ordering::Acquire) != 0 {
             guard = self.shutdown_cv.wait(guard).unwrap_or_else(|e| e.into_inner());
@@ -382,21 +415,13 @@ impl Drop for BufPool {
     }
 }
 
-/// A RAII safe allocation object returned by [`BufPool::allocate`]
+/// A RAII safe allocation object containing allocated buffers
 ///
 /// ## Lifetime
 ///
-/// The object may/can outlive the scope that created it, while also being able to transfer across threads.
-///
-/// Internally, the [`BufPool`] tracks all the active allocations and delays the shutdown/drop until every allocation
-/// and all there references are dropped from memory.
-///
-/// ## RAII Safety
-///
-/// As soon as the object and all its references are dropped, the underlying memory allocation is deallocated to prevent
-/// any memory leaks. This also pins the allocation as long as the allocation object stays in the memory.
-///
-/// **NOTE:** The memory allocation must never outlive the scope that created them, i.e. [`BufPoolAllocation`]
+/// The object can/may outlive the scope that created it, while also being able to transfer across
+/// threads. As, internally the [`BufPool`] tracks all the active allocations and delays the drop
+/// until every allocation and all there references are dropped from memory.
 ///
 /// ## Example
 ///
@@ -406,17 +431,18 @@ impl Drop for BufPool {
 ///     utils::BufferSize,
 /// };
 ///
+/// const BUF_SIZE: BufferSize = BufferSize::S16;
+///
 /// let pool = BufPool::new(BufPoolCfg {
-///     module_id: 0,
-///     buffer_size: BufferSize::S16,
-///     max_memory: 0x0A * 0x14,
+///     buffer_size: BUF_SIZE,
+///     max_memory: BUF_SIZE as usize * 0x10,
 /// });
 ///
 /// let alloc = pool.allocate(0x0A);
 ///
 /// assert_eq!(alloc.length(), 0x0A);
 /// assert!(!alloc.first().is_null());
-/// assert_eq!(alloc.allocated_bytes(), BufferSize::S16.bytes() * 0x0A);
+/// assert_eq!(alloc.allocated_bytes(), BUF_SIZE as usize * 0x0A);
 ///
 /// let ptrs: Vec<BufferPointer> = alloc.iter().collect();
 /// assert_eq!(ptrs.len(), 0x0A);
@@ -433,9 +459,10 @@ pub struct BufPoolAllocation {
 unsafe impl Send for BufPoolAllocation {}
 
 impl BufPoolAllocation {
-    /// Returns a [`BufferPointer`] to the first buffer in the allocation
+    /// Returns a [`BufferPointer`] to the first buffer from the allocated list of buffers
     ///
-    /// *NOTE:* Returned [`BufferPointer`] can also be used as a _base_pointer_ for the entire allocated memory slice.
+    /// _NOTE:_ The returned [`BufferPointer`] can also be used as a _base_pointer_ to operate on
+    /// the entire allocated memory slice.
     ///
     /// ## Example
     ///
@@ -445,10 +472,11 @@ impl BufPoolAllocation {
     ///     utils::BufferSize,
     /// };
     ///
+    /// const BUF_SIZE: BufferSize = BufferSize::S32;
+    ///
     /// let pool = BufPool::new(BufPoolCfg {
-    ///     module_id: 0,
-    ///     buffer_size: BufferSize::S16,
-    ///     max_memory: 0x10 * 0x0A,
+    ///     buffer_size: BUF_SIZE,
+    ///     max_memory: BUF_SIZE as usize * 0x0A,
     /// });
     ///
     /// let alloc = pool.allocate(0x0A);
@@ -459,9 +487,10 @@ impl BufPoolAllocation {
         self.pointer.as_ptr()
     }
 
-    /// Returns the number of buffers allocated
+    /// Returns the total number of allocated buffers
     ///
-    /// *NOTE:* Returned value is always equal to the `required` value used while [`BufPool::allocate`].
+    /// _IMPORTANT:_ The returned value is always equal to the `required` value using while
+    /// calling [`BufPool::allocate`].
     ///
     /// ## Example
     ///
@@ -471,10 +500,11 @@ impl BufPoolAllocation {
     ///     utils::BufferSize,
     /// };
     ///
+    /// const BUF_SIZE: BufferSize = BufferSize::S64;
+    ///
     /// let pool = BufPool::new(BufPoolCfg {
-    ///     module_id: 0,
-    ///     buffer_size: BufferSize::S16,
-    ///     max_memory: 0x10 * 0x0A,
+    ///     buffer_size: BUF_SIZE,
+    ///     max_memory: BUF_SIZE as usize * 0x0A,
     /// });
     ///
     /// let alloc = pool.allocate(0x0A);
@@ -495,23 +525,26 @@ impl BufPoolAllocation {
     ///     utils::BufferSize,
     /// };
     ///
+    /// const BUF_SIZE: BufferSize = BufferSize::S16;
+    ///
     /// let pool = BufPool::new(BufPoolCfg {
-    ///     module_id: 0,
-    ///     buffer_size: BufferSize::S16,
-    ///     max_memory: 0x10 * 0x0A,
+    ///     buffer_size: BUF_SIZE,
+    ///     max_memory: BUF_SIZE as usize * 0x0A,
     /// });
     ///
     /// let alloc = pool.allocate(0x0A);
-    /// assert_eq!(alloc.allocated_bytes(), BufferSize::S16.bytes() * 0x0A);
+    /// assert_eq!(alloc.allocated_bytes(), BUF_SIZE as usize * 0x0A);
     /// ```
     #[inline]
     pub const fn allocated_bytes(&self) -> usize {
         self.required_bytes
     }
 
-    /// A custom [`Iterator`] implementation to enable iteration over every allocated buffer in [`BufPoolAllocation`]
+    /// A custom [`Iterator`] implementation to enable iteration over the list of allocated buffers
+    /// from [`BufPoolAllocation`]
     ///
-    /// *NOTE:* Each yielded pointer references a distinct buffer separated by [`BufPoolCfg::buffer_size`] bytes.
+    /// _NOTE:_ Each yielded pointer refers to a unique individual buffer each of size
+    /// [`BufPoolCfg::buffer_size`].
     ///
     /// ## Example
     ///
@@ -521,14 +554,16 @@ impl BufPoolAllocation {
     ///     utils::BufferSize,
     /// };
     ///
+    /// const BUF_SIZE: BufferSize = BufferSize::S16;
+    ///
     /// let pool = BufPool::new(BufPoolCfg {
-    ///     module_id: 0,
-    ///     buffer_size: BufferSize::S16,
-    ///     max_memory: 0x10 * 0x14,
+    ///     buffer_size: BUF_SIZE,
+    ///     max_memory: BUF_SIZE as usize * 0x14,
     /// });
     ///
     /// let alloc = pool.allocate(0x0A);
     /// let ptrs: Vec<BufferPointer> = alloc.iter().collect();
+    ///
     /// assert_eq!(ptrs.len(), 0x0A);
     /// ```
     #[inline]
@@ -547,8 +582,7 @@ impl Drop for BufPoolAllocation {
         let pool = unsafe { self.pool.as_ref() };
         deallocate_memory(self.pointer, self.layout);
 
-        pool.allocated_memory
-            .fetch_sub(self.required_bytes, atomic::Ordering::Release);
+        pool.allocated_memory.fetch_sub(self.required_bytes, atomic::Ordering::Release);
         pool.allocation_cv.notify_one();
 
         if pool.active_allocations.fetch_sub(1, atomic::Ordering::Release) == 1 {
@@ -557,9 +591,10 @@ impl Drop for BufPoolAllocation {
     }
 }
 
-/// Iterator over all buffers belonging to a [`BufPoolAllocation`]
+/// A custom [`Iterator`] object to iterate over the list of allocated buffers
 ///
-/// Buffers are yielded in allocation order and are backed by a single contiguous memory region.
+/// _NOTE:_ Buffers are yielded in allocation order and are backed by a single contiguous memory
+/// region.
 ///
 /// ## Example
 ///
@@ -569,14 +604,16 @@ impl Drop for BufPoolAllocation {
 ///     utils::BufferSize,
 /// };
 ///
+/// const BUF_SIZE: BufferSize = BufferSize::S32;
+///
 /// let pool = BufPool::new(BufPoolCfg {
-///     module_id: 0,
-///     buffer_size: BufferSize::S16,
-///     max_memory: 0x10 * 0x14,
+///     buffer_size: BUF_SIZE,
+///     max_memory: BUF_SIZE as usize * 0x14,
 /// });
 ///
 /// let alloc = pool.allocate(0x0A);
 /// let ptrs: Vec<BufferPointer> = alloc.iter().collect();
+///
 /// assert_eq!(ptrs.len(), 0x0A);
 /// ```
 #[derive(Debug)]
@@ -606,8 +643,8 @@ impl Iterator for BufPoolAllocationIter {
 
 /// Creates a array layout with given `capacity`
 ///
-/// *NOTE:* Use of `unwrap` is totally safe as the panic, if any, would be caught by unit tests and would be the
-/// indication of incorrect impl and not any runtime failures
+/// _NOTE:_ Use of `unwrap` is totally safe as the panic, if any, would be caught by unit tests and
+/// would be the indication of incorrect impl and not any runtime failures.
 #[inline]
 fn create_layout(required_bytes: usize) -> alloc::Layout {
     match alloc::Layout::array::<u8>(required_bytes) {
@@ -620,23 +657,26 @@ fn create_layout(required_bytes: usize) -> alloc::Layout {
 ///
 /// ## Allocation Failure
 ///
-/// If the allocator is unable to satisfy the request (typically due to an OOM condition), [`alloc::alloc`] returns
-/// a null pointer. In such cases we delegate to [`alloc::handle_alloc_error`], matching the behavior of std library
+/// If the allocator is unable to satisfy the request (typically due to an OOM condition),
+/// [`alloc::alloc`] returns a null pointer.
+///
+/// In such cases we delegate to [`alloc::handle_alloc_error`], matching the behavior of std library
 /// types such as [`Vec`], [`Box`] and [`String`].
 ///
-/// This path aborts the process and never returns. Allocation failures are therefore treated as fatal runtime conditions
-/// rather than recoverable errors.
+/// This path aborts the process and never returns. Allocation failures are therefore treated as
+/// fatal runtime conditions rather than recoverable errors.
 ///
-/// Under normal operation this path should never be reached, as memory usage is expected to be bounded by the buffer
-/// pools memory budget and backpressure mechanisms.
+/// Under normal operation this path should never be reached, as memory usage is expected to be
+/// bounded by the buffer pools memory budget and backpressure mechanisms.
 ///
-/// ## Why not return `FrozenErr`?
+/// ## Why not return `FrozenErr`
 ///
-/// A null return from [`alloc::alloc`] indicates that the global allocator itself was unable to satisfy the request.
+/// A null return from [`alloc::alloc`] indicates that the global allocator itself was unable to
+/// satisfy the request.
 ///
-/// Delegating to [`alloc::handle_alloc_error`] matches the behavior of standard library containers and avoids continuing
-/// execution after a catastrophic allocator failure, where further allocations required for error handling, logging
-/// or recovery may also fail.
+/// Delegating to [`alloc::handle_alloc_error`] matches the behavior of standard library containers
+/// and avoids continuing execution after a catastrophic allocator failure, where further
+/// allocations required for error handling, logging or recovery may also fail.
 #[inline]
 fn allocate_layout(layout: alloc::Layout) -> ptr::NonNull<u8> {
     let pointer = unsafe { alloc::alloc(layout) };
@@ -646,7 +686,7 @@ fn allocate_layout(layout: alloc::Layout) -> ptr::NonNull<u8> {
     }
 }
 
-/// Deallocate the manually allocated slice of memory with help of given `pointer` and memory `layout`
+/// Deallocate the manually allocated slice of memory with help of given `pointer` and mem `layout`
 #[inline]
 fn deallocate_memory(pointer: ptr::NonNull<u8>, layout: alloc::Layout) {
     unsafe { alloc::dealloc(pointer.as_ptr(), layout) };
@@ -656,16 +696,11 @@ fn deallocate_memory(pointer: ptr::NonNull<u8>, layout: alloc::Layout) {
 mod tests {
     use super::*;
 
-    const MOD_ID: u8 = 0;
-    const BUF_SIZE: BufferSize = BufferSize::S32;
+    const BUF_SIZE: crate::utils::BufferSize = crate::utils::BufferSize::S32;
 
     #[inline]
     fn create_bufpool(max_mem: usize) -> BufPool {
-        BufPool::new(BufPoolCfg {
-            buffer_size: BUF_SIZE,
-            max_memory: max_mem,
-            module_id: MOD_ID,
-        })
+        BufPool::new(BufPoolCfg { buffer_size: BUF_SIZE, max_memory: max_mem })
     }
 
     #[test]
@@ -723,10 +758,7 @@ mod tests {
         let bpool = create_bufpool(BUF_SIZE.bytes() * 0x14);
         let alloc = bpool.allocate(0x10);
 
-        assert_eq!(
-            bpool.allocated_memory.load(atomic::Ordering::Acquire),
-            BUF_SIZE.bytes() * 0x10
-        );
+        assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), BUF_SIZE.bytes() * 0x10);
         drop(alloc);
         assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), 0);
     }
@@ -813,16 +845,10 @@ mod tests {
             let alloc1 = bpool.allocate(2);
             let alloc2 = bpool.allocate(2);
 
-            assert_eq!(
-                bpool.allocated_memory.load(atomic::Ordering::Acquire),
-                BUF_SIZE.bytes() * 4
-            );
+            assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), BUF_SIZE.bytes() * 4);
             drop(alloc1);
 
-            assert_eq!(
-                bpool.allocated_memory.load(atomic::Ordering::Acquire),
-                BUF_SIZE.bytes() * 2
-            );
+            assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), BUF_SIZE.bytes() * 2);
             drop(alloc2);
 
             assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), 0);

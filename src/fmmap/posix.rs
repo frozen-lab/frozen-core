@@ -1,9 +1,9 @@
 use super::{err, new_err};
-use crate::{error::FrozenRes, hints};
+use crate::{error::FrozenResult, hints};
 use core::{ffi::CStr, ptr};
 use libc::{
-    c_void, mmap, msync, munmap, off_t, size_t, strerror, EACCES, EAGAIN, EBADF, EBUSY, EINTR, EINVAL, EIO, ENODEV,
-    ENOMEM, EOVERFLOW, EPERM, ETXTBSY, MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
+    EACCES, EAGAIN, EBADF, EBUSY, EINTR, EINVAL, EIO, ENODEV, ENOMEM, EOVERFLOW, EPERM, ETXTBSY, MAP_FAILED,
+    MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, c_void, mmap, msync, munmap, off_t, size_t, strerror,
 };
 
 /// Base pointer for `mmap(2)` mapped memory
@@ -21,13 +21,13 @@ unsafe impl Sync for POSIXMMap {}
 
 impl POSIXMMap {
     /// Create a new [`POSIXMMap`] w/ given `fd` and `length`
-    pub(super) unsafe fn new(fd: i32, length: size_t) -> FrozenRes<Self> {
+    pub(super) unsafe fn new(fd: i32, length: size_t) -> FrozenResult<Self> {
         let ptr = mmap_raw(fd, length)?;
         Ok(Self(ptr))
     }
 
     /// Close [`POSIXMMap`] to give up allocated resources
-    pub(super) unsafe fn unmap(&self, length: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn unmap(&self, length: usize) -> FrozenResult<()> {
         munmap_raw(self.0, length)
     }
 
@@ -44,7 +44,7 @@ impl POSIXMMap {
     ///
     /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases, no progress
     /// is guaranteed, so the syscall must be retried
-    pub(super) unsafe fn sync(&self, length: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn sync(&self, length: usize) -> FrozenResult<()> {
         msync_raw(self.0, length)
     }
 
@@ -79,17 +79,10 @@ impl POSIXMMap {
 /// i.e. `sysconf(_SC_PAGESIZE)`, otherwise an `EINVAL` error is thrown
 ///
 /// For our usecase, we always map the entire file, hence this is never an issue for us
-unsafe fn mmap_raw(fd: i32, length: size_t) -> FrozenRes<TPtr> {
+unsafe fn mmap_raw(fd: i32, length: size_t) -> FrozenResult<TPtr> {
     let mut retries = 0; // only for EINTR errors
     loop {
-        let ptr = mmap(
-            ptr::null_mut(),
-            length,
-            PROT_WRITE | PROT_READ,
-            MAP_SHARED,
-            fd,
-            0 as off_t,
-        );
+        let ptr = mmap(ptr::null_mut(), length, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0 as off_t);
 
         if ptr == MAP_FAILED {
             let errno = last_errno();
@@ -124,7 +117,7 @@ unsafe fn mmap_raw(fd: i32, length: size_t) -> FrozenRes<TPtr> {
 }
 
 /// unmap the created memory mapping w/ `mummap(2)` by given ref `ptr` and `length`
-unsafe fn munmap_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
+unsafe fn munmap_raw(ptr: TPtr, length: size_t) -> FrozenResult<()> {
     if munmap(ptr as *mut c_void, length) == 0 {
         return Ok(());
     }
@@ -147,7 +140,7 @@ unsafe fn munmap_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
 /// This syscall by itself does not provide any durability guarantee, it's used as best-effort operation
 /// to explicitly push dirty mmaped pages into fs writeback, to aid hard sync calls like `fdatasync` on linux
 /// and `fnctl(F_FULLSYNC)` on mac
-unsafe fn msync_raw(ptr: TPtr, length: size_t) -> FrozenRes<()> {
+unsafe fn msync_raw(ptr: TPtr, length: size_t) -> FrozenResult<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
         let res = msync(ptr as *mut c_void, length, MS_SYNC);
@@ -222,12 +215,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
-        let file = FrozenFile::new::<MOD_ID>(FFCfg {
-            path,
-            chunk_size: CHUNK,
-            initial_chunk_amount: INIT_CHUNKS,
-        })
-        .expect("new FF");
+        let file = FrozenFile::new::<MOD_ID>(FFCfg { path, chunk_size: CHUNK, initial_chunk_amount: INIT_CHUNKS })
+            .expect("new FF");
 
         (dir, file)
     }
@@ -465,11 +454,7 @@ mod tests {
             // open + map + read
             unsafe {
                 let path = dir.path().join("tmp_map");
-                let cfg = FFCfg {
-                    path,
-                    chunk_size: CHUNK,
-                    initial_chunk_amount: INIT_CHUNKS,
-                };
+                let cfg = FFCfg { path, chunk_size: CHUNK, initial_chunk_amount: INIT_CHUNKS };
 
                 let file = FrozenFile::new::<MOD_ID>(cfg).expect("new FF");
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();

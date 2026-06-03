@@ -1,5 +1,20 @@
 # Changelog
 
+## `0.0.21`
+
+- Fixed following issues
+  - #33
+  - #34
+  - #37
+  - #38
+  - #41
+  - #42
+  - #43
+  - #44
+  - #46
+  - #48
+  - #50
+
 ## `0.0.20`
 
 - Implementation of `bufpool` module

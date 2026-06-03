@@ -1,8 +1,7 @@
 [package]
 edition = "2024"
-version = "0.0.20"
+version = "0.0.21"
 name = "frozen-core"
-exclude = ["shell.nix"]
 description = "Custom implementations and core utilities for frozen-lab crates"
 readme = "README.md"
 keywords = [
@@ -11,6 +10,13 @@ keywords = [
 ]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/frozen-lab/frozen-core"
+exclude = [
+    ".github/",
+    "shell.nix",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+]
 
 [profile.release]
 codegen-units = 1
@@ -23,12 +29,10 @@ inherits = "release"
 
 [features]
 crc32 = []
-bufpool = ["error", "hints"]
 error = []
 hints = []
 mpscq = []
-default = []
-bpool = ["error"]
+bufpool = ["error", "hints"]
 ffile = [
     "libc",
     "error",
@@ -40,11 +44,14 @@ fmmap = [
     "hints",
     "ffile",
 ]
-fpipe = [
+default = [
     "error",
-    "ffile",
-    "bpool",
     "hints",
+    "mpscq",
+    "crc32",
+    "bufpool",
+    "ffile",
+    "fmmap"
 ]
 
 [target.'cfg(unix)'.dependencies]
@@ -61,11 +68,6 @@ criterion = { version = "0.8", features = ["html_reports"] }
 name = "crc32"
 harness = false
 required-features = ["crc32"]
-
-[[bench]]
-name = "bpool"
-harness = false
-required-features = ["bpool"]
 
 [[bench]]
 name = "bufpool"

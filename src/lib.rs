@@ -2,31 +2,25 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../README.md")]
 
-#[cfg(any(test, feature = "bufpool"))]
+#[cfg(feature = "bufpool")]
 pub mod bufpool;
 
-#[cfg(any(test, feature = "error"))]
+#[cfg(feature = "error")]
 pub mod error;
 
-#[cfg(any(test, feature = "hints"))]
+#[cfg(feature = "hints")]
 pub mod hints;
 
-#[cfg(any(test, feature = "crc32"))]
+#[cfg(feature = "crc32")]
 pub mod crc32;
 
-#[cfg(any(test, feature = "bpool"))]
-pub mod bpool;
-
-#[cfg(any(test, feature = "mpscq"))]
+#[cfg(feature = "mpscq")]
 pub mod mpscq;
 
-#[cfg(any(test, feature = "ffile"))]
+#[cfg(feature = "ffile")]
 pub mod ffile;
 
-#[cfg(any(test, feature = "fmmap"))]
+#[cfg(feature = "fmmap")]
 pub mod fmmap;
-
-#[cfg(any(test, feature = "fpipe"))]
-pub mod fpipe;
 
 pub mod utils;

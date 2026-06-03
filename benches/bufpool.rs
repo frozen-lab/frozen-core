@@ -1,7 +1,7 @@
 //! Benchmarks for `bufpool` module
 //! Run using: `taskset -c 2,3,4 cargo bench --bench bufpool --features=bufpool`
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use frozen_core::{
     bufpool::{BufPool, BufPoolCfg},
     utils::BufferSize,
@@ -13,11 +13,7 @@ const BUF_SIZE: BufferSize = BufferSize::S64;
 
 #[inline]
 fn new_pool(max_memory: usize) -> BufPool {
-    BufPool::new(BufPoolCfg {
-        module_id: MID,
-        buffer_size: BUF_SIZE,
-        max_memory,
-    })
+    BufPool::new(BufPoolCfg { module_id: MID, buffer_size: BUF_SIZE, max_memory })
 }
 
 fn bench_bpool(c: &mut Criterion) {
@@ -43,24 +39,20 @@ fn bench_bpool(c: &mut Criterion) {
     //
 
     for &threads in &[1, 2, 4] {
-        group.bench_with_input(
-            BenchmarkId::new("alloc_contention", threads),
-            &threads,
-            |b, &threads| {
-                let pool = Arc::new(new_pool(usize::MAX >> 2));
+        group.bench_with_input(BenchmarkId::new("alloc_contention", threads), &threads, |b, &threads| {
+            let pool = Arc::new(new_pool(usize::MAX >> 2));
 
-                b.iter(|| {
-                    std::thread::scope(|s| {
-                        for _ in 0..threads {
-                            let pool = pool.clone();
-                            s.spawn(move || {
-                                black_box(pool.allocate(8));
-                            });
-                        }
-                    });
+            b.iter(|| {
+                std::thread::scope(|s| {
+                    for _ in 0..threads {
+                        let pool = pool.clone();
+                        s.spawn(move || {
+                            black_box(pool.allocate(8));
+                        });
+                    }
                 });
-            },
-        );
+            });
+        });
     }
 
     //

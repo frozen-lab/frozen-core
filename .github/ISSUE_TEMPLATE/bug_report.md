@@ -1,11 +1,10 @@
 ---
 name: Bug report
 about: Submit a bug report
-title: 'BUG: [BUG]'
+title: 'bug'
 labels: bug
 assignees: adityamotale
 type: Bug
-
 ---
 
 # Bug Report
