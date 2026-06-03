@@ -9,7 +9,7 @@ Custom implementations and core utilities for [frozen-lab](https://github.com/fr
 ## Index
 
 - [`notes`](#notes)
-- [`error`](#frozenerr)
+- [`error`](#error)
 - [`hints`](#hints)
 - [`bufpool`](#bufpool)
 - [`ffile`](#frozenfile)
@@ -32,9 +32,9 @@ Contributions are welcome! Please feel free to submit a PR or open an issue if y
 > `frozen-core` contains next to naught AI-generated code. Therefore, any catastrophic bugs or fatal crashes encountered
 > are results of pure & unadulterated skill issues
 
-## FrozenErr
+## Error
 
-`FrozenRes` & `FrozenErr` are custom implementation's for result and error propagation.
+`FrozenResult` & `FrozenError` are custom implementation's for result and error propagation.
 
 To use the `error` module, add it as a dependency in your `Cargo.toml`:
 

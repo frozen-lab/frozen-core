@@ -1,5 +1,5 @@
 use super::{err, new_err, new_err_default, TFileId};
-use crate::{error::FrozenRes, hints};
+use crate::{error::FrozenResult, hints};
 use libc::{
     access, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite, pwritev,
     size_t, stat, strerror, sysconf, unlink, EACCES, EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, EIO, EISDIR,
@@ -50,7 +50,7 @@ impl POSIXFile {
     ///
     /// By using `access(path)` syscall w/ `F_OK`, we check whether the calling process can resolve the
     /// given `path` in underlying fs
-    pub(super) unsafe fn exists(path: &std::path::Path) -> FrozenRes<bool> {
+    pub(super) unsafe fn exists(path: &std::path::Path) -> FrozenResult<bool> {
         let cpath = path_to_cstring(path)?;
         Ok(access(cpath.as_ptr(), F_OK) == 0)
     }
@@ -68,7 +68,7 @@ impl POSIXFile {
     ///
     /// In our case, when a new [`FrozenFile`] is created, we zero-extend it using `ftruncate()`, and perform `fdatasync()`
     /// or `fcntl(F_FULLSYNC)`, which in result provides us the crash safe durability we need
-    pub(super) unsafe fn new(path: &std::path::Path) -> FrozenRes<Self> {
+    pub(super) unsafe fn new(path: &std::path::Path) -> FrozenResult<Self> {
         let fd = open_raw(path, prep_flags())?;
         let max_iovs = read_max_iovec_config()?;
 
@@ -102,7 +102,7 @@ impl POSIXFile {
     ///
     /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is guaranteed,
     /// so the syscall must be retried
-    pub(super) unsafe fn flock(&self) -> FrozenRes<()> {
+    pub(super) unsafe fn flock(&self) -> FrozenResult<()> {
         flock_raw(self.fd())
     }
 
@@ -120,7 +120,7 @@ impl POSIXFile {
     ///
     /// this provides strong durability for the storage engine, and if `EIO` occurs, anyhow, we treat it as `err::HCF`
     /// i.e. impl failure
-    pub(super) unsafe fn close(&self) -> FrozenRes<()> {
+    pub(super) unsafe fn close(&self) -> FrozenResult<()> {
         let fd = self.fd.swap(CLOSED_FD, atomic::Ordering::AcqRel);
         if fd == CLOSED_FD {
             return Ok(());
@@ -130,7 +130,7 @@ impl POSIXFile {
     }
 
     /// Deletes the [`POSIXFile`] entery from the fs
-    pub(super) unsafe fn unlink(&self, path: &std::path::Path) -> FrozenRes<()> {
+    pub(super) unsafe fn unlink(&self, path: &std::path::Path) -> FrozenResult<()> {
         let cpath = path_to_cstring(path)?;
 
         // NOTE: POSIX systems requires fd to be closed before attempting to unlink the file
@@ -165,7 +165,7 @@ impl POSIXFile {
     }
 
     /// Read current length of [`POSIXFile`] using file metadata (w/ `fstat` syscall)
-    pub(super) unsafe fn length(&self) -> FrozenRes<usize> {
+    pub(super) unsafe fn length(&self) -> FrozenResult<usize> {
         let mut st = core::mem::zeroed::<stat>();
         let res = fstat(self.fd(), &mut st);
 
@@ -199,7 +199,7 @@ impl POSIXFile {
     /// if either of `fallocate` or `f_preallocate` has failed, not supported by fs, etc. as long as `ftruncate` succeeds,
     /// our future write ops (pwrite and pwritev) will work fine, this is mainly cause `fallocate` and `f_preallocate` are
     /// best-effort operations for us to reduce the latency for write ops
-    pub(super) unsafe fn grow(&self, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn grow(&self, curr_len: usize, len_to_add: usize) -> FrozenResult<()> {
         let fd = self.fd();
 
         // NOTE: On linux, `fallocate` must be called before the `ftruncate` to handle `ENOSPC`,
@@ -242,7 +242,7 @@ impl POSIXFile {
     /// To guard this, we fallback to `fsync()`, which does not guaranty durability for sudden crash or
     /// power loss, which is acceptable when strong durability is simply not available or allowed
     #[cfg(target_os = "macos")]
-    pub(super) unsafe fn sync(&self) -> FrozenRes<()> {
+    pub(super) unsafe fn sync(&self) -> FrozenResult<()> {
         f_fullsync_raw(self.fd())
     }
 
@@ -261,7 +261,7 @@ impl POSIXFile {
     /// With combonation of `O_NOATIME` and `fdatasync()`, we avoid non-essential metadata updates, such as
     /// access time (`atime`), modification time (`mtime`), and other bookkeeping info
     #[cfg(target_os = "linux")]
-    pub(super) unsafe fn sync(&self) -> FrozenRes<()> {
+    pub(super) unsafe fn sync(&self) -> FrozenResult<()> {
         fdatasync_raw(self.fd())
     }
 
@@ -280,13 +280,13 @@ impl POSIXFile {
     /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
     /// guaranteed, so the syscall must be retried
     #[cfg(target_os = "linux")]
-    pub(super) unsafe fn sync_range(&self, offset: usize, len: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn sync_range(&self, offset: usize, len: usize) -> FrozenResult<()> {
         sync_file_range_raw(self.fd(), offset, len)
     }
 
     /// Read a single chunk from given `offset` w/ `pread` syscall
     #[inline(always)]
-    pub(super) unsafe fn pread(&self, ptr: *mut u8, offset: usize, chunk_size: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn pread(&self, ptr: *mut u8, offset: usize, chunk_size: usize) -> FrozenResult<()> {
         let fd = self.fd();
 
         let mut read = 0usize;
@@ -331,7 +331,7 @@ impl POSIXFile {
 
     /// Write a single chunk at given `offset` w/ `pwrite` syscall
     #[inline(always)]
-    pub(super) unsafe fn pwrite(&self, ptr: *mut u8, offset: usize, chunk_size: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn pwrite(&self, ptr: *mut u8, offset: usize, chunk_size: usize) -> FrozenResult<()> {
         let fd = self.fd();
 
         let mut written = 0usize;
@@ -379,7 +379,7 @@ impl POSIXFile {
     /// - All chunks in given bufs slice must be of same length
     /// - The caller must not try to read byound current length of `[POSIXFile]`
     #[inline(always)]
-    pub(super) unsafe fn preadv(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn preadv(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenResult<()> {
         let (mut heap, mut stack) = build_iovecs(bufs, chunk_size);
         let (iov_ptr, iovs_len) = if let Some(ref mut s) = stack {
             (s.as_mut_ptr(), bufs.len())
@@ -459,7 +459,7 @@ impl POSIXFile {
     /// - All chunk objects in given slice must be of same length
     /// - The caller must not try to write byound current length of `[POSIXFile]`
     #[inline(always)]
-    pub(super) unsafe fn pwritev(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenRes<()> {
+    pub(super) unsafe fn pwritev(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenResult<()> {
         let (mut heap, mut stack) = build_iovecs(bufs, chunk_size);
         let (iov_ptr, iovs_len) = if let Some(ref mut s) = stack {
             (s.as_mut_ptr(), bufs.len())
@@ -542,7 +542,7 @@ impl POSIXFile {
 ///
 /// To remain sane across ownership models, containers, and shared filesystems,
 /// we explicitly retry the `open()` w/o `O_NOATIME` when `EPERM` is encountered
-unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenRes<TFileId> {
+unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenResult<TFileId> {
     let cpath = path_to_cstring(path)?;
 
     // write + read permissions
@@ -604,7 +604,7 @@ unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenRes<TFileId> {
     }
 }
 
-unsafe fn close_raw(fd: TFileId) -> FrozenRes<()> {
+unsafe fn close_raw(fd: TFileId) -> FrozenResult<()> {
     if close(fd) == 0 {
         return Ok(());
     }
@@ -630,7 +630,7 @@ unsafe fn close_raw(fd: TFileId) -> FrozenRes<()> {
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn fdatasync_raw(fd: TFileId) -> FrozenRes<()> {
+unsafe fn fdatasync_raw(fd: TFileId) -> FrozenResult<()> {
     let mut retries = 0; // only for EIO & EINTR errors
     loop {
         if hints::likely(libc::fdatasync(fd) == 0) {
@@ -672,7 +672,7 @@ unsafe fn fdatasync_raw(fd: TFileId) -> FrozenRes<()> {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn f_fullsync_raw(fd: TFileId) -> FrozenRes<()> {
+unsafe fn f_fullsync_raw(fd: TFileId) -> FrozenResult<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
         if hints::likely(libc::fcntl(fd, libc::F_FULLFSYNC) == 0) {
@@ -723,7 +723,7 @@ unsafe fn f_fullsync_raw(fd: TFileId) -> FrozenRes<()> {
 ///
 /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
 /// guaranteed, so the syscall must be retried
-unsafe fn fsync_raw(fd: TFileId) -> FrozenRes<()> {
+unsafe fn fsync_raw(fd: TFileId) -> FrozenResult<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
         if hints::unlikely(libc::fsync(fd) != 0) {
@@ -761,7 +761,7 @@ unsafe fn fsync_raw(fd: TFileId) -> FrozenRes<()> {
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn sync_file_range_raw(fd: TFileId, offset: usize, len: usize) -> FrozenRes<()> {
+unsafe fn sync_file_range_raw(fd: TFileId, offset: usize, len: usize) -> FrozenResult<()> {
     let flag = libc::SYNC_FILE_RANGE_WRITE;
     let mut retries = 0; // only for EINTR errors
 
@@ -826,7 +826,7 @@ unsafe fn sync_file_range_raw(fd: TFileId, offset: usize, len: usize) -> FrozenR
 /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
 /// guaranteed, so the syscall must be retried
 #[cfg(target_os = "linux")]
-unsafe fn fallocate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
+unsafe fn fallocate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> FrozenResult<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
         if hints::likely(libc::fallocate(fd, 0, curr_len as off_t, len_to_add as off_t) == 0) {
@@ -872,7 +872,7 @@ unsafe fn fallocate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> Froz
 ///
 /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
 /// guaranteed, so the syscall must be retried
-unsafe fn ftruncate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
+unsafe fn ftruncate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> FrozenResult<()> {
     let new_len = (curr_len + len_to_add) as off_t;
     let mut retries = 0; // only for EINTR errors
 
@@ -940,7 +940,7 @@ unsafe fn ftruncate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> Froz
 /// POSIX syscalls are interruptible by signals, and may fail w/ `EINTR`, in such cases no progress is
 /// guaranteed, so the syscall must be retried
 #[cfg(target_os = "macos")]
-unsafe fn f_preallocate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> FrozenRes<()> {
+unsafe fn f_preallocate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> FrozenResult<()> {
     let mut retries = 0; // only for EINTR errors
 
     // NOTE: by default we try w/ contiguous allocations for optimal perf, when not available,
@@ -1004,7 +1004,7 @@ unsafe fn f_preallocate_raw(fd: TFileId, curr_len: usize, len_to_add: usize) -> 
     }
 }
 
-unsafe fn flock_raw(fd: TFileId) -> FrozenRes<()> {
+unsafe fn flock_raw(fd: TFileId) -> FrozenResult<()> {
     let mut retries = 0; // only for EINTR errors
     loop {
         if flock(fd, LOCK_EX | LOCK_NB) == 0 {
@@ -1050,7 +1050,7 @@ unsafe fn flock_raw(fd: TFileId) -> FrozenRes<()> {
 /// resulting in catastrophic consequences
 ///
 /// we must `fsync(parent_dir)`, for crash safe durability
-unsafe fn sync_parent_dir(path: &std::path::Path) -> FrozenRes<()> {
+unsafe fn sync_parent_dir(path: &std::path::Path) -> FrozenResult<()> {
     let parent = extract_parent_dir(path);
     let flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
     let fd = open_raw(&parent, flags)?;
@@ -1091,7 +1091,7 @@ const fn prep_flags() -> c_int {
 }
 
 /// convert a `std::path::Path` into `std::ffu::CString`
-fn path_to_cstring(path: &std::path::Path) -> FrozenRes<std::ffi::CString> {
+fn path_to_cstring(path: &std::path::Path) -> FrozenResult<std::ffi::CString> {
     match std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
         Ok(cs) => Ok(cs),
         Err(e) => new_err(err::INV, e),
@@ -1131,7 +1131,7 @@ fn extract_parent_dir(path: &std::path::Path) -> std::path::PathBuf {
 /// Fetch max allowed `iovecs` per `preadv` & `pwritev` syscalls from the system configs
 ///
 /// Usually, on modern systems the value is set to *1024* while the minimum allowable limit is set at *16*
-unsafe fn read_max_iovec_config() -> FrozenRes<usize> {
+unsafe fn read_max_iovec_config() -> FrozenResult<usize> {
     let res = sysconf(_SC_IOV_MAX);
     if res <= 0 {
         return new_err_default(err::HCF);
@@ -1158,7 +1158,7 @@ unsafe fn read_max_iovec_config() -> FrozenRes<usize> {
 /// guaranteed, so the syscall must be retried
 #[inline]
 #[cfg(target_os = "linux")]
-unsafe fn f_advise_raw(fd: TFileId) -> FrozenRes<()> {
+unsafe fn f_advise_raw(fd: TFileId) -> FrozenResult<()> {
     let mut retries = 0;
     loop {
         let res = libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_RANDOM);

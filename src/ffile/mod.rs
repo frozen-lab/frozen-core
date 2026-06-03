@@ -39,7 +39,7 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
 
-use crate::error::{ErrCode, FrozenErr, FrozenRes};
+use crate::error::{ErrCode, FrozenError, FrozenResult};
 
 /// Domain Id for [`FrozenFile`] is **17**
 const ERRDOMAIN: u8 = 0x11;
@@ -51,7 +51,7 @@ pub type TFileId = libc::c_int;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 type TFile = posix::POSIXFile;
 
-/// module id used for [`FrozenErr`]
+/// module id used for [`FrozenError`]
 static MID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 
 #[cfg(not(test))]
@@ -108,14 +108,14 @@ pub(in crate::ffile) mod err {
 }
 
 #[inline]
-pub(in crate::ffile) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenRes<R> {
-    let err = FrozenErr::new_raw(*mid(), ERRDOMAIN, code, error);
+pub(in crate::ffile) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenResult<R> {
+    let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, error);
     Err(err)
 }
 
 #[inline]
-pub(in crate::ffile) fn new_err_default<R>(code: ErrCode) -> FrozenRes<R> {
-    let err = FrozenErr::new(*mid(), ERRDOMAIN, code, "");
+pub(in crate::ffile) fn new_err_default<R>(code: ErrCode) -> FrozenResult<R> {
+    let err = FrozenError::new(*mid(), ERRDOMAIN, code, "");
     Err(err)
 }
 
@@ -191,7 +191,7 @@ unsafe impl Sync for FrozenFile {}
 impl FrozenFile {
     /// Read current length of [`FrozenFile`]
     #[inline]
-    pub fn length(&self) -> FrozenRes<usize> {
+    pub fn length(&self) -> FrozenResult<usize> {
         unsafe { self.get_file().length() }
     }
 
@@ -203,7 +203,7 @@ impl FrozenFile {
     }
 
     /// Check if the [`FrozenFile`] exists on the fs
-    pub fn exists(&self) -> FrozenRes<bool> {
+    pub fn exists(&self) -> FrozenResult<bool> {
         unsafe { TFile::exists(&self.cfg.path) }
     }
 
@@ -246,7 +246,7 @@ impl FrozenFile {
     /// let file = FrozenFile::new::<MID>(cfg).unwrap();
     /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
     /// ```
-    pub fn new<const MODULE_ID: u8>(cfg: FFCfg) -> FrozenRes<Self> {
+    pub fn new<const MODULE_ID: u8>(cfg: FFCfg) -> FrozenResult<Self> {
         let raw_file = unsafe { posix::POSIXFile::new(&cfg.path) }?;
         let slf = Self {
             cfg: cfg.clone(),
@@ -289,7 +289,7 @@ impl FrozenFile {
     }
 
     /// Syncs in-mem data on the storage device
-    pub fn sync(&self) -> FrozenRes<()> {
+    pub fn sync(&self) -> FrozenResult<()> {
         let file = self.get_file();
         unsafe { file.sync() }
     }
@@ -299,7 +299,7 @@ impl FrozenFile {
     /// This call, by itself, does not guarantee any kind of durability, and must always be paired with
     /// strong sync call i.e. [`FrozenFile::sync`]
     #[cfg(target_os = "linux")]
-    pub fn sync_range(&self, index: usize, count: usize) -> FrozenRes<()> {
+    pub fn sync_range(&self, index: usize, count: usize) -> FrozenResult<()> {
         let offset = self.cfg.chunk_size * index;
         let len_to_sync = self.cfg.chunk_size * count;
         let file = self.get_file();
@@ -331,7 +331,7 @@ impl FrozenFile {
     /// file.delete().unwrap();
     /// assert!(!file.exists().unwrap());
     /// ```
-    pub fn delete(&self) -> FrozenRes<()> {
+    pub fn delete(&self) -> FrozenResult<()> {
         let file = self.get_file();
         unsafe { file.unlink(&self.cfg.path) }
     }
@@ -368,7 +368,7 @@ impl FrozenFile {
     #[inline(always)]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn pread(&self, buf: *mut u8, index: usize) -> FrozenRes<()> {
+    pub fn pread(&self, buf: *mut u8, index: usize) -> FrozenResult<()> {
         let offset = self.cfg.chunk_size * index;
         let file = self.get_file();
 
@@ -407,7 +407,7 @@ impl FrozenFile {
     #[inline(always)]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn pwrite(&self, buf: *mut u8, index: usize) -> FrozenRes<()> {
+    pub fn pwrite(&self, buf: *mut u8, index: usize) -> FrozenResult<()> {
         let offset = self.cfg.chunk_size * index;
         let file = self.get_file();
 
@@ -450,7 +450,7 @@ impl FrozenFile {
     /// ```
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn preadv(&self, bufs: &[*mut u8], index: usize) -> FrozenRes<()> {
+    pub fn preadv(&self, bufs: &[*mut u8], index: usize) -> FrozenResult<()> {
         let offset = self.cfg.chunk_size * index;
         let file = self.get_file();
 
@@ -494,7 +494,7 @@ impl FrozenFile {
     /// ```
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn pwritev(&self, bufs: &[*mut u8], index: usize) -> FrozenRes<()> {
+    pub fn pwritev(&self, bufs: &[*mut u8], index: usize) -> FrozenResult<()> {
         let offset = self.cfg.chunk_size * index;
         let file = self.get_file();
 
@@ -527,7 +527,7 @@ impl FrozenFile {
     /// file.grow(0x20).unwrap();
     /// assert_eq!(file.length().unwrap(), 0x10 * (0x0A + 0x20));
     /// ```
-    pub fn grow(&self, count: usize) -> FrozenRes<()> {
+    pub fn grow(&self, count: usize) -> FrozenResult<()> {
         let curr_len = self.length()?;
         let len_to_add = self.cfg.chunk_size * count;
 
@@ -564,7 +564,7 @@ impl FrozenFile {
     /// assert_eq!(file.total_chunks().unwrap(), 0x0A + 0x20);
     /// ```
     #[inline]
-    pub fn total_chunks(&self) -> FrozenRes<usize> {
+    pub fn total_chunks(&self) -> FrozenResult<usize> {
         let curr_len = self.length()?;
         let chunk_size = self.cfg.chunk_size;
 
