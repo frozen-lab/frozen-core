@@ -248,10 +248,7 @@ impl FrozenFile {
     /// ```
     pub fn new<const MODULE_ID: u8>(cfg: FFCfg) -> FrozenResult<Self> {
         let raw_file = unsafe { posix::POSIXFile::new(&cfg.path) }?;
-        let slf = Self {
-            cfg: cfg.clone(),
-            file: core::cell::UnsafeCell::new(core::mem::ManuallyDrop::new(raw_file)),
-        };
+        let slf = Self { cfg: cfg.clone(), file: core::cell::UnsafeCell::new(core::mem::ManuallyDrop::new(raw_file)) };
 
         let file = slf.get_file();
 
@@ -597,12 +594,7 @@ impl Drop for FrozenFile {
 
 impl core::fmt::Display for FrozenFile {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "FrozenFile {{fd: {}, len: {}}}",
-            self.fd(),
-            self.length().unwrap_or(0),
-        )
+        write!(f, "FrozenFile {{fd: {}, len: {}}}", self.fd(), self.length().unwrap_or(0),)
     }
 }
 
@@ -618,11 +610,7 @@ mod tests {
     fn tmp_path() -> (tempfile::TempDir, FFCfg) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_ff_file");
-        let cfg = FFCfg {
-            path,
-            chunk_size: CHUNK_SIZE,
-            initial_chunk_amount: INIT_CHUNKS,
-        };
+        let cfg = FFCfg { path, chunk_size: CHUNK_SIZE, initial_chunk_amount: INIT_CHUNKS };
 
         (dir, cfg)
     }

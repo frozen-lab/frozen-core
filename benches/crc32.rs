@@ -1,7 +1,7 @@
 //! Benchmarks for `crc32` module
 //! Run using `taskset -c 2 cargo bench --bench crc32 --features=crc32`
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use frozen_core::crc32::Crc32C;
 use std::hint::black_box;
 
@@ -29,13 +29,9 @@ fn bench_crc_all(c: &mut Criterion) {
         });
 
         // bench 2x
-        group.bench_with_input(
-            BenchmarkId::new("crc_2x", size),
-            &(b0.as_slice(), b1.as_slice()),
-            |b, (b0, b1)| {
-                b.iter(|| crc.crc_2x(black_box([b0, b1])));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("crc_2x", size), &(b0.as_slice(), b1.as_slice()), |b, (b0, b1)| {
+            b.iter(|| crc.crc_2x(black_box([b0, b1])));
+        });
 
         // bench 4x
         group.bench_with_input(

@@ -376,13 +376,7 @@ impl BufPool {
         let pointer = allocate_layout(layout);
         self.active_allocations.fetch_add(1, atomic::Ordering::Relaxed);
 
-        BufPoolAllocation {
-            layout,
-            pointer,
-            required_bytes,
-            buffers: required,
-            pool: ptr::NonNull::from(self),
-        }
+        BufPoolAllocation { layout, pointer, required_bytes, buffers: required, pool: ptr::NonNull::from(self) }
     }
 
     /// Applies backpressure until enough memory budget is available for the allocation
@@ -588,8 +582,7 @@ impl Drop for BufPoolAllocation {
         let pool = unsafe { self.pool.as_ref() };
         deallocate_memory(self.pointer, self.layout);
 
-        pool.allocated_memory
-            .fetch_sub(self.required_bytes, atomic::Ordering::Release);
+        pool.allocated_memory.fetch_sub(self.required_bytes, atomic::Ordering::Release);
         pool.allocation_cv.notify_one();
 
         if pool.active_allocations.fetch_sub(1, atomic::Ordering::Release) == 1 {
@@ -707,10 +700,7 @@ mod tests {
 
     #[inline]
     fn create_bufpool(max_mem: usize) -> BufPool {
-        BufPool::new(BufPoolCfg {
-            buffer_size: BUF_SIZE,
-            max_memory: max_mem,
-        })
+        BufPool::new(BufPoolCfg { buffer_size: BUF_SIZE, max_memory: max_mem })
     }
 
     #[test]
@@ -768,10 +758,7 @@ mod tests {
         let bpool = create_bufpool(BUF_SIZE.bytes() * 0x14);
         let alloc = bpool.allocate(0x10);
 
-        assert_eq!(
-            bpool.allocated_memory.load(atomic::Ordering::Acquire),
-            BUF_SIZE.bytes() * 0x10
-        );
+        assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), BUF_SIZE.bytes() * 0x10);
         drop(alloc);
         assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), 0);
     }
@@ -858,16 +845,10 @@ mod tests {
             let alloc1 = bpool.allocate(2);
             let alloc2 = bpool.allocate(2);
 
-            assert_eq!(
-                bpool.allocated_memory.load(atomic::Ordering::Acquire),
-                BUF_SIZE.bytes() * 4
-            );
+            assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), BUF_SIZE.bytes() * 4);
             drop(alloc1);
 
-            assert_eq!(
-                bpool.allocated_memory.load(atomic::Ordering::Acquire),
-                BUF_SIZE.bytes() * 2
-            );
+            assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), BUF_SIZE.bytes() * 2);
             drop(alloc2);
 
             assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), 0);

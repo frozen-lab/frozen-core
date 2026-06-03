@@ -1,10 +1,10 @@
-use super::{err, new_err, new_err_default, TFileId};
+use super::{TFileId, err, new_err, new_err_default};
 use crate::{error::FrozenResult, hints};
 use libc::{
-    access, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite, pwritev,
-    size_t, stat, strerror, sysconf, unlink, EACCES, EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, EIO, EISDIR,
-    EMSGSIZE, ENOENT, ENOLCK, ENOSPC, ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX, LOCK_NB,
-    O_CLOEXEC, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, _SC_IOV_MAX,
+    _SC_IOV_MAX, EACCES, EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT, ENOLCK, ENOSPC,
+    ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX, LOCK_NB, O_CLOEXEC, O_CREAT, O_DIRECTORY,
+    O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, access, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t,
+    open, pread, preadv, pwrite, pwritev, size_t, stat, strerror, sysconf, unlink,
 };
 use std::{ffi::CStr, mem, sync::atomic};
 
@@ -76,10 +76,7 @@ impl POSIXFile {
         #[cfg(target_os = "linux")]
         f_advise_raw(fd)?;
 
-        Ok(Self {
-            max_iovs,
-            fd: atomic::AtomicI32::new(fd),
-        })
+        Ok(Self { max_iovs, fd: atomic::AtomicI32::new(fd) })
     }
 
     /// Acquire an exclusive advisory lock on [`POSIXFile`]
@@ -291,12 +288,7 @@ impl POSIXFile {
 
         let mut read = 0usize;
         while read < chunk_size {
-            let res = pread(
-                fd,
-                ptr.add(read) as *mut c_void,
-                (chunk_size - read) as size_t,
-                (offset + read) as off_t,
-            );
+            let res = pread(fd, ptr.add(read) as *mut c_void, (chunk_size - read) as size_t, (offset + read) as off_t);
 
             // unexpected EOF
             if res == 0 {
@@ -381,11 +373,8 @@ impl POSIXFile {
     #[inline(always)]
     pub(super) unsafe fn preadv(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenResult<()> {
         let (mut heap, mut stack) = build_iovecs(bufs, chunk_size);
-        let (iov_ptr, iovs_len) = if let Some(ref mut s) = stack {
-            (s.as_mut_ptr(), bufs.len())
-        } else {
-            (heap.as_mut_ptr(), heap.len())
-        };
+        let (iov_ptr, iovs_len) =
+            if let Some(ref mut s) = stack { (s.as_mut_ptr(), bufs.len()) } else { (heap.as_mut_ptr(), heap.len()) };
 
         let fd = self.fd();
         let mut head = 0usize;
@@ -461,11 +450,8 @@ impl POSIXFile {
     #[inline(always)]
     pub(super) unsafe fn pwritev(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenResult<()> {
         let (mut heap, mut stack) = build_iovecs(bufs, chunk_size);
-        let (iov_ptr, iovs_len) = if let Some(ref mut s) = stack {
-            (s.as_mut_ptr(), bufs.len())
-        } else {
-            (heap.as_mut_ptr(), heap.len())
-        };
+        let (iov_ptr, iovs_len) =
+            if let Some(ref mut s) = stack { (s.as_mut_ptr(), bufs.len()) } else { (heap.as_mut_ptr(), heap.len()) };
 
         let fd = self.fd();
         let mut head = 0usize;
@@ -553,11 +539,7 @@ unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenResult<TFileId
 
     let mut retries = 0; // only for EINTR errors
     loop {
-        let fd = if flags & O_CREAT != 0 {
-            open(cpath.as_ptr(), flags, perm)
-        } else {
-            open(cpath.as_ptr(), flags)
-        };
+        let fd = if flags & O_CREAT != 0 { open(cpath.as_ptr(), flags, perm) } else { open(cpath.as_ptr(), flags) };
 
         if hints::unlikely(fd < 0) {
             let errno = last_errno();
@@ -1203,10 +1185,7 @@ unsafe fn build_iovecs(bufs: &[*mut u8], chunk_size: usize) -> (Vec<iovec>, Opti
         let ptr = stack.as_mut_ptr() as *mut iovec;
 
         for (i, &b) in bufs.iter().enumerate() {
-            ptr.add(i).write(iovec {
-                iov_base: b as *mut c_void,
-                iov_len: chunk_size,
-            });
+            ptr.add(i).write(iovec { iov_base: b as *mut c_void, iov_len: chunk_size });
         }
 
         let stack = stack.assume_init();
@@ -1214,10 +1193,7 @@ unsafe fn build_iovecs(bufs: &[*mut u8], chunk_size: usize) -> (Vec<iovec>, Opti
     } else {
         let mut heap = Vec::with_capacity(bufs.len());
         for &b in bufs {
-            heap.push(iovec {
-                iov_base: b as *mut c_void,
-                iov_len: chunk_size,
-            });
+            heap.push(iovec { iov_base: b as *mut c_void, iov_len: chunk_size });
         }
 
         (heap, None)

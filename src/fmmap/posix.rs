@@ -2,8 +2,8 @@ use super::{err, new_err};
 use crate::{error::FrozenResult, hints};
 use core::{ffi::CStr, ptr};
 use libc::{
-    c_void, mmap, msync, munmap, off_t, size_t, strerror, EACCES, EAGAIN, EBADF, EBUSY, EINTR, EINVAL, EIO, ENODEV,
-    ENOMEM, EOVERFLOW, EPERM, ETXTBSY, MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
+    EACCES, EAGAIN, EBADF, EBUSY, EINTR, EINVAL, EIO, ENODEV, ENOMEM, EOVERFLOW, EPERM, ETXTBSY, MAP_FAILED,
+    MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, c_void, mmap, msync, munmap, off_t, size_t, strerror,
 };
 
 /// Base pointer for `mmap(2)` mapped memory
@@ -82,14 +82,7 @@ impl POSIXMMap {
 unsafe fn mmap_raw(fd: i32, length: size_t) -> FrozenResult<TPtr> {
     let mut retries = 0; // only for EINTR errors
     loop {
-        let ptr = mmap(
-            ptr::null_mut(),
-            length,
-            PROT_WRITE | PROT_READ,
-            MAP_SHARED,
-            fd,
-            0 as off_t,
-        );
+        let ptr = mmap(ptr::null_mut(), length, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0 as off_t);
 
         if ptr == MAP_FAILED {
             let errno = last_errno();
@@ -222,12 +215,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
-        let file = FrozenFile::new::<MOD_ID>(FFCfg {
-            path,
-            chunk_size: CHUNK,
-            initial_chunk_amount: INIT_CHUNKS,
-        })
-        .expect("new FF");
+        let file = FrozenFile::new::<MOD_ID>(FFCfg { path, chunk_size: CHUNK, initial_chunk_amount: INIT_CHUNKS })
+            .expect("new FF");
 
         (dir, file)
     }
@@ -465,11 +454,7 @@ mod tests {
             // open + map + read
             unsafe {
                 let path = dir.path().join("tmp_map");
-                let cfg = FFCfg {
-                    path,
-                    chunk_size: CHUNK,
-                    initial_chunk_amount: INIT_CHUNKS,
-                };
+                let cfg = FFCfg { path, chunk_size: CHUNK, initial_chunk_amount: INIT_CHUNKS };
 
                 let file = FrozenFile::new::<MOD_ID>(cfg).expect("new FF");
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();

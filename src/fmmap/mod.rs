@@ -300,11 +300,7 @@ where
         // INFO: we spawn the thread for background sync
         let tx = Core::spawn_tx(core.clone())?;
 
-        Ok(Self {
-            core,
-            tx: Some(tx),
-            _t: core::marker::PhantomData,
-        })
+        Ok(Self { core, tx: Some(tx), _t: core::marker::PhantomData })
     }
 
     /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`], while growing the underlying [`FrozenFile`]
@@ -382,20 +378,12 @@ where
         // INFO: we spawn the thread for background sync
         let tx = Core::spawn_tx(core.clone())?;
 
-        Ok(Self {
-            core,
-            tx: Some(tx),
-            _t: core::marker::PhantomData,
-        })
+        Ok(Self { core, tx: Some(tx), _t: core::marker::PhantomData })
     }
 
     /// Create/open a new [`FrozenFile`] instance
     fn open_file(path: std::path::PathBuf, cfg: &FMCfg) -> FrozenResult<(FrozenFile, usize)> {
-        let ff_cfg = FFCfg {
-            path,
-            chunk_size: Self::SLOT_SIZE,
-            initial_chunk_amount: cfg.initial_count,
-        };
+        let ff_cfg = FFCfg { path, chunk_size: Self::SLOT_SIZE, initial_chunk_amount: cfg.initial_count };
 
         let file = FrozenFile::new::<MODULE_ID>(ff_cfg)?;
         let curr_length = file.length()?;
@@ -798,10 +786,7 @@ where
     /// ```
     #[inline]
     pub fn new_tx(&self) -> FMTransaction<'_, T> {
-        FMTransaction {
-            core: &self.core,
-            ops_vec: Vec::new(),
-        }
+        FMTransaction { core: &self.core, ops_vec: Vec::new() }
     }
 
     /// Delete the underlying [`FrozenFile`] used for [`FrozenMMap`] from fs
@@ -1198,10 +1183,7 @@ impl Core {
     }
 
     fn spawn_tx(core: sync::Arc<Self>) -> FrozenResult<thread::JoinHandle<()>> {
-        match thread::Builder::new()
-            .name("fm-flush-tx".into())
-            .spawn(move || Self::flush_tx(core))
-        {
+        match thread::Builder::new().name("fm-flush-tx".into()).spawn(move || Self::flush_tx(core)) {
             Ok(tx) => Ok(tx),
             Err(error) => new_err(err::FXE, error),
         }
@@ -1334,12 +1316,7 @@ impl Locks {
 
         loop {
             if val
-                .compare_exchange_weak(
-                    Self::UNLOCK,
-                    Self::LOCK,
-                    atomic::Ordering::Acquire,
-                    atomic::Ordering::Relaxed,
-                )
+                .compare_exchange_weak(Self::UNLOCK, Self::LOCK, atomic::Ordering::Acquire, atomic::Ordering::Relaxed)
                 .is_ok()
             {
                 return LockGuard(val);
@@ -1391,10 +1368,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
-        let cfg = FMCfg {
-            initial_count: INIT_SLOTS,
-            flush_duration: FLUSH_DURATION,
-        };
+        let cfg = FMCfg { initial_count: INIT_SLOTS, flush_duration: FLUSH_DURATION };
 
         (dir, path, cfg)
     }
@@ -1603,10 +1577,7 @@ mod tests {
 
             let mmap = FrozenMMap::<u64, MID>::new_grown(path, cfg, 0x0A).unwrap();
             assert_eq!(mmap.total_slots(), INIT_SLOTS + 0x0A);
-            assert_eq!(
-                mmap.core.curr_length,
-                (INIT_SLOTS + 0x0A) * FrozenMMap::<u64, MID>::SLOT_SIZE
-            );
+            assert_eq!(mmap.core.curr_length, (INIT_SLOTS + 0x0A) * FrozenMMap::<u64, MID>::SLOT_SIZE);
         }
 
         #[test]
