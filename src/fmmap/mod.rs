@@ -56,7 +56,7 @@
 mod posix;
 
 use crate::{
-    error::{ErrCode, FrozenErr, FrozenRes},
+    error::{ErrCode, FrozenError, FrozenResult},
     ffile::{FFCfg, FrozenFile},
     hints,
 };
@@ -132,20 +132,20 @@ pub(in crate::fmmap) mod err {
 }
 
 #[inline]
-pub(in crate::fmmap) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenRes<R> {
-    let err = FrozenErr::new_raw(*mid(), ERRDOMAIN, code, error);
+pub(in crate::fmmap) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenResult<R> {
+    let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, error);
     Err(err)
 }
 
 #[inline]
-pub(in crate::fmmap) fn new_err_default<R>(code: ErrCode) -> FrozenRes<R> {
-    let err = FrozenErr::new_raw(*mid(), ERRDOMAIN, code, "");
+pub(in crate::fmmap) fn new_err_default<R>(code: ErrCode) -> FrozenResult<R> {
+    let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, "");
     Err(err)
 }
 
 #[inline]
-pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenErr {
-    FrozenErr::new_raw(*mid(), ERRDOMAIN, code, error)
+pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenError {
+    FrozenError::new_raw(*mid(), ERRDOMAIN, code, error)
 }
 
 /// Config for [`FrozenMMap`]
@@ -285,7 +285,7 @@ where
     /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
-    pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg) -> FrozenRes<Self> {
+    pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg) -> FrozenResult<Self> {
         Self::validate_t()?;
         let (file, curr_length) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
         let total_slots = curr_length / Self::SLOT_SIZE;
@@ -363,7 +363,7 @@ where
     /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
-    pub fn new_grown<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg, additional_slots: usize) -> FrozenRes<Self> {
+    pub fn new_grown<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg, additional_slots: usize) -> FrozenResult<Self> {
         Self::validate_t()?;
         let (file, _) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
 
@@ -390,7 +390,7 @@ where
     }
 
     /// Create/open a new [`FrozenFile`] instance
-    fn open_file(path: std::path::PathBuf, cfg: &FMCfg) -> FrozenRes<(FrozenFile, usize)> {
+    fn open_file(path: std::path::PathBuf, cfg: &FMCfg) -> FrozenResult<(FrozenFile, usize)> {
         let ff_cfg = FFCfg {
             path,
             chunk_size: Self::SLOT_SIZE,
@@ -404,7 +404,7 @@ where
     }
 
     #[inline]
-    fn validate_t() -> FrozenRes<()> {
+    fn validate_t() -> FrozenResult<()> {
         if std::mem::needs_drop::<T>() {
             return new_err_default(err::DRP);
         }
@@ -460,7 +460,7 @@ where
     /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0x8A);
     /// ```
-    pub fn wait_for_durability(&self, epoch: u64) -> FrozenRes<()> {
+    pub fn wait_for_durability(&self, epoch: u64) -> FrozenResult<()> {
         if let Some(sync_err) = self.core.get_sync_error() {
             return Err(sync_err);
         }
@@ -534,7 +534,7 @@ where
     /// assert_eq!(val, 0x0A);
     /// ```
     #[inline(always)]
-    pub unsafe fn read<R>(&self, index: usize, f: impl FnOnce(*const T) -> R) -> FrozenRes<R> {
+    pub unsafe fn read<R>(&self, index: usize, f: impl FnOnce(*const T) -> R) -> FrozenResult<R> {
         let offset = Self::SLOT_SIZE * index;
         let _lock = self.core.locks.lock(index);
 
@@ -586,7 +586,7 @@ where
     /// assert_eq!(val, 0x2B);
     /// ```
     #[inline(always)]
-    pub unsafe fn write(&self, index: usize, f: impl FnOnce(*mut T)) -> FrozenRes<TEpoch> {
+    pub unsafe fn write(&self, index: usize, f: impl FnOnce(*mut T)) -> FrozenResult<TEpoch> {
         // propagate prev errors
         if let Some(err) = self.core.get_sync_error() {
             return Err(err);
@@ -648,7 +648,7 @@ where
     /// assert_eq!(val, 0xC0DE);
     /// ```
     #[inline(always)]
-    pub unsafe fn write_sync(&self, index: usize, f: impl FnOnce(*mut T)) -> FrozenRes<()> {
+    pub unsafe fn write_sync(&self, index: usize, f: impl FnOnce(*mut T)) -> FrozenResult<()> {
         // propagate prev errors
         if let Some(err) = self.core.get_sync_error() {
             return Err(err);
@@ -839,7 +839,7 @@ where
     /// mmap.delete().unwrap();
     /// assert!(!path.exists());
     /// ```
-    pub fn delete(&mut self) -> FrozenRes<()> {
+    pub fn delete(&mut self) -> FrozenResult<()> {
         // NOTE: we must broadcast that the close is happening to allow flusher tx to wrap up
         self.core.dirty.store(false, atomic::Ordering::Release);
         self.core.closed.store(true, atomic::Ordering::Release);
@@ -857,7 +857,7 @@ where
     }
 
     #[inline]
-    fn munmap(&self) -> FrozenRes<()> {
+    fn munmap(&self) -> FrozenResult<()> {
         let length = self.core.curr_length;
         unsafe { self.core.map.unmap(length) }
     }
@@ -963,7 +963,7 @@ impl<'a, T> FMTransaction<'a, T> {
     /// - No duplicate indices
     /// - No out-of-order writes (must be incremental)
     ///
-    /// Violating this constraint would result in [`FrozenErr`]
+    /// Violating this constraint would result in [`FrozenError`]
     ///
     /// ## Safety
     ///
@@ -1001,7 +1001,7 @@ impl<'a, T> FMTransaction<'a, T> {
     /// assert_eq!((v0, v1, v2), (0x0A, 0x0B, 0x0C));
     /// ```
     #[inline(always)]
-    pub unsafe fn write<F>(&mut self, index: usize, f: F) -> FrozenRes<()>
+    pub unsafe fn write<F>(&mut self, index: usize, f: F) -> FrozenResult<()>
     where
         F: FnOnce(*mut T) + 'a,
     {
@@ -1063,7 +1063,7 @@ impl<'a, T> FMTransaction<'a, T> {
     /// assert_eq!((v0, v1), (0x0A, 0x0C));
     /// ```
     #[inline(always)]
-    pub fn commit(self) -> FrozenRes<u64> {
+    pub fn commit(self) -> FrozenResult<u64> {
         if let Some(err) = self.core.get_sync_error() {
             return Err(err);
         }
@@ -1105,7 +1105,7 @@ struct Core {
     flush_duration: time::Duration,
     current_epoch: atomic::AtomicU64,
     durable_epoch: atomic::AtomicU64,
-    error: atomic::AtomicPtr<sync::Arc<FrozenErr>>,
+    error: atomic::AtomicPtr<sync::Arc<FrozenError>>,
 }
 
 unsafe impl Send for Core {}
@@ -1139,13 +1139,13 @@ impl Core {
     }
 
     #[inline]
-    fn sync(&self) -> FrozenRes<()> {
+    fn sync(&self) -> FrozenResult<()> {
         unsafe { self.map.sync(self.curr_length) }?;
         self.file.sync()
     }
 
     #[inline(always)]
-    fn set_sync_error(&self, err: FrozenErr) {
+    fn set_sync_error(&self, err: FrozenError) {
         let boxed = Box::into_raw(Box::new(sync::Arc::new(err)));
         let old = self.error.swap(boxed, atomic::Ordering::AcqRel);
 
@@ -1156,7 +1156,7 @@ impl Core {
     }
 
     #[inline(always)]
-    fn get_sync_error(&self) -> Option<FrozenErr> {
+    fn get_sync_error(&self) -> Option<FrozenError> {
         let ptr = self.error.load(atomic::Ordering::Acquire);
         if hints::likely(ptr.is_null()) {
             return None;
@@ -1177,12 +1177,12 @@ impl Core {
     }
 
     #[inline]
-    fn acquire_io_lock(&self) -> FrozenRes<sync::RwLockReadGuard<'_, ()>> {
+    fn acquire_io_lock(&self) -> FrozenResult<sync::RwLockReadGuard<'_, ()>> {
         self.io_lock.read().map_err(|e| new_err_raw(err::LPN, e))
     }
 
     #[inline]
-    fn acquire_exclusive_io_lock(&self) -> FrozenRes<sync::RwLockWriteGuard<'_, ()>> {
+    fn acquire_exclusive_io_lock(&self) -> FrozenResult<sync::RwLockWriteGuard<'_, ()>> {
         self.io_lock.write().map_err(|e| new_err_raw(err::LPN, e))
     }
 
@@ -1197,7 +1197,7 @@ impl Core {
         self.durable_epoch.store(curr_epoch, atomic::Ordering::Release);
     }
 
-    fn spawn_tx(core: sync::Arc<Self>) -> FrozenRes<thread::JoinHandle<()>> {
+    fn spawn_tx(core: sync::Arc<Self>) -> FrozenResult<thread::JoinHandle<()>> {
         match thread::Builder::new()
             .name("fm-flush-tx".into())
             .spawn(move || Self::flush_tx(core))
