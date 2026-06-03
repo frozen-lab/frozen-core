@@ -1,79 +1,79 @@
-//! A lock-free multi-producer single-consumer queue
-//!
-//! ## Ownership of `T`
-//!
-//! When [`MPSCQueue::push`] is called, the ownership of `T` is moved into the queue, and when [`MPSCQueue::drain()`]
-//! is called, the ownership is moved back to the caller, via the returned `Vec<T>`, the queue itself never drops `T`
-//! during normal ops; the caller decides when the drained values are dropped
-//!
-//! ## MPSC Model
-//!
-//! By design [`MPSCQueue::drain`] is thread safe, but calling it from multiple threads is semantically incorrect, as in
-//! the MPSC model there should only be a single consumer, while there can be many producers,
-//!
-//! - Many tx can call [`MPSCQueue::push`]
-//! - Only a single tx should call [`MPSCQueue::drain`]
+//! A low-latency implementation of MPSC (multi-producer single-consumer) queue
 //!
 //! ## Benchmarks
 //!
-//! Following are latency measurements for push, drain, and combined operations,
+//! Observed latency for push and drain operations,
 //!
-//! > *NOTE:* All timings represent end-to-end operation cost (including allocation & deallocation)
+//! _NOTE:_ All measurements include end-to-end operation cost (incl. allocations & deallocation)
 //!
 //! ```md
-//! | Operation | Average Latency |
-//! |:----------|:----------------|
-//! | Push      | ~36 ns          |
-//! | Drain     | ~37 ns          |
+//! | Operation | Latency (average)  |
+//! |:----------|:-------------------|
+//! | Push      | ~36 nanoseconds    |
+//! | Drain     | ~37 nanoseconds    |
 //! ```
 //!
 //! Environment used for benching,
 //!
-//! - OS: NixOS (WSL2)
-//! - Architecture: x86_64
-//! - Memory: 8 GiB RAM (DDR4)
-//! - Rust: rustc 1.86.0 w/ cargo 1.86.0
-//! - Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
-//! - CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
+//! * OS: NixOS (WSL2)
+//! * Architecture: x86_64
+//! * Memory: 8 GiB RAM (DDR4)
+//! * Rust: rustc 1.86.0 w/ cargo 1.86.0
+//! * Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+//! * CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
 //!
 //! ## Example
 //!
 //! ```
-//! let queue = frozen_core::mpscq::MPSCQueue::<usize>::default();
+//! use frozen_core::mpscq::MPSCQueue;
 //!
-//! queue.push(1usize);
-//! queue.push(2usize);
+//! let queue = MPSCQueue::<usize>::default();
 //!
-//! let batch = queue.drain();
+//! queue.push(0x10);
+//! queue.push(0x20);
+//!
+//! let batch: Vec<usize> = queue.drain();
 //! assert_eq!(batch.len(), 2);
-//!
-//! drop(batch); // values is dropped here
 //! ```
 
 use core::{ptr, sync::atomic};
 
-/// A lock-free multi-producer single-consumer queue
+/// A low-latency implementation of MPSC (multi-producer single-consumer) queue
 ///
 /// ## Example
 ///
 /// ```
-/// let queue = frozen_core::mpscq::MPSCQueue::<usize>::default();
+/// use frozen_core::mpscq::MPSCQueue;
 ///
-/// queue.push(1usize);
-/// queue.push(2usize);
+/// let queue = MPSCQueue::<usize>::default();
 ///
-/// let batch = queue.drain();
-/// assert_eq!(batch, vec![2usize, 1usize]);
+/// queue.push(0x100);
+/// queue.push(0x200);
 ///
-/// drop(batch); // values is dropped here
+/// let batch: Vec<usize> = queue.drain();
+///
+/// assert_eq!(batch.len(), 2);
+/// assert_eq!(batch, vec![0x200, 0x100]);
 /// ```
 #[derive(Debug)]
 pub struct MPSCQueue<T> {
     head: atomic::AtomicPtr<Node<T>>,
 }
 
+unsafe impl<T> Send for MPSCQueue<T> {}
+unsafe impl<T> Sync for MPSCQueue<T> {}
+
 impl<T> MPSCQueue<T> {
-    /// Check if the [`MPSCQueue`] is currently empty
+    /// Checks if the [`MPSCQueue`] is currently empty
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::mpscq::MPSCQueue;
+    ///
+    /// let queue = MPSCQueue::<usize>::default();
+    /// assert!(queue.is_empty());
+    /// ```
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.head.load(atomic::Ordering::Acquire).is_null()
@@ -81,20 +81,18 @@ impl<T> MPSCQueue<T> {
 
     /// Push an entry into the [`MPSCQueue`]
     ///
-    /// ## Ordering
-    ///
-    /// The queue internally uses a linked list, therefore entries are stored in last-in-first-out (LIFO) order
-    ///
     /// ## Example
     ///
     /// ```
-    /// let queue = frozen_core::mpscq::MPSCQueue::<usize>::default();
-    /// queue.push(1usize);
+    /// use frozen_core::mpscq::MPSCQueue;
+    ///
+    /// let queue = MPSCQueue::<usize>::default();
+    /// queue.push(0x0A);
     ///
     /// let batch = queue.drain();
-    /// assert_eq!(batch.len(), 1);
     ///
-    /// drop(batch); // values is dropped here
+    /// assert_eq!(batch.len(), 1);
+    /// assert_eq!(batch, vec![0x0A]);
     /// ```
     #[inline(always)]
     pub fn push(&self, value: T) {
@@ -103,7 +101,6 @@ impl<T> MPSCQueue<T> {
 
         loop {
             unsafe { (*node).next = head };
-
             match self
                 .head
                 .compare_exchange_weak(head, node, atomic::Ordering::AcqRel, atomic::Ordering::Relaxed)
@@ -114,28 +111,34 @@ impl<T> MPSCQueue<T> {
         }
     }
 
-    /// Drain a batch of entries from [`MPSCQueue`]
+    /// Drain the current batch of items from the [`MPSCQueue`]
     ///
     /// ## Ordering
     ///
-    /// The queue internally behaves like a stack, therefore entries are returned in last-in-first-out (LIFO)
-    /// order when drained
+    /// The queue internally uses a linked list like structure for storing `T`, therefore entries
+    /// are stored in LIFO order.
+    ///
+    /// ## Multiple Consumers
+    ///
+    /// By design [`MPSCQueue::drain`] is thread safe, but draining from multiple threads is
+    /// semantically incorrect. In the MPSC model, there should only be a single consumer, while
+    /// there can be many producers.
     ///
     /// ## Example
     ///
     /// ```
-    /// let queue = frozen_core::mpscq::MPSCQueue::<usize>::default();
+    /// use frozen_core::mpscq::MPSCQueue;
     ///
-    /// queue.push(1usize);
-    /// queue.push(2usize);
-    /// queue.push(3usize);
+    /// let queue = MPSCQueue::<u8>::default();
+    ///
+    /// queue.push(0x0A);
+    /// queue.push(0x0B);
+    /// queue.push(0x0C);
     ///
     /// let batch = queue.drain();
     ///
     /// assert_eq!(batch.len(), 3);
-    /// assert_eq!(batch, vec![3usize, 2usize, 1usize]);
-    ///
-    /// drop(batch); // values is dropped here
+    /// assert_eq!(batch, vec![0x0C, 0x0B, 0x0A]);
     /// ```
     #[inline(always)]
     pub fn drain(&self) -> Vec<T> {
