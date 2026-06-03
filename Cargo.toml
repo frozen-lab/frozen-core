@@ -28,7 +28,6 @@ error = []
 hints = []
 mpscq = []
 default = []
-bpool = ["error"]
 ffile = [
     "libc",
     "error",
@@ -39,12 +38,6 @@ fmmap = [
     "error",
     "hints",
     "ffile",
-]
-fpipe = [
-    "error",
-    "ffile",
-    "bpool",
-    "hints",
 ]
 
 [target.'cfg(unix)'.dependencies]
