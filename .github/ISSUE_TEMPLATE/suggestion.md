@@ -1,11 +1,10 @@
 ---
 name: Suggestion
 about: Suggest an improvement for the project
-title: 'FEAT: '
+title: 'impr: '
 labels: enhancement
 assignees: adityamotale
-type: Feature
-
+type: TASK
 ---
 
 ## Problem
@@ -15,7 +14,3 @@ Is the suggestion related to a specific problem? e.g. X module must implement Y 
 ## Solution
 
 Describe your proposed solution in short.
-
-## Notes
-
-Add any other context or screenshots about the suggestion here.
