@@ -28,7 +28,6 @@ error = []
 hints = []
 mpscq = []
 default = []
-bpool = ["error"]
 ffile = [
     "libc",
     "error",
@@ -39,12 +38,6 @@ fmmap = [
     "error",
     "hints",
     "ffile",
-]
-fpipe = [
-    "error",
-    "ffile",
-    "bpool",
-    "hints",
 ]
 
 [target.'cfg(unix)'.dependencies]
@@ -61,11 +54,6 @@ criterion = { version = "0.8", features = ["html_reports"] }
 name = "crc32"
 harness = false
 required-features = ["crc32"]
-
-[[bench]]
-name = "bpool"
-harness = false
-required-features = ["bpool"]
 
 [[bench]]
 name = "bufpool"
