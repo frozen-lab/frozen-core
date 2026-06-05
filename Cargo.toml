@@ -33,6 +33,13 @@ error = []
 hints = []
 mpscq = []
 bufpool = ["error", "hints"]
+wpipe = [
+    "error",
+    "ffile",
+    "mpscq",
+    "hints",
+    "bufpool",
+]
 ffile = [
     "libc",
     "error",
@@ -51,7 +58,8 @@ default = [
     "crc32",
     "bufpool",
     "ffile",
-    "fmmap"
+    "fmmap",
+    "wpipe",
 ]
 
 [target.'cfg(unix)'.dependencies]

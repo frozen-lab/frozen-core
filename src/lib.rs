@@ -23,4 +23,7 @@ pub mod ffile;
 #[cfg(feature = "fmmap")]
 pub mod fmmap;
 
+#[cfg(feature = "wpipe")]
+pub mod wpipe;
+
 pub mod utils;
