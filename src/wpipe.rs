@@ -45,18 +45,45 @@ unsafe impl Sync for WritePipe {}
 
 impl WritePipe {
     pub fn new(cfg: WritePipeCfg, file: sync::Arc<ffile::FrozenFile>) -> FrozenResult<Self> {
-        Ok(Self { cfg, core: sync::Arc::new(Core::new(file)), flush_tx_handle: None })
+        let core = sync::Arc::new(Core::new(file));
+        let cloned_core = core.clone();
+        let flush_tx_handle = match thread::Builder::new()
+            .name("wpipe_flush_tx".into())
+            .spawn(move || bg_flush_thread(cloned_core, cfg.flush_duration))
+        {
+            Ok(handle) => Some(handle),
+            Err(observed_error) => return Err(err::new_error(cfg.module_id, err::FXE, observed_error)),
+        };
+
+        Ok(Self { cfg, core: core, flush_tx_handle })
     }
 
     #[inline]
-    pub fn write(&self, req: WriteRequest) -> FrozenResult<u64> {
-        let io_lock = self.core.acquire_shared_io_lock();
+    pub fn write(&self, allocation: bufpool::BufPoolAllocation, slot_index: usize) -> FrozenResult<u64> {
+        let _io_lock = self.core.acquire_shared_io_lock();
         if let Some(frozen_error) = self.core.get_flush_error() {
             return Err(frozen_error);
         }
 
-        self.core.queue.push(req);
-        Ok(self.core.increment_current_epoch())
+        let epoch = self.core.increment_current_epoch();
+        let write_req = WriteRequest { allocation, slot_index, assigned_epoch: epoch };
+        self.core.queue.push(write_req);
+
+        Ok(epoch)
+    }
+}
+
+impl Drop for WritePipe {
+    fn drop(&mut self) {
+        self.core.closed.store(true, atomic::Ordering::Release);
+        self.core.flush_cv.notify_one();
+
+        if let Some(handle) = self.flush_tx_handle.take() {
+            let _ = handle.join();
+        }
+
+        // deallocate error memory (prevents memory leak)
+        self.core.del_flush_error();
     }
 }
 
@@ -89,13 +116,12 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
             continue;
         }
 
-        let io_lock = core.acquire_exclusive_io_lock();
-
-        let (min_index, max_index) = match core.write_queued_ops(queued_ops) {
+        let _io_lock = core.acquire_exclusive_io_lock();
+        let (min_index, max_index, max_epoch) = match core.write_queued_ops(queued_ops) {
             Ok(res) => res,
             Err(frozen_error) => {
                 core.set_flush_error(frozen_error);
-                drop(io_lock);
+                drop(_io_lock);
 
                 continue;
             }
@@ -104,7 +130,7 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
         #[cfg(target_os = "linux")]
         if let Err(frozen_error) = core.file.sync_range(min_index, max_index - min_index) {
             core.set_flush_error(frozen_error);
-            drop(io_lock);
+            drop(_io_lock);
 
             continue;
         }
@@ -112,12 +138,12 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
         match core.file.sync() {
             Err(frozen_error) => {
                 core.set_flush_error(frozen_error);
-                drop(io_lock);
+                drop(_io_lock);
 
                 continue;
             }
             Ok(_) => {
-                core.mark_current_epoch_as_durable();
+                core.mark_epoch_as_durable(max_epoch);
                 core.del_flush_error();
             }
         }
@@ -200,12 +226,14 @@ impl Core {
     }
 
     #[inline(always)]
-    fn write_queued_ops(&self, queued_ops: Vec<WriteRequest>) -> FrozenResult<(usize, usize)> {
-        let mut min_index = 0;
-        let mut max_index = usize::MAX;
+    fn write_queued_ops(&self, queued_ops: Vec<WriteRequest>) -> FrozenResult<(usize, usize, u64)> {
+        let mut max_epoch = 0;
+        let mut max_index = 0;
+        let mut min_index = usize::MAX;
 
         for op in queued_ops {
-            match op.allocation.length() {
+            let ops_len = op.allocation.length();
+            match ops_len {
                 1 => {
                     self.file.pwrite(op.allocation.first(), op.slot_index)?;
                 }
@@ -214,25 +242,43 @@ impl Core {
                     self.file.pwritev(&bufs, op.slot_index)?;
                 }
             }
+
+            min_index = min_index.min(op.slot_index);
+            max_epoch = max_epoch.max(op.assigned_epoch);
+            max_index = max_index.max(op.slot_index + ops_len);
         }
 
-        Ok((min_index, max_index))
+        Ok((min_index, max_index, max_epoch))
     }
 
     #[inline]
     fn increment_current_epoch(&self) -> u64 {
-        self.epoch.fetch_add(1, atomic::Ordering::Acquire)
+        self.epoch.fetch_add(1, atomic::Ordering::AcqRel).wrapping_add(1)
     }
 
     #[inline]
-    fn mark_current_epoch_as_durable(&self) {
-        let curr_epoch = self.epoch.load(atomic::Ordering::Acquire);
-        let _ = self.durable_epoch.swap(curr_epoch - 1, atomic::Ordering::AcqRel);
+    fn mark_epoch_as_durable(&self, epoch: u64) {
+        self.durable_epoch.store(epoch, atomic::Ordering::Release);
     }
 }
 
 #[derive(Debug)]
-pub struct WriteRequest {
-    slot_index: usize,
+struct WriteRequest {
     allocation: bufpool::BufPoolAllocation,
+    assigned_epoch: u64,
+    slot_index: usize,
+}
+
+mod err {
+    use crate::error::{ErrCode, FrozenError};
+
+    /// Domain ID for [`wpipe`] module is `0x02` used while propagating errors
+    const DOMAIN_ID: u8 = 0x02;
+
+    #[inline]
+    pub fn new_error<E: std::fmt::Display>(module_id: u8, code: ErrCode, observed_error: E) -> FrozenError {
+        FrozenError::new_raw(module_id, DOMAIN_ID, code, observed_error)
+    }
+
+    pub const FXE: ErrCode = ErrCode::new(0x10, "unable to spawn background flush thread");
 }
