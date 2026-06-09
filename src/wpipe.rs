@@ -6,7 +6,11 @@ use crate::{
     error::{FrozenError, FrozenResult},
     ffile, hints, mpscq,
 };
-use std::{ptr, sync, sync::atomic, thread, time};
+use std::{
+    ptr,
+    sync::{self, atomic},
+    thread, time,
+};
 
 /// All the available configurations for [`WritePipe`]
 ///
@@ -59,17 +63,17 @@ impl WritePipe {
     }
 
     #[inline]
-    pub fn write(&self, allocation: bufpool::BufPoolAllocation, slot_index: usize) -> FrozenResult<u64> {
+    pub fn write(&self, request: WriteRequest) -> FrozenResult<WriteTicket> {
         let _io_lock = self.core.acquire_shared_io_lock();
-        if let Some(frozen_error) = self.core.get_flush_error() {
+        if let Some(frozen_error) = self.core.completion.error.get() {
             return Err(frozen_error);
         }
 
         let epoch = self.core.increment_current_epoch();
-        let write_req = WriteRequest { allocation, slot_index, assigned_epoch: epoch };
-        self.core.queue.push(write_req);
+        let internal_req = WriteRequestInternal { request, epoch };
+        self.core.queue.push(internal_req);
 
-        Ok(epoch)
+        Ok(WriteTicket { epoch, completion: self.core.completion.clone() })
     }
 }
 
@@ -81,9 +85,61 @@ impl Drop for WritePipe {
         if let Some(handle) = self.flush_tx_handle.take() {
             let _ = handle.join();
         }
+    }
+}
 
-        // deallocate error memory (prevents memory leak)
-        self.core.del_flush_error();
+#[derive(Debug)]
+pub struct WriteRequest {
+    allocation: bufpool::BufPoolAllocation,
+    slot_index: usize,
+}
+
+#[derive(Debug)]
+pub struct WriteTicket {
+    epoch: u64,
+    completion: sync::Arc<Completion>,
+}
+
+impl WriteTicket {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    #[inline]
+    fn is_ready(&self) -> bool {
+        let durable = self.completion.durable_epoch.load(atomic::Ordering::Acquire);
+        if hints::likely(durable >= self.epoch) {
+            return true;
+        }
+
+        false
+    }
+}
+
+impl std::future::Future for WriteTicket {
+    type Output = FrozenResult<u64>;
+
+    #[inline(always)]
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        if self.is_ready() {
+            return std::task::Poll::Ready(Ok(self.epoch));
+        }
+
+        if let Some(frozen_error) = self.completion.error.get() {
+            return std::task::Poll::Ready(Err(frozen_error));
+        }
+
+        self.completion.waker.register(cx.waker());
+
+        if self.is_ready() {
+            return std::task::Poll::Ready(Ok(self.epoch));
+        }
+
+        if let Some(frozen_error) = self.completion.error.get() {
+            return std::task::Poll::Ready(Err(frozen_error));
+        }
+
+        std::task::Poll::Pending
     }
 }
 
@@ -119,8 +175,9 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
         let _io_lock = core.acquire_exclusive_io_lock();
         let (min_index, max_index, max_epoch) = match core.write_queued_ops(queued_ops) {
             Ok(res) => res,
-            Err(frozen_error) => {
-                core.set_flush_error(frozen_error);
+            Err(new_error) => {
+                core.completion.error.set(new_error);
+                core.completion.waker.wake();
                 drop(_io_lock);
 
                 continue;
@@ -128,88 +185,50 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
         };
 
         #[cfg(target_os = "linux")]
-        if let Err(frozen_error) = core.file.sync_range(min_index, max_index - min_index) {
-            core.set_flush_error(frozen_error);
+        if let Err(new_error) = core.file.sync_range(min_index, max_index - min_index) {
+            core.completion.error.set(new_error);
+            core.completion.waker.wake();
             drop(_io_lock);
 
             continue;
         }
 
-        match core.file.sync() {
-            Err(frozen_error) => {
-                core.set_flush_error(frozen_error);
-                drop(_io_lock);
+        if let Err(new_error) = core.file.sync() {
+            core.completion.error.set(new_error);
+            core.completion.waker.wake();
+            drop(_io_lock);
 
-                continue;
-            }
-            Ok(_) => {
-                core.mark_epoch_as_durable(max_epoch);
-                core.del_flush_error();
-            }
+            continue;
+        } else {
+            core.completion.mark_epoch_as_durable(max_epoch);
+            core.completion.error.del();
         }
     }
 }
 
 #[derive(Debug)]
 struct Core {
+    completion: sync::Arc<Completion>,
     closed: atomic::AtomicBool,
     epoch: atomic::AtomicU64,
-    durable_epoch: atomic::AtomicU64,
     file: sync::Arc<ffile::FrozenFile>,
     flush_cv: sync::Condvar,
-    flush_error: atomic::AtomicPtr<FrozenError>,
     flush_guard: sync::Mutex<()>,
     io_lock: sync::RwLock<()>,
-    queue: mpscq::MPSCQueue<WriteRequest>,
+    queue: mpscq::MPSCQueue<WriteRequestInternal>,
 }
-
-unsafe impl Send for Core {}
 
 impl Core {
     fn new(file: sync::Arc<ffile::FrozenFile>) -> Self {
         Self {
             file,
+            completion: sync::Arc::new(Completion::default()),
             closed: atomic::AtomicBool::new(false),
             epoch: atomic::AtomicU64::new(0),
-            durable_epoch: atomic::AtomicU64::new(0),
             flush_cv: sync::Condvar::new(),
-            flush_error: atomic::AtomicPtr::new(ptr::null_mut()),
             flush_guard: sync::Mutex::new(()),
             io_lock: sync::RwLock::new(()),
             queue: mpscq::MPSCQueue::default(),
-        }
-    }
-
-    #[inline]
-    fn set_flush_error(&self, new_error: FrozenError) {
-        let boxed_err = Box::into_raw(Box::new(new_error));
-        let old_err = self.flush_error.swap(boxed_err, atomic::Ordering::AcqRel);
-
-        if hints::unlikely(!old_err.is_null()) {
-            unsafe {
-                drop(Box::from_raw(old_err));
-            }
-        }
-    }
-
-    #[inline]
-    fn get_flush_error(&self) -> Option<FrozenError> {
-        let error_ptr = self.flush_error.load(atomic::Ordering::Acquire);
-        if hints::likely(error_ptr.is_null()) {
-            return None;
-        }
-
-        let frozen_error = unsafe { (*error_ptr).clone() };
-        Some(frozen_error)
-    }
-
-    #[inline]
-    fn del_flush_error(&self) {
-        let old_error = self.flush_error.swap(ptr::null_mut(), atomic::Ordering::AcqRel);
-        if hints::unlikely(!old_error.is_null()) {
-            unsafe {
-                drop(Box::from_raw(old_error));
-            }
         }
     }
 
@@ -226,26 +245,26 @@ impl Core {
     }
 
     #[inline(always)]
-    fn write_queued_ops(&self, queued_ops: Vec<WriteRequest>) -> FrozenResult<(usize, usize, u64)> {
+    fn write_queued_ops(&self, queued_ops: Vec<WriteRequestInternal>) -> FrozenResult<(usize, usize, u64)> {
         let mut max_epoch = 0;
         let mut max_index = 0;
         let mut min_index = usize::MAX;
 
         for op in queued_ops {
-            let ops_len = op.allocation.length();
+            let ops_len = op.request.allocation.length();
             match ops_len {
                 1 => {
-                    self.file.pwrite(op.allocation.first(), op.slot_index)?;
+                    self.file.pwrite(op.request.allocation.first(), op.request.slot_index)?;
                 }
                 _ => {
-                    let bufs: Vec<bufpool::BufferPointer> = op.allocation.iter().collect();
-                    self.file.pwritev(&bufs, op.slot_index)?;
+                    let bufs: Vec<bufpool::BufferPointer> = op.request.allocation.iter().collect();
+                    self.file.pwritev(&bufs, op.request.slot_index)?;
                 }
             }
 
-            min_index = min_index.min(op.slot_index);
-            max_epoch = max_epoch.max(op.assigned_epoch);
-            max_index = max_index.max(op.slot_index + ops_len);
+            max_epoch = max_epoch.max(op.epoch);
+            min_index = min_index.min(op.request.slot_index);
+            max_index = max_index.max(op.request.slot_index + ops_len);
         }
 
         Ok((min_index, max_index, max_epoch))
@@ -255,18 +274,85 @@ impl Core {
     fn increment_current_epoch(&self) -> u64 {
         self.epoch.fetch_add(1, atomic::Ordering::AcqRel).wrapping_add(1)
     }
+}
 
-    #[inline]
+#[derive(Debug)]
+struct WriteRequestInternal {
+    epoch: u64,
+    request: WriteRequest,
+}
+
+#[derive(Debug)]
+struct Completion {
+    durable_epoch: atomic::AtomicU64,
+    error: FlushError,
+    waker: futures::task::AtomicWaker,
+}
+
+impl Default for Completion {
+    fn default() -> Self {
+        Self {
+            durable_epoch: atomic::AtomicU64::new(0),
+            waker: futures::task::AtomicWaker::new(),
+            error: FlushError::default(),
+        }
+    }
+}
+
+impl Completion {
     fn mark_epoch_as_durable(&self, epoch: u64) {
         self.durable_epoch.store(epoch, atomic::Ordering::Release);
+        self.waker.wake();
     }
 }
 
 #[derive(Debug)]
-struct WriteRequest {
-    allocation: bufpool::BufPoolAllocation,
-    assigned_epoch: u64,
-    slot_index: usize,
+struct FlushError(atomic::AtomicPtr<FrozenError>);
+
+impl Default for FlushError {
+    fn default() -> Self {
+        Self(atomic::AtomicPtr::new(ptr::null_mut()))
+    }
+}
+
+impl Drop for FlushError {
+    fn drop(&mut self) {
+        let err_ptr = self.0.load(atomic::Ordering::Acquire);
+        if !err_ptr.is_null() {
+            let _ = unsafe { Box::from_raw(err_ptr) };
+        }
+    }
+}
+
+impl FlushError {
+    #[inline]
+    fn get(&self) -> Option<FrozenError> {
+        let curr_err = self.0.load(atomic::Ordering::Acquire);
+        if hints::unlikely(!curr_err.is_null()) {
+            let frozen_error = unsafe { (*curr_err).clone() };
+            return Some(frozen_error);
+        }
+
+        None
+    }
+
+    #[inline]
+    fn set(&self, new_error: FrozenError) {
+        let boxed_error = Box::into_raw(Box::new(new_error));
+        let old_err = self.0.swap(boxed_error, atomic::Ordering::AcqRel);
+
+        if hints::unlikely(!old_err.is_null()) {
+            let _ = unsafe { Box::from_raw(old_err) };
+        }
+    }
+
+    #[inline]
+    fn del(&self) {
+        let old_err = self.0.swap(ptr::null_mut(), atomic::Ordering::AcqRel);
+        if hints::unlikely(!old_err.is_null()) {
+            let _ = unsafe { Box::from_raw(old_err) };
+        }
+    }
 }
 
 mod err {
