@@ -368,3 +368,392 @@ mod err {
 
     pub const FXE: ErrCode = ErrCode::new(0x10, "unable to spawn background flush thread");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::BufferSize;
+
+    const MODULE_ID: u8 = 0x00;
+    const BUFFER_SIZE: BufferSize = BufferSize::S128;
+    const INITIAL_BUFFER_AMOUT: usize = 0x200;
+    const FLUSH_DURATION: time::Duration = time::Duration::from_millis(1);
+
+    fn new_objects<P: AsRef<std::path::Path>>(path: P) -> (sync::Arc<ffile::FrozenFile>, bufpool::BufPool, WritePipe) {
+        let file_cfg = ffile::FFCfg {
+            path: path.as_ref().to_path_buf(),
+            chunk_size: BUFFER_SIZE as usize,
+            initial_chunk_amount: INITIAL_BUFFER_AMOUT,
+        };
+        let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).unwrap());
+
+        let pool_cfg =
+            bufpool::BufPoolCfg { buffer_size: BUFFER_SIZE, max_memory: INITIAL_BUFFER_AMOUT * BUFFER_SIZE as usize };
+        let pool = bufpool::BufPool::new(pool_cfg);
+
+        let pipe_cfg = WritePipeCfg { module_id: MODULE_ID, flush_duration: FLUSH_DURATION };
+        let pipe = WritePipe::new(pipe_cfg, file.clone()).unwrap();
+
+        (file, pool, pipe)
+    }
+
+    fn prep_write(buf_ptr: *const u8, n: usize, pool: &bufpool::BufPool) -> bufpool::BufPoolAllocation {
+        let allocation = pool.allocate(n);
+        for allocated_buf in allocation.iter() {
+            unsafe { ptr::copy_nonoverlapping(buf_ptr, allocated_buf, BUFFER_SIZE as usize) };
+        }
+
+        allocation
+    }
+
+    fn compare_with_readback(
+        buf: &[u8],
+        read_index: usize,
+        required: usize,
+        pool: &bufpool::BufPool,
+        file: &ffile::FrozenFile,
+    ) {
+        let read_allocation = pool.allocate(required);
+        let read_bufs: Vec<bufpool::BufferPointer> = read_allocation.iter().collect();
+
+        file.preadv(&read_bufs, read_index).unwrap();
+
+        for read_buf in read_allocation.iter() {
+            let observed = unsafe { std::slice::from_raw_parts(read_buf, BUFFER_SIZE as usize) };
+            assert_eq!(buf, observed);
+        }
+    }
+
+    mod lifecycle {
+        use super::*;
+
+        #[test]
+        fn ok_new() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+
+            let file_cfg =
+                ffile::FFCfg { path, chunk_size: BUFFER_SIZE as usize, initial_chunk_amount: INITIAL_BUFFER_AMOUT };
+            let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).unwrap());
+
+            let pool_cfg = bufpool::BufPoolCfg {
+                buffer_size: BUFFER_SIZE,
+                max_memory: INITIAL_BUFFER_AMOUT * BUFFER_SIZE as usize,
+            };
+            let pool = bufpool::BufPool::new(pool_cfg);
+
+            let pipe_cfg = WritePipeCfg { module_id: MODULE_ID, flush_duration: FLUSH_DURATION };
+            assert!(WritePipe::new(pipe_cfg, file).is_ok());
+        }
+
+        #[test]
+        fn ok_drop() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+            let (file, pool, pipe) = new_objects(path);
+
+            drop(pipe);
+        }
+    }
+
+    mod shutdown {
+        use super::*;
+
+        #[test]
+        fn ok_drop_before_pending_write_call() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+            let (file, pool, pipe) = new_objects(path);
+
+            const BUFFER: [u8; BUFFER_SIZE as usize] = [0x20; BUFFER_SIZE as usize];
+
+            let allocation = prep_write(BUFFER.as_ptr(), 1, &pool);
+            let request = WriteRequest { allocation, slot_index: 0 };
+
+            assert!(pipe.write(request).is_ok());
+            drop(pipe);
+        }
+
+        #[test]
+        fn ok_drop_waits_for_pending_write_call() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+
+            const BUFFER: [u8; BUFFER_SIZE as usize] = [0x20; BUFFER_SIZE as usize];
+
+            // new + write + drop
+            {
+                let (file, pool, pipe) = new_objects(path.clone());
+
+                let allocation = prep_write(BUFFER.as_ptr(), 1, &pool);
+                let request = WriteRequest { allocation, slot_index: 0 };
+
+                assert!(pipe.write(request).is_ok());
+                drop(pipe);
+            }
+
+            // open + readback
+            {
+                let (file, pool, pipe) = new_objects(path);
+                compare_with_readback(&BUFFER, 0, 1, &pool, &file);
+            }
+        }
+
+        #[test]
+        fn ok_drop_does_not_deadlock_when_multiple_pending_writes() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+            let (file, pool, pipe) = new_objects(path);
+
+            for i in 0..INITIAL_BUFFER_AMOUT {
+                let buffer = vec![i as u8; BUFFER_SIZE as usize];
+                let allocation = prep_write(buffer.as_ptr(), 1, &pool);
+                let request = WriteRequest { allocation, slot_index: 0 };
+
+                assert!(pipe.write(request).is_ok());
+            }
+
+            drop(pipe);
+        }
+
+        #[test]
+        fn ok_drop_correctly_waits_for_pending_write_with_multi_threads() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+            let (file, pool, pipe) = new_objects(path);
+
+            const BUFFER: [u8; BUFFER_SIZE as usize] = [0x20; BUFFER_SIZE as usize];
+
+            let pipe = sync::Arc::new(pipe);
+            let pipe2 = sync::Arc::clone(&pipe);
+
+            let handle = thread::spawn(move || {
+                let allocation = prep_write(BUFFER.as_ptr(), 1, &pool);
+                let request = WriteRequest { allocation, slot_index: 0 };
+
+                assert!(pipe2.write(request).is_ok());
+            });
+
+            drop(pipe);
+            handle.join().unwrap();
+        }
+    }
+
+    mod pipe_writes {
+        use super::*;
+
+        #[test]
+        fn ok_write() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+            let (file, pool, pipe) = new_objects(path);
+
+            const BUFFER: [u8; BUFFER_SIZE as usize] = [0x0Au8; BUFFER_SIZE as usize];
+            let allocation = prep_write(BUFFER.as_ptr(), 0x0A, &pool);
+
+            let request = WriteRequest { allocation, slot_index: 0 };
+            assert!(pipe.write(request).is_ok());
+        }
+
+        #[test]
+        fn ok_write_epoch_is_monotonic() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+            let (file, pool, pipe) = new_objects(path);
+
+            const BUFFER: [u8; BUFFER_SIZE as usize] = [0x0Au8; BUFFER_SIZE as usize];
+
+            let allocation1 = prep_write(BUFFER.as_ptr(), 1, &pool);
+            let ticket1 = pipe.write(WriteRequest { allocation: allocation1, slot_index: 0 }).unwrap();
+
+            let allocation2 = prep_write(BUFFER.as_ptr(), 1, &pool);
+            let ticket2 = pipe.write(WriteRequest { allocation: allocation2, slot_index: 1 }).unwrap();
+
+            let allocation3 = prep_write(BUFFER.as_ptr(), 1, &pool);
+            let ticket3 = pipe.write(WriteRequest { allocation: allocation3, slot_index: 2 }).unwrap();
+
+            assert!(ticket3.epoch() > ticket2.epoch());
+            assert!(ticket2.epoch() > ticket1.epoch());
+        }
+    }
+
+    mod write_ticket {
+        use super::*;
+
+        #[test]
+        fn ok_readback_after_write_with_await() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+            let (file, pool, pipe) = new_objects(path);
+
+            const REQUIRED: usize = 0x0A;
+            const BUFFER: [u8; BUFFER_SIZE as usize] = [0x0Au8; BUFFER_SIZE as usize];
+
+            let write_allocation = prep_write(BUFFER.as_ptr(), REQUIRED, &pool);
+            let request = WriteRequest { allocation: write_allocation, slot_index: 0 };
+
+            let ticket = pipe.write(request).unwrap();
+            let ticket_epoch = ticket.epoch();
+
+            let durable_epoch = futures::executor::block_on(ticket).unwrap();
+            assert!(durable_epoch >= ticket_epoch);
+
+            compare_with_readback(&BUFFER, 0, REQUIRED, &pool, &file);
+        }
+
+        #[test]
+        fn ok_readback_after_batch_write() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+            let (file, pool, pipe) = new_objects(path);
+
+            const BUFFERS: [([u8; BUFFER_SIZE as usize], usize); 5] = [
+                ([0x0Au8; BUFFER_SIZE as usize], 0x1A),
+                ([0x0Bu8; BUFFER_SIZE as usize], 0x1B),
+                ([0x0Cu8; BUFFER_SIZE as usize], 0x1C),
+                ([0x0Du8; BUFFER_SIZE as usize], 0x1D),
+                ([0x0Eu8; BUFFER_SIZE as usize], 0x1E),
+            ];
+
+            let mut slot_index = 0;
+            let mut latest_ticket = None;
+
+            for (buf, required) in BUFFERS {
+                let allocation = prep_write(buf.as_ptr(), required, &pool);
+                let request = WriteRequest { allocation, slot_index };
+                let ticket = pipe.write(request).unwrap();
+
+                slot_index += required;
+                latest_ticket = Some(ticket);
+            }
+
+            assert!(latest_ticket.is_some());
+
+            if let Some(ticket) = latest_ticket {
+                let ticket_epoch = ticket.epoch();
+                let durable_epoch = futures::executor::block_on(ticket).unwrap();
+
+                assert!(durable_epoch >= ticket_epoch);
+            }
+
+            let mut read_index = 0;
+            for (buf, required) in BUFFERS {
+                compare_with_readback(&buf, read_index, required, &pool, &file);
+                read_index += required;
+            }
+        }
+
+        #[test]
+        fn ok_multiple_concurrent_awaits() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("write_single");
+            let (file, pool, pipe) = new_objects(path);
+
+            const REQUIRED: usize = 0x0A;
+            const BUFFER: [u8; BUFFER_SIZE as usize] = [0x0Au8; BUFFER_SIZE as usize];
+
+            let allocation1 = prep_write(BUFFER.as_ptr(), REQUIRED, &pool);
+            let ticket1 = pipe.write(WriteRequest { allocation: allocation1, slot_index: 0 }).unwrap();
+
+            let allocation2 = prep_write(BUFFER.as_ptr(), REQUIRED, &pool);
+            let ticket2 = pipe.write(WriteRequest { allocation: allocation2, slot_index: 0 }).unwrap();
+
+            let (e1, e2) = futures::executor::block_on(async { futures::join!(ticket1, ticket2) });
+
+            assert!(e1.is_ok());
+            assert!(e2.is_ok());
+            assert!(e2.unwrap() > e1.unwrap());
+        }
+
+        #[test]
+        fn ok_awaiting_last_ticket_implies_previous_writes_are_durable() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("durability_boundary");
+
+            let (file, pool, pipe) = new_objects(path);
+
+            const BUFFER_A: [u8; BUFFER_SIZE as usize] = [0xAA; BUFFER_SIZE as usize];
+            const BUFFER_B: [u8; BUFFER_SIZE as usize] = [0xBB; BUFFER_SIZE as usize];
+            const BUFFER_C: [u8; BUFFER_SIZE as usize] = [0xCC; BUFFER_SIZE as usize];
+
+            let alloc_a = prep_write(BUFFER_A.as_ptr(), 1, &pool);
+            let ticket_a = pipe.write(WriteRequest { allocation: alloc_a, slot_index: 0 }).unwrap();
+
+            let alloc_b = prep_write(BUFFER_B.as_ptr(), 1, &pool);
+            let ticket_b = pipe.write(WriteRequest { allocation: alloc_b, slot_index: 1 }).unwrap();
+
+            let alloc_c = prep_write(BUFFER_C.as_ptr(), 1, &pool);
+            let ticket_c = pipe.write(WriteRequest { allocation: alloc_c, slot_index: 2 }).unwrap();
+
+            let epoch_a = ticket_a.epoch();
+            let epoch_b = ticket_b.epoch();
+            let epoch_c = ticket_c.epoch();
+
+            let durable_epoch = futures::executor::block_on(ticket_c).unwrap();
+            assert!(durable_epoch >= epoch_c);
+            assert!(durable_epoch >= epoch_b);
+            assert!(durable_epoch >= epoch_a);
+
+            compare_with_readback(&BUFFER_A, 0, 1, &pool, &file);
+            compare_with_readback(&BUFFER_B, 1, 1, &pool, &file);
+            compare_with_readback(&BUFFER_C, 2, 1, &pool, &file);
+        }
+    }
+
+    mod concurrency {
+        use super::*;
+
+        #[test]
+        fn ok_multi_threaded_writers() {
+            const THREADS: usize = 4;
+            const WRITES_PER_THREAD: usize = 0x40;
+            const _: () = assert!(THREADS * WRITES_PER_THREAD < INITIAL_BUFFER_AMOUT);
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("multi_threaded_writers");
+
+            let (file, pool, pipe) = new_objects(path);
+
+            let pipe = sync::Arc::new(pipe);
+            let pool = sync::Arc::new(pool);
+
+            let mut handles = Vec::with_capacity(THREADS);
+            for tid in 0..THREADS {
+                let pipe = sync::Arc::clone(&pipe);
+                let pool = sync::Arc::clone(&pool);
+
+                handles.push(thread::spawn(move || {
+                    let mut tickets = Vec::with_capacity(WRITES_PER_THREAD);
+
+                    for i in 0..WRITES_PER_THREAD {
+                        let buffer = vec![tid as u8; BUFFER_SIZE as usize];
+                        let allocation = prep_write(buffer.as_ptr(), 1, &pool);
+                        let slot_index = tid * WRITES_PER_THREAD + i;
+                        let ticket = pipe.write(WriteRequest { allocation, slot_index }).unwrap();
+
+                        tickets.push(ticket);
+                    }
+
+                    tickets
+                }));
+            }
+
+            let mut tickets = Vec::new();
+            for handle in handles {
+                tickets.extend(handle.join().unwrap());
+            }
+            assert_eq!(tickets.len(), THREADS * WRITES_PER_THREAD,);
+
+            let mut epochs: Vec<u64> = tickets.iter().map(WriteTicket::epoch).collect();
+            epochs.sort_unstable();
+
+            for (ed, observed) in (1u64..=epochs.len() as u64).zip(epochs.iter().copied()) {
+                assert_eq!(ed, observed);
+            }
+
+            let latest_ticket = tickets.into_iter().max_by_key(WriteTicket::epoch).unwrap();
+            let durable_epoch = futures::executor::block_on(latest_ticket).unwrap();
+            assert_eq!(durable_epoch, (THREADS * WRITES_PER_THREAD) as u64,);
+        }
+    }
+}
