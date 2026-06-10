@@ -8,12 +8,11 @@ use frozen_core::{
 };
 use std::{hint::black_box, sync::Arc};
 
-const MID: u8 = 0;
 const BUF_SIZE: BufferSize = BufferSize::S64;
 
 #[inline]
 fn new_pool(max_memory: usize) -> BufPool {
-    BufPool::new(BufPoolCfg { module_id: MID, buffer_size: BUF_SIZE, max_memory })
+    BufPool::new(BufPoolCfg { buffer_size: BUF_SIZE, max_memory })
 }
 
 fn bench_bpool(c: &mut Criterion) {

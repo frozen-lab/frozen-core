@@ -1,0 +1,61 @@
+//! Benchmarks for `wpipe` module
+//! Run using: `taskset -c 2,3,4 cargo bench --bench wpipe --features=wpipe`
+
+use frozen_core::{bufpool, ffile, utils, wpipe};
+use hdrhistogram::Histogram;
+use std::{ptr, sync, time};
+
+const MODULE_ID: u8 = 0x00;
+const OPS: usize = 0x400_000;
+const WARMUP_OPS: usize = OPS >> 0x0C;
+const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
+
+fn main() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("wpipe_bench_latency");
+
+    let file_cfg = ffile::FFCfg { path, chunk_size: BUFFER_SIZE as usize, initial_chunk_amount: OPS };
+    let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).expect("new ffile"));
+
+    let pool_cfg = bufpool::BufPoolCfg { buffer_size: BUFFER_SIZE, max_memory: OPS * BUFFER_SIZE as usize };
+    let pool = bufpool::BufPool::new(pool_cfg);
+
+    let pipe_cfg = wpipe::WritePipeCfg { module_id: MODULE_ID, flush_duration: time::Duration::from_millis(1) };
+    let pipe = wpipe::WritePipe::new(pipe_cfg, file).expect("new wpipe");
+
+    let payload = [0xAAu8; BUFFER_SIZE as usize];
+
+    // warmup
+    for i in 0..WARMUP_OPS {
+        let allocation = pool.allocate(1);
+        unsafe { ptr::copy_nonoverlapping(payload.as_ptr(), allocation.first(), BUFFER_SIZE as usize) };
+
+        let req = wpipe::WriteRequest { allocation, slot_index: i };
+        let _ticket = pipe.write(req).expect("push write");
+    }
+
+    let mut hist = Histogram::<u64>::new(3).expect("new histogram");
+    for i in 0..OPS {
+        let allocation = pool.allocate(1);
+        unsafe { ptr::copy_nonoverlapping(payload.as_ptr(), allocation.first(), BUFFER_SIZE as usize) };
+
+        let req = wpipe::WriteRequest { allocation, slot_index: i };
+        let start = time::Instant::now();
+
+        let _ticket = pipe.write(req).expect("push write");
+        let latency_ns = start.elapsed().as_nanos() as u64;
+
+        hist.record(latency_ns).expect("push measurement");
+    }
+
+    println!();
+    println!("| Metric     | Value (µs)    |");
+    println!("|:-----------|:--------------|");
+    println!("| P50        | {:.4}         |", hist.value_at_quantile(0.50) as f64 / 1000.0);
+    println!("| P90        | {:.4}         |", hist.value_at_quantile(0.90) as f64 / 1000.0);
+    println!("| P99        | {:.4}         |", hist.value_at_quantile(0.99) as f64 / 1000.0);
+    println!("| MEAN       | {:.4}         |", hist.mean() as f64 / 1000.0);
+    println!();
+
+    println!("*NOTE:* Measured w/ {OPS} operations");
+}

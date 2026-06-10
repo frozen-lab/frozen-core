@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-#![allow(unused)]
 
 use crate::{
     bufpool,
@@ -39,7 +38,6 @@ pub struct WritePipeCfg {
 
 #[derive(Debug)]
 pub struct WritePipe {
-    cfg: WritePipeCfg,
     core: sync::Arc<Core>,
     flush_tx_handle: Option<thread::JoinHandle<()>>,
 }
@@ -52,14 +50,14 @@ impl WritePipe {
         let core = sync::Arc::new(Core::new(file));
         let cloned_core = core.clone();
         let flush_tx_handle = match thread::Builder::new()
-            .name("wpipe_flush_tx".into())
+            .name(format!("mod{}_wpipe_flush_tx", cfg.module_id))
             .spawn(move || bg_flush_thread(cloned_core, cfg.flush_duration))
         {
             Ok(handle) => Some(handle),
             Err(observed_error) => return Err(err::new_error(cfg.module_id, err::FXE, observed_error)),
         };
 
-        Ok(Self { cfg, core: core, flush_tx_handle })
+        Ok(Self { core: core, flush_tx_handle })
     }
 
     #[inline]
@@ -90,8 +88,8 @@ impl Drop for WritePipe {
 
 #[derive(Debug)]
 pub struct WriteRequest {
-    allocation: bufpool::BufPoolAllocation,
-    slot_index: usize,
+    pub allocation: bufpool::BufPoolAllocation,
+    pub slot_index: usize,
 }
 
 #[derive(Debug)]
@@ -436,12 +434,6 @@ mod tests {
                 ffile::FFCfg { path, chunk_size: BUFFER_SIZE as usize, initial_chunk_amount: INITIAL_BUFFER_AMOUT };
             let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).unwrap());
 
-            let pool_cfg = bufpool::BufPoolCfg {
-                buffer_size: BUFFER_SIZE,
-                max_memory: INITIAL_BUFFER_AMOUT * BUFFER_SIZE as usize,
-            };
-            let pool = bufpool::BufPool::new(pool_cfg);
-
             let pipe_cfg = WritePipeCfg { module_id: MODULE_ID, flush_duration: FLUSH_DURATION };
             assert!(WritePipe::new(pipe_cfg, file).is_ok());
         }
@@ -450,7 +442,7 @@ mod tests {
         fn ok_drop() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("write_single");
-            let (file, pool, pipe) = new_objects(path);
+            let (_file, _, pipe) = new_objects(path);
 
             drop(pipe);
         }
@@ -463,7 +455,7 @@ mod tests {
         fn ok_drop_before_pending_write_call() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("write_single");
-            let (file, pool, pipe) = new_objects(path);
+            let (_file, pool, pipe) = new_objects(path);
 
             const BUFFER: [u8; BUFFER_SIZE as usize] = [0x20; BUFFER_SIZE as usize];
 
@@ -483,7 +475,7 @@ mod tests {
 
             // new + write + drop
             {
-                let (file, pool, pipe) = new_objects(path.clone());
+                let (_file, pool, pipe) = new_objects(path.clone());
 
                 let allocation = prep_write(BUFFER.as_ptr(), 1, &pool);
                 let request = WriteRequest { allocation, slot_index: 0 };
@@ -494,7 +486,7 @@ mod tests {
 
             // open + readback
             {
-                let (file, pool, pipe) = new_objects(path);
+                let (file, pool, _) = new_objects(path);
                 compare_with_readback(&BUFFER, 0, 1, &pool, &file);
             }
         }
@@ -503,7 +495,7 @@ mod tests {
         fn ok_drop_does_not_deadlock_when_multiple_pending_writes() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("write_single");
-            let (file, pool, pipe) = new_objects(path);
+            let (_file, pool, pipe) = new_objects(path);
 
             for i in 0..INITIAL_BUFFER_AMOUT {
                 let buffer = vec![i as u8; BUFFER_SIZE as usize];
@@ -520,7 +512,7 @@ mod tests {
         fn ok_drop_correctly_waits_for_pending_write_with_multi_threads() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("write_single");
-            let (file, pool, pipe) = new_objects(path);
+            let (_file, pool, pipe) = new_objects(path);
 
             const BUFFER: [u8; BUFFER_SIZE as usize] = [0x20; BUFFER_SIZE as usize];
 
@@ -546,7 +538,7 @@ mod tests {
         fn ok_write() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("write_single");
-            let (file, pool, pipe) = new_objects(path);
+            let (_file, pool, pipe) = new_objects(path);
 
             const BUFFER: [u8; BUFFER_SIZE as usize] = [0x0Au8; BUFFER_SIZE as usize];
             let allocation = prep_write(BUFFER.as_ptr(), 0x0A, &pool);
@@ -559,7 +551,7 @@ mod tests {
         fn ok_write_epoch_is_monotonic() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("write_single");
-            let (file, pool, pipe) = new_objects(path);
+            let (_file, pool, pipe) = new_objects(path);
 
             const BUFFER: [u8; BUFFER_SIZE as usize] = [0x0Au8; BUFFER_SIZE as usize];
 
@@ -647,7 +639,7 @@ mod tests {
         fn ok_multiple_concurrent_awaits() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("write_single");
-            let (file, pool, pipe) = new_objects(path);
+            let (_file, pool, pipe) = new_objects(path);
 
             const REQUIRED: usize = 0x0A;
             const BUFFER: [u8; BUFFER_SIZE as usize] = [0x0Au8; BUFFER_SIZE as usize];
@@ -712,7 +704,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("multi_threaded_writers");
 
-            let (file, pool, pipe) = new_objects(path);
+            let (_file, pool, pipe) = new_objects(path);
 
             let pipe = sync::Arc::new(pipe);
             let pool = sync::Arc::new(pool);

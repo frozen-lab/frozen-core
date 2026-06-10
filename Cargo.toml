@@ -74,6 +74,7 @@ libc = "0.2.178"
 
 [dev-dependencies]
 tempfile = "3.20.0"
+hdrhistogram = "7.5.4"
 criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
@@ -90,3 +91,8 @@ required-features = ["bufpool"]
 name = "mpscq"
 harness = false
 required-features = ["mpscq"]
+
+[[bench]]
+name = "wpipe"
+harness = false
+required-features = ["wpipe"]
