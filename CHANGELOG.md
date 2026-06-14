@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.22`
+
+- Impl of `wpipe` module (#53)
+
 ## `0.0.21`
 
 - Fixed following issues
