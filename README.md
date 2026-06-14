@@ -12,7 +12,7 @@ Add following to your `Cargo.toml`,
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.21", default-features = true }
+frozen-core = { version = "0.0.22", default-features = true }
 ```
 
 > [!TIP]
@@ -27,6 +27,7 @@ frozen-core = { version = "0.0.21", default-features = true }
 - [`crc32`](https://docs.rs/frozen-core/latest/frozen_core/crc32/index.html)
 - [`mpscq`](https://docs.rs/frozen-core/latest/frozen_core/mpscq/index.html)
 - [`bufpool`](https://docs.rs/frozen-core/latest/frozen_core/bufpool/index.html)
+- [`wpipe`](https://docs.rs/frozen-core/latest/frozen_core/wpipe/index.html)
 
 ## Notes
 
