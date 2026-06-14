@@ -648,6 +648,9 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
     loop {
         (guard, _) = core.flush_cv.wait_timeout(guard, flush_duration).unwrap_or_else(|e| e.into_inner());
 
+        // NOTE: we must read values of close brodcast before acquire exclusive lock, if done
+        // otherwise, we impose serious deadlock sort of situation for the the flusher tx
+
         let queued_ops = core.queue.drain();
         let closed = core.closed.load(atomic::Ordering::Acquire);
 
@@ -659,8 +662,11 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
             continue;
         }
 
+        // INFO: we must acquire an exclusive IO lock for sync, hence no write/read ops are allowed
+        // while sync is in progress
         let _io_lock = core.acquire_exclusive_io_lock();
-        let (min_index, max_index, max_epoch) = match core.write_queued_ops(queued_ops) {
+
+        let (_min_index, _max_index, max_epoch) = match core.write_queued_ops(queued_ops) {
             Ok(res) => res,
             Err(new_error) => {
                 core.completion.error.set(new_error);
@@ -671,14 +677,22 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
             }
         };
 
+        // NOTE: On linux, we can initiate writeback (best-effort only) for a given range
         #[cfg(target_os = "linux")]
-        if let Err(new_error) = core.file.sync_range(min_index, max_index - min_index) {
+        if let Err(new_error) = core.file.sync_range(_min_index, _max_index - _min_index) {
             core.completion.error.set(new_error);
             core.completion.waker.wake();
             drop(_io_lock);
 
             continue;
         }
+
+        // NOTE: If the sync fails, we update the Core::error w/ the received error object. We
+        // clear it up when another call succeeds.
+        //
+        // This is valid as the underlying sync flushes entire batch all at once, hence even if the
+        // last call failed, and the new one succeeded, we do get the durability guarantee for the
+        // old data as well.
 
         if let Err(new_error) = core.file.sync() {
             core.completion.error.set(new_error);
