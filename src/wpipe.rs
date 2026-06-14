@@ -1,4 +1,100 @@
-#![allow(missing_docs)]
+//! A low latency asynchronous write pipeline for buffer based storage
+//!
+//! ## Design
+//!
+//! By design, every write call is fire-and-forget, i.e. the call is immediately returned after
+//! pushing the bytes to be written into the MPSC queue.
+//!
+//! The background thread pulls from MPSC queue and performs indivisual pwrite/v calls and a common
+//! hard sync right after. This provides durability for all the writes submitted within the same
+//! [`WritePipeCfg::flush_duration`] batching window.
+//!
+//! ## Benchmarks
+//!
+//! Observed measurements for latency (both single and multi threaded),
+//!
+//! | Metric | 1 Thread (µs) | 4 Threads (µs) |
+//! |:-------|:--------------|:---------------|
+//! | P50    |         0.091 |          0.275 |
+//! | P90    |         0.092 |          0.458 |
+//! | P99    |         0.825 |          0.917 |
+//! | Mean   |         1.185 |          3.857 |
+//!
+//! Environment used for benching,
+//!
+//! * OS: NixOS (WSL2)
+//! * Architecture: x86_64
+//! * Memory: 8 GiB RAM (DDR4)
+//! * Rust: rustc 1.86.0 w/ cargo 1.86.0
+//! * Kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+//! * CPU: Intel® Core™ i5-10300H @ 2.50GHz (4C / 8T)
+//!
+//! ## Example
+//!
+//! ```
+//! use frozen_core::{bufpool, ffile, utils, wpipe};
+//! use std::{ptr, sync, time};
+//!
+//! const MODULE_ID: u8 = 0x00;
+//! const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
+//!
+//! let dir = tempfile::tempdir().expect("tempdir creation should succeed");
+//! let path = dir.path().join("wpipe_example");
+//!
+//! let file_cfg = ffile::FFCfg {
+//!     path,
+//!     initial_chunk_amount: 0x400,
+//!     chunk_size: BUFFER_SIZE as usize,
+//! };
+//! let file = sync::Arc::new(
+//!     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+//!         .expect("file creation should succeed"),
+//! );
+//!
+//! let pool_cfg = bufpool::BufPoolCfg {
+//!     buffer_size: utils::BufferSize::S128,
+//!     max_memory: 0x400 * BUFFER_SIZE as usize,
+//! };
+//! let pool = bufpool::BufPool::new(pool_cfg);
+//!
+//! let pipe_cfg = wpipe::WritePipeCfg {
+//!     module_id: MODULE_ID,
+//!     flush_duration: time::Duration::from_millis(1),
+//! };
+//! let pipe = wpipe::WritePipe::new(pipe_cfg, file)
+//!     .expect("pipe creation should succeed");
+//!
+//! let payload = [0xAAu8; BUFFER_SIZE as usize];
+//!
+//! let mut latest_ticket = None;
+//! for slot_index in 0..3 {
+//!     let allocation = pool.allocate(1);
+//!
+//!     unsafe {
+//!         ptr::copy_nonoverlapping(
+//!             payload.as_ptr(),
+//!             allocation.first(),
+//!             payload.len(),
+//!         );
+//!     }
+//!
+//!     let ticket = pipe
+//!         .write(wpipe::WriteRequest {
+//!             allocation,
+//!             slot_index,
+//!         })
+//!         .expect("write should succeed");
+//!
+//!     latest_ticket = Some(ticket);
+//! }
+//!
+//! let durable_epoch = futures::executor::block_on(
+//!     latest_ticket.expect("ticket should exist"),
+//! )
+//! .expect("writes should become durable");
+//!
+//! assert!(durable_epoch >= 3);
+//! ```
 
 use crate::{
     bufpool,
@@ -36,6 +132,83 @@ pub struct WritePipeCfg {
     pub flush_duration: time::Duration,
 }
 
+/// A low latency asynchronous write pipeline for buffer based storage
+///
+/// ## Design
+///
+/// By design, every write call is fire-and-forget, i.e. the call is immediately returned after
+/// pushing the bytes to be written into the MPSC queue.
+///
+/// The background thread pulls from MPSC queue and performs indivisual pwrite/v calls and a common
+/// hard sync right after. This provides durability for all the writes submitted within the same
+/// [`WritePipeCfg::flush_duration`] batching window.
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::{bufpool, ffile, utils, wpipe};
+/// use std::{ptr, sync, time};
+///
+/// const MODULE_ID: u8 = 0x00;
+/// const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
+///
+/// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
+/// let path = dir.path().join("wpipe_example");
+///
+/// let file_cfg = ffile::FFCfg {
+///     path,
+///     initial_chunk_amount: 0x400,
+///     chunk_size: BUFFER_SIZE as usize,
+/// };
+/// let file = sync::Arc::new(
+///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+///         .expect("file creation should succeed"),
+/// );
+///
+/// let pool_cfg = bufpool::BufPoolCfg {
+///     buffer_size: utils::BufferSize::S128,
+///     max_memory: 0x400 * BUFFER_SIZE as usize,
+/// };
+/// let pool = bufpool::BufPool::new(pool_cfg);
+///
+/// let pipe_cfg = wpipe::WritePipeCfg {
+///     module_id: MODULE_ID,
+///     flush_duration: time::Duration::from_millis(1),
+/// };
+/// let pipe = wpipe::WritePipe::new(pipe_cfg, file)
+///     .expect("pipe creation should succeed");
+///
+/// let payload = [0xAAu8; BUFFER_SIZE as usize];
+///
+/// let mut latest_ticket = None;
+/// for slot_index in 0..3 {
+///     let allocation = pool.allocate(1);
+///
+///     unsafe {
+///         ptr::copy_nonoverlapping(
+///             payload.as_ptr(),
+///             allocation.first(),
+///             payload.len(),
+///         );
+///     }
+///
+///     let ticket = pipe
+///         .write(wpipe::WriteRequest {
+///             allocation,
+///             slot_index,
+///         })
+///         .expect("write should succeed");
+///
+///     latest_ticket = Some(ticket);
+/// }
+///
+/// let durable_epoch = futures::executor::block_on(
+///     latest_ticket.expect("ticket should exist"),
+/// )
+/// .expect("writes should become durable");
+///
+/// assert!(durable_epoch >= 3);
+/// ```
 #[derive(Debug)]
 pub struct WritePipe {
     core: sync::Arc<Core>,
@@ -46,6 +219,60 @@ unsafe impl Send for WritePipe {}
 unsafe impl Sync for WritePipe {}
 
 impl WritePipe {
+    /// Create a new instance of [`WritePipe`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::{bufpool, ffile, utils, wpipe};
+    /// use std::{ptr, sync, time};
+    ///
+    /// const MODULE_ID: u8 = 0x00;
+    /// const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
+    ///
+    /// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
+    /// let path = dir.path().join("wpipe_example");
+    ///
+    /// let file_cfg = ffile::FFCfg {
+    ///     path,
+    ///     initial_chunk_amount: 0x400,
+    ///     chunk_size: BUFFER_SIZE as usize,
+    /// };
+    /// let file = sync::Arc::new(
+    ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+    ///         .expect("file creation should succeed"),
+    /// );
+    ///
+    /// let pool_cfg = bufpool::BufPoolCfg {
+    ///     buffer_size: utils::BufferSize::S128,
+    ///     max_memory: 0x400 * BUFFER_SIZE as usize,
+    /// };
+    /// let pool = bufpool::BufPool::new(pool_cfg);
+    ///
+    /// let pipe_cfg = wpipe::WritePipeCfg {
+    ///     module_id: MODULE_ID,
+    ///     flush_duration: time::Duration::from_millis(1),
+    /// };
+    /// let pipe = wpipe::WritePipe::new(pipe_cfg, file)
+    ///     .expect("pipe creation should succeed");
+    ///
+    /// let payload = vec![0x0A; BUFFER_SIZE as usize];
+    /// let allocation = pool.allocate(1);
+    ///
+    /// unsafe {ptr::copy_nonoverlapping(
+    ///     payload.as_ptr(),
+    ///     allocation.first(),
+    ///     payload.len()
+    /// )};
+    ///
+    /// let ticket = pipe.write(wpipe::WriteRequest {allocation, slot_index: 0});
+    ///
+    /// assert!(
+    ///     futures::executor::block_on(ticket.expect("ticket should exist"))
+    ///     .is_ok()
+    /// );
+    /// ```
+    #[inline]
     pub fn new(cfg: WritePipeCfg, file: sync::Arc<ffile::FrozenFile>) -> FrozenResult<Self> {
         let core = sync::Arc::new(Core::new(file));
         let cloned_core = core.clone();
@@ -60,6 +287,62 @@ impl WritePipe {
         Ok(Self { core: core, flush_tx_handle })
     }
 
+    /// Push a write into [`WritePipe`]
+    ///
+    /// Every write call is fire-and-forget for the caller by default, unless the caller choose to
+    /// wait for durability using the manual `await` on [`WriteTicket`].
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::{bufpool, ffile, utils, wpipe};
+    /// use std::{ptr, sync, time};
+    ///
+    /// const MODULE_ID: u8 = 0x00;
+    /// const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
+    ///
+    /// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
+    /// let path = dir.path().join("wpipe_example");
+    ///
+    /// let file_cfg = ffile::FFCfg {
+    ///     path,
+    ///     initial_chunk_amount: 0x400,
+    ///     chunk_size: BUFFER_SIZE as usize,
+    /// };
+    /// let file = sync::Arc::new(
+    ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+    ///         .expect("file creation should succeed"),
+    /// );
+    ///
+    /// let pool_cfg = bufpool::BufPoolCfg {
+    ///     buffer_size: utils::BufferSize::S128,
+    ///     max_memory: 0x400 * BUFFER_SIZE as usize,
+    /// };
+    /// let pool = bufpool::BufPool::new(pool_cfg);
+    ///
+    /// let pipe_cfg = wpipe::WritePipeCfg {
+    ///     module_id: MODULE_ID,
+    ///     flush_duration: time::Duration::from_millis(1),
+    /// };
+    /// let pipe = wpipe::WritePipe::new(pipe_cfg, file)
+    ///     .expect("pipe creation should succeed");
+    ///
+    /// let payload = vec![0x0A; BUFFER_SIZE as usize];
+    /// let allocation = pool.allocate(1);
+    ///
+    /// unsafe {ptr::copy_nonoverlapping(
+    ///     payload.as_ptr(),
+    ///     allocation.first(),
+    ///     payload.len()
+    /// )};
+    ///
+    /// let ticket = pipe.write(wpipe::WriteRequest {allocation, slot_index: 0});
+    ///
+    /// assert!(
+    ///     futures::executor::block_on(ticket.expect("ticket should exist"))
+    ///     .is_ok()
+    /// );
+    /// ```
     #[inline]
     pub fn write(&self, request: WriteRequest) -> FrozenResult<WriteTicket> {
         let _io_lock = self.core.acquire_shared_io_lock();
@@ -86,12 +369,166 @@ impl Drop for WritePipe {
     }
 }
 
+/// A write operation submitted to [`WritePipe`]
+///
+/// The request contains the buffers to persist along with the destination slot index in the
+/// underlying [`FrozenFile`].
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::{bufpool, utils, wpipe};
+/// use std::ptr;
+///
+/// const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
+///
+/// let pool_cfg = bufpool::BufPoolCfg {
+///     buffer_size: utils::BufferSize::S128,
+///     max_memory: 0x400 * BUFFER_SIZE as usize,
+/// };
+/// let pool = bufpool::BufPool::new(pool_cfg);
+///
+/// let payload = vec![0x0A; BUFFER_SIZE as usize];
+/// let allocation = pool.allocate(1);
+///
+/// unsafe {ptr::copy_nonoverlapping(
+///     payload.as_ptr(),
+///     allocation.first(),
+///     payload.len()
+/// )};
+///
+/// let request = wpipe::WriteRequest {allocation, slot_index: 0};
+/// assert!(request.slot_index >= 0);
+/// ```
 #[derive(Debug)]
 pub struct WriteRequest {
+    /// Buffer allocation containing the pages to be written allocated using [`bufpool::BufPool`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::{bufpool, utils, wpipe};
+    /// use std::ptr;
+    ///
+    /// const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
+    ///
+    /// let pool_cfg = bufpool::BufPoolCfg {
+    ///     buffer_size: utils::BufferSize::S128,
+    ///     max_memory: 0x400 * BUFFER_SIZE as usize,
+    /// };
+    /// let pool = bufpool::BufPool::new(pool_cfg);
+    ///
+    /// let payload = vec![0x0A; BUFFER_SIZE as usize];
+    /// let allocation = pool.allocate(1);
+    ///
+    /// unsafe {ptr::copy_nonoverlapping(
+    ///     payload.as_ptr(),
+    ///     allocation.first(),
+    ///     payload.len()
+    /// )};
+    ///
+    /// let request = wpipe::WriteRequest {allocation, slot_index: 0};
+    /// assert!(!request.allocation.first().is_null());
+    /// ```
     pub allocation: bufpool::BufPoolAllocation,
+
+    /// Destination slot index where the pages of the allocation will be written from
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::{bufpool, utils, wpipe};
+    /// use std::ptr;
+    ///
+    /// const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
+    ///
+    /// let pool_cfg = bufpool::BufPoolCfg {
+    ///     buffer_size: utils::BufferSize::S128,
+    ///     max_memory: 0x400 * BUFFER_SIZE as usize,
+    /// };
+    /// let pool = bufpool::BufPool::new(pool_cfg);
+    ///
+    /// let payload = vec![0x0A; BUFFER_SIZE as usize];
+    /// let allocation = pool.allocate(1);
+    ///
+    /// unsafe {ptr::copy_nonoverlapping(
+    ///     payload.as_ptr(),
+    ///     allocation.first(),
+    ///     payload.len()
+    /// )};
+    ///
+    /// let request = wpipe::WriteRequest {allocation, slot_index: 0};
+    /// assert!(request.slot_index >= 0);
+    /// ```
     pub slot_index: usize,
 }
 
+/// Durability handle associated with the submitted write operation via [`WritePipe::write`]
+///
+/// ## Epoch
+///
+/// Every ticket is assigned a monotonically increasing epoch to moniter durability
+///
+/// ## Durability Guarantee
+///
+/// If wanted, the ticket could be awaited to poll till the epoch becomes durable.
+///
+/// Once a await on ticket is completed successfully, all writes assigned to earlier epochs are
+/// also guaranteed to be durable.
+///
+/// *NOTE:* Using `await` is optional. Callers that only require fire-and-forget semantics may
+/// simply discard the returned ticket.
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::{bufpool, ffile, utils, wpipe};
+/// use std::{ptr, sync, time};
+///
+/// const MODULE_ID: u8 = 0x00;
+/// const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
+///
+/// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
+/// let path = dir.path().join("wpipe_example");
+///
+/// let file_cfg = ffile::FFCfg {
+///     path,
+///     initial_chunk_amount: 0x400,
+///     chunk_size: BUFFER_SIZE as usize,
+/// };
+/// let file = sync::Arc::new(
+///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+///         .expect("file creation should succeed"),
+/// );
+///
+/// let pool_cfg = bufpool::BufPoolCfg {
+///     buffer_size: utils::BufferSize::S128,
+///     max_memory: 0x400 * BUFFER_SIZE as usize,
+/// };
+/// let pool = bufpool::BufPool::new(pool_cfg);
+///
+/// let pipe_cfg = wpipe::WritePipeCfg {
+///     module_id: MODULE_ID,
+///     flush_duration: time::Duration::from_millis(1),
+/// };
+/// let pipe = wpipe::WritePipe::new(pipe_cfg, file)
+///     .expect("pipe creation should succeed");
+///
+/// let payload = vec![0x0A; BUFFER_SIZE as usize];
+/// let allocation = pool.allocate(1);
+///
+/// unsafe {ptr::copy_nonoverlapping(
+///     payload.as_ptr(),
+///     allocation.first(),
+///     payload.len()
+/// )};
+///
+/// let ticket = pipe.write(wpipe::WriteRequest {allocation, slot_index: 0})
+///     .unwrap();
+/// let epoch = ticket.epoch();
+///
+/// assert!(epoch > 0);
+/// ```
 #[derive(Debug)]
 pub struct WriteTicket {
     epoch: u64,
@@ -99,6 +536,58 @@ pub struct WriteTicket {
 }
 
 impl WriteTicket {
+    /// Read assigned durability epoch for the [`WriteTicket`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::{bufpool, ffile, utils, wpipe};
+    /// use std::{ptr, sync, time};
+    ///
+    /// const MODULE_ID: u8 = 0x00;
+    /// const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
+    ///
+    /// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
+    /// let path = dir.path().join("wpipe_example");
+    ///
+    /// let file_cfg = ffile::FFCfg {
+    ///     path,
+    ///     initial_chunk_amount: 0x400,
+    ///     chunk_size: BUFFER_SIZE as usize,
+    /// };
+    /// let file = sync::Arc::new(
+    ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+    ///         .expect("file creation should succeed"),
+    /// );
+    ///
+    /// let pool_cfg = bufpool::BufPoolCfg {
+    ///     buffer_size: utils::BufferSize::S128,
+    ///     max_memory: 0x400 * BUFFER_SIZE as usize,
+    /// };
+    /// let pool = bufpool::BufPool::new(pool_cfg);
+    ///
+    /// let pipe_cfg = wpipe::WritePipeCfg {
+    ///     module_id: MODULE_ID,
+    ///     flush_duration: time::Duration::from_millis(1),
+    /// };
+    /// let pipe = wpipe::WritePipe::new(pipe_cfg, file)
+    ///     .expect("pipe creation should succeed");
+    ///
+    /// let payload = vec![0x0A; BUFFER_SIZE as usize];
+    /// let allocation = pool.allocate(1);
+    ///
+    /// unsafe {ptr::copy_nonoverlapping(
+    ///     payload.as_ptr(),
+    ///     allocation.first(),
+    ///     payload.len()
+    /// )};
+    ///
+    /// let ticket = pipe.write(wpipe::WriteRequest {allocation, slot_index: 0})
+    ///     .unwrap();
+    /// let epoch = ticket.epoch();
+    ///
+    /// assert!(epoch > 0);
+    /// ```
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
