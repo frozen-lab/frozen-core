@@ -3,14 +3,14 @@
 //! ## Example
 //!
 //! ```
-//! use frozen_core::ffile::{FrozenFile, FFCfg};
+//! use frozen_core::ffile::{FrozenFile, FrozenFileCfg};
 //!
 //! const MID: u8 = 0;
 //!
 //! let dir = tempfile::tempdir().unwrap();
 //! let path = dir.path().join("tmp_frozen_file");
 //!
-//! let cfg = FFCfg {
+//! let cfg = FrozenFileCfg {
 //!     chunk_size: 0x10,
 //!     path: path.to_path_buf(),
 //!     initial_chunk_amount: 0x0A,
@@ -121,7 +121,7 @@ pub(in crate::ffile) fn new_err_default<R>(code: ErrCode) -> FrozenResult<R> {
 
 /// Config for [`FrozenFile`]
 #[derive(Debug, Clone)]
-pub struct FFCfg {
+pub struct FrozenFileCfg {
     /// Absolute path for/of the file
     ///
     /// *NOTE:* The caller must make sure that the path represents a file and all the parent directories included in
@@ -147,14 +147,14 @@ pub struct FFCfg {
 /// ## Example
 ///
 /// ```
-/// use frozen_core::ffile::{FrozenFile, FFCfg};
+/// use frozen_core::ffile::{FrozenFile, FrozenFileCfg};
 ///
 /// const MID: u8 = 0;
 ///
 /// let dir = tempfile::tempdir().unwrap();
 /// let path = dir.path().join("tmp_frozen_file");
 ///
-/// let cfg = FFCfg {
+/// let cfg = FrozenFileCfg {
 ///     chunk_size: 0x10,
 ///     path: path.to_path_buf(),
 ///     initial_chunk_amount: 0x0A,
@@ -181,7 +181,7 @@ pub struct FFCfg {
 /// ```
 #[derive(Debug)]
 pub struct FrozenFile {
-    cfg: FFCfg,
+    cfg: FrozenFileCfg,
     file: core::cell::UnsafeCell<core::mem::ManuallyDrop<TFile>>,
 }
 
@@ -209,13 +209,13 @@ impl FrozenFile {
 
     /// Create a new or open an existing [`FrozenFile`]
     ///
-    /// ## [`FFCfg`]
+    /// ## [`FrozenFileCfg`]
     ///
-    /// All configs for [`FrozenFile`] are stored in [`FFCfg`]
+    /// All configs for [`FrozenFile`] are stored in [`FrozenFileCfg`]
     ///
     /// ## Important
     ///
-    /// The provided [`FFCfg`] must remain identical across all reopen cycles of the [`FrozenFile`].
+    /// The provided [`FrozenFileCfg`] must remain identical across all reopen cycles of the [`FrozenFile`].
     ///
     /// Changing any of the feilds after initial creation, may violate internal layout invariants and
     /// cause the file to be treated as corrupted.
@@ -230,14 +230,14 @@ impl FrozenFile {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::ffile::{FrozenFile, FrozenFileCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let cfg = FFCfg {
+    /// let cfg = FrozenFileCfg {
     ///     chunk_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_chunk_amount: 0x0A,
@@ -246,7 +246,7 @@ impl FrozenFile {
     /// let file = FrozenFile::new::<MID>(cfg).unwrap();
     /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
     /// ```
-    pub fn new<const MODULE_ID: u8>(cfg: FFCfg) -> FrozenResult<Self> {
+    pub fn new<const MODULE_ID: u8>(cfg: FrozenFileCfg) -> FrozenResult<Self> {
         let raw_file = unsafe { posix::POSIXFile::new(&cfg.path) }?;
         let slf = Self { cfg: cfg.clone(), file: core::cell::UnsafeCell::new(core::mem::ManuallyDrop::new(raw_file)) };
 
@@ -309,14 +309,14 @@ impl FrozenFile {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::ffile::{FrozenFile, FrozenFileCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let cfg = FFCfg {
+    /// let cfg = FrozenFileCfg {
     ///     chunk_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_chunk_amount: 0x0A,
@@ -338,14 +338,14 @@ impl FrozenFile {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::ffile::{FrozenFile, FrozenFileCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let cfg = FFCfg {
+    /// let cfg = FrozenFileCfg {
     ///     chunk_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_chunk_amount: 0x0A,
@@ -377,14 +377,14 @@ impl FrozenFile {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::ffile::{FrozenFile, FrozenFileCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let cfg = FFCfg {
+    /// let cfg = FrozenFileCfg {
     ///     chunk_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_chunk_amount: 0x0A,
@@ -416,14 +416,14 @@ impl FrozenFile {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::ffile::{FrozenFile, FrozenFileCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let cfg = FFCfg {
+    /// let cfg = FrozenFileCfg {
     ///     chunk_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_chunk_amount: 0x0A,
@@ -459,14 +459,14 @@ impl FrozenFile {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::ffile::{FrozenFile, FrozenFileCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let cfg = FFCfg {
+    /// let cfg = FrozenFileCfg {
     ///     chunk_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_chunk_amount: 0x0A,
@@ -505,14 +505,14 @@ impl FrozenFile {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::ffile::{FrozenFile, FrozenFileCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let cfg = FFCfg {
+    /// let cfg = FrozenFileCfg {
     ///     chunk_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_chunk_amount: 0x0A,
@@ -541,14 +541,14 @@ impl FrozenFile {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::ffile::{FrozenFile, FFCfg};
+    /// use frozen_core::ffile::{FrozenFile, FrozenFileCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_file");
     ///
-    /// let cfg = FFCfg {
+    /// let cfg = FrozenFileCfg {
     ///     chunk_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_chunk_amount: 0x0A,
@@ -607,10 +607,10 @@ mod tests {
     const INIT_CHUNKS: usize = 4;
     const CHUNK_SIZE: usize = 0x10;
 
-    fn tmp_path() -> (tempfile::TempDir, FFCfg) {
+    fn tmp_path() -> (tempfile::TempDir, FrozenFileCfg) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_ff_file");
-        let cfg = FFCfg { path, chunk_size: CHUNK_SIZE, initial_chunk_amount: INIT_CHUNKS };
+        let cfg = FrozenFileCfg { path, chunk_size: CHUNK_SIZE, initial_chunk_amount: INIT_CHUNKS };
 
         (dir, cfg)
     }

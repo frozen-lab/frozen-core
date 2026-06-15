@@ -41,7 +41,7 @@
 //! let dir = tempfile::tempdir().expect("tempdir creation should succeed");
 //! let path = dir.path().join("wpipe_example");
 //!
-//! let file_cfg = ffile::FFCfg {
+//! let file_cfg = ffile::FrozenFileCfg {
 //!     path,
 //!     initial_chunk_amount: 0x400,
 //!     chunk_size: BUFFER_SIZE as usize,
@@ -155,7 +155,7 @@ pub struct WritePipeCfg {
 /// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
 /// let path = dir.path().join("wpipe_example");
 ///
-/// let file_cfg = ffile::FFCfg {
+/// let file_cfg = ffile::FrozenFileCfg {
 ///     path,
 ///     initial_chunk_amount: 0x400,
 ///     chunk_size: BUFFER_SIZE as usize,
@@ -233,7 +233,7 @@ impl WritePipe {
     /// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
     /// let path = dir.path().join("wpipe_example");
     ///
-    /// let file_cfg = ffile::FFCfg {
+    /// let file_cfg = ffile::FrozenFileCfg {
     ///     path,
     ///     initial_chunk_amount: 0x400,
     ///     chunk_size: BUFFER_SIZE as usize,
@@ -304,7 +304,7 @@ impl WritePipe {
     /// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
     /// let path = dir.path().join("wpipe_example");
     ///
-    /// let file_cfg = ffile::FFCfg {
+    /// let file_cfg = ffile::FrozenFileCfg {
     ///     path,
     ///     initial_chunk_amount: 0x400,
     ///     chunk_size: BUFFER_SIZE as usize,
@@ -491,7 +491,7 @@ pub struct WriteRequest {
 /// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
 /// let path = dir.path().join("wpipe_example");
 ///
-/// let file_cfg = ffile::FFCfg {
+/// let file_cfg = ffile::FrozenFileCfg {
 ///     path,
 ///     initial_chunk_amount: 0x400,
 ///     chunk_size: BUFFER_SIZE as usize,
@@ -550,7 +550,7 @@ impl WriteTicket {
     /// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
     /// let path = dir.path().join("wpipe_example");
     ///
-    /// let file_cfg = ffile::FFCfg {
+    /// let file_cfg = ffile::FrozenFileCfg {
     ///     path,
     ///     initial_chunk_amount: 0x400,
     ///     chunk_size: BUFFER_SIZE as usize,
@@ -881,7 +881,7 @@ mod tests {
     const FLUSH_DURATION: time::Duration = time::Duration::from_millis(1);
 
     fn new_objects<P: AsRef<std::path::Path>>(path: P) -> (sync::Arc<ffile::FrozenFile>, bufpool::BufPool, WritePipe) {
-        let file_cfg = ffile::FFCfg {
+        let file_cfg = ffile::FrozenFileCfg {
             path: path.as_ref().to_path_buf(),
             chunk_size: BUFFER_SIZE as usize,
             initial_chunk_amount: INITIAL_BUFFER_AMOUT,
@@ -933,8 +933,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("write_single");
 
-            let file_cfg =
-                ffile::FFCfg { path, chunk_size: BUFFER_SIZE as usize, initial_chunk_amount: INITIAL_BUFFER_AMOUT };
+            let file_cfg = ffile::FrozenFileCfg {
+                path,
+                chunk_size: BUFFER_SIZE as usize,
+                initial_chunk_amount: INITIAL_BUFFER_AMOUT,
+            };
             let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).unwrap());
 
             let pipe_cfg = WritePipeCfg { module_id: MODULE_ID, flush_duration: FLUSH_DURATION };

@@ -2,8 +2,8 @@ use super::{err, new_err};
 use crate::{error::FrozenResult, hints};
 use core::{ffi::CStr, ptr};
 use libc::{
-    c_void, mmap, msync, munmap, off_t, size_t, strerror, EACCES, EAGAIN, EBADF, EBUSY, EINTR, EINVAL, EIO, ENODEV,
-    ENOMEM, EOVERFLOW, EPERM, ETXTBSY, MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE,
+    EACCES, EAGAIN, EBADF, EBUSY, EINTR, EINVAL, EIO, ENODEV, ENOMEM, EOVERFLOW, EPERM, ETXTBSY, MAP_FAILED,
+    MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, c_void, mmap, msync, munmap, off_t, size_t, strerror,
 };
 
 /// Base pointer for `mmap(2)` mapped memory
@@ -204,7 +204,7 @@ unsafe fn err_msg(errno: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffile::{FFCfg, FrozenFile};
+    use crate::ffile::{FrozenFile, FrozenFileCfg};
 
     const MOD_ID: u8 = 0;
     const CHUNK: usize = 0x10;
@@ -215,8 +215,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
-        let file = FrozenFile::new::<MOD_ID>(FFCfg { path, chunk_size: CHUNK, initial_chunk_amount: INIT_CHUNKS })
-            .expect("new FF");
+        let file =
+            FrozenFile::new::<MOD_ID>(FrozenFileCfg { path, chunk_size: CHUNK, initial_chunk_amount: INIT_CHUNKS })
+                .expect("new FF");
 
         (dir, file)
     }
@@ -454,7 +455,7 @@ mod tests {
             // open + map + read
             unsafe {
                 let path = dir.path().join("tmp_map");
-                let cfg = FFCfg { path, chunk_size: CHUNK, initial_chunk_amount: INIT_CHUNKS };
+                let cfg = FrozenFileCfg { path, chunk_size: CHUNK, initial_chunk_amount: INIT_CHUNKS };
 
                 let file = FrozenFile::new::<MOD_ID>(cfg).expect("new FF");
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
