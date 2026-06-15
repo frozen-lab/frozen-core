@@ -207,17 +207,20 @@ mod tests {
     use crate::ffile::{FrozenFile, FrozenFileCfg};
 
     const MOD_ID: u8 = 0;
-    const CHUNK: usize = 0x10;
-    const INIT_CHUNKS: usize = 0x0A;
-    const LENGTH: usize = CHUNK * INIT_CHUNKS;
+    const BUFFER_SIZE: usize = 0x10;
+    const INIT_BUFFERS: usize = 0x0A;
+    const LENGTH: usize = BUFFER_SIZE * INIT_BUFFERS;
 
     fn new_tmp() -> (tempfile::TempDir, FrozenFile) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
-        let file =
-            FrozenFile::new::<MOD_ID>(FrozenFileCfg { path, chunk_size: CHUNK, initial_chunk_amount: INIT_CHUNKS })
-                .expect("new FF");
+        let file = FrozenFile::new::<MOD_ID>(FrozenFileCfg {
+            path,
+            buffer_size: BUFFER_SIZE,
+            initial_available_buffers: INIT_BUFFERS,
+        })
+        .expect("new FF");
 
         (dir, file)
     }
@@ -455,7 +458,7 @@ mod tests {
             // open + map + read
             unsafe {
                 let path = dir.path().join("tmp_map");
-                let cfg = FrozenFileCfg { path, chunk_size: CHUNK, initial_chunk_amount: INIT_CHUNKS };
+                let cfg = FrozenFileCfg { path, buffer_size: BUFFER_SIZE, initial_available_buffers: INIT_BUFFERS };
 
                 let file = FrozenFile::new::<MOD_ID>(cfg).expect("new FF");
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();

@@ -383,7 +383,7 @@ where
 
     /// Create/open a new [`FrozenFile`] instance
     fn open_file(path: std::path::PathBuf, cfg: &FMCfg) -> FrozenResult<(FrozenFile, usize)> {
-        let ff_cfg = FrozenFileCfg { path, chunk_size: Self::SLOT_SIZE, initial_chunk_amount: cfg.initial_count };
+        let ff_cfg = FrozenFileCfg { path, buffer_size: Self::SLOT_SIZE, initial_available_buffers: cfg.initial_count };
 
         let file = FrozenFile::new::<MODULE_ID>(ff_cfg)?;
         let curr_length = file.length()?;

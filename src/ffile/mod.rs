@@ -11,9 +11,9 @@
 //! let path = dir.path().join("tmp_frozen_file");
 //!
 //! let cfg = FrozenFileCfg {
-//!     chunk_size: 0x10,
+//!     buffer_size: 0x10,
 //!     path: path.to_path_buf(),
-//!     initial_chunk_amount: 0x0A,
+//!     initial_available_buffers: 0x0A,
 //! };
 //!
 //! let file = FrozenFile::new::<MID>(cfg.clone()).unwrap();
@@ -134,12 +134,12 @@ pub struct FrozenFileCfg {
     /// These ops are operated by index of the chunk and not the offset of the byte
     ///
     /// *NOTE:* Chunk size when power of 2, is cache efficient and good for performance
-    pub chunk_size: usize,
+    pub buffer_size: usize,
 
     /// Number of chunks to pre-allocate on fs when [`FrozenFile`] is initialized
     ///
-    /// Initial file length will be `chunk_size * initial_chunk_amount` (bytes)
-    pub initial_chunk_amount: usize,
+    /// Initial file length will be `buffer_size * initial_available_buffers` (bytes)
+    pub initial_available_buffers: usize,
 }
 
 /// Custom implementation of `std::fs::File`
@@ -155,9 +155,9 @@ pub struct FrozenFileCfg {
 /// let path = dir.path().join("tmp_frozen_file");
 ///
 /// let cfg = FrozenFileCfg {
-///     chunk_size: 0x10,
+///     buffer_size: 0x10,
 ///     path: path.to_path_buf(),
-///     initial_chunk_amount: 0x0A,
+///     initial_available_buffers: 0x0A,
 /// };
 ///
 /// let file = FrozenFile::new::<MID>(cfg.clone()).unwrap();
@@ -238,9 +238,9 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
-    ///     chunk_size: 0x10,
+    ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
-    ///     initial_chunk_amount: 0x0A,
+    ///     initial_available_buffers: 0x0A,
     /// };
     ///
     /// let file = FrozenFile::new::<MID>(cfg).unwrap();
@@ -262,19 +262,19 @@ impl FrozenFile {
         let _ = MID.get_or_init(|| MODULE_ID);
 
         let curr_len = slf.length()?;
-        let init_len = cfg.chunk_size * cfg.initial_chunk_amount;
+        let init_len = cfg.buffer_size * cfg.initial_available_buffers;
 
         match curr_len {
-            0 => slf.grow(cfg.initial_chunk_amount)?,
+            0 => slf.grow(cfg.initial_available_buffers)?,
             _ => {
                 // NOTE: we can treat these invariants as errors only because, our system guarantees,
-                // whenever file size is updated, i.e. has grown, it'll always be a multiple of `chunk_size`,
-                // and will have minimum of `chunk_size * initial_chunk_amount` (bytes) as it's length, although
+                // whenever file size is updated, i.e. has grown, it'll always be a multiple of `buffer_size`,
+                // and will have minimum of `buffer_size * initial_available_buffers` (bytes) as it's length, although
                 // it only holds true when any of the params in provided `cfg` are never updated after the initial
                 // creation of the file
                 //
                 // INFO: when true, we close the file to avoid resource leaks
-                if (curr_len < init_len) || (curr_len % cfg.chunk_size != 0) {
+                if (curr_len < init_len) || (curr_len % cfg.buffer_size != 0) {
                     // NOTE: we supress the close error as we are already in an errored state
                     let _ = unsafe { file.close() };
                     return new_err_default(err::CPT);
@@ -297,8 +297,8 @@ impl FrozenFile {
     /// strong sync call i.e. [`FrozenFile::sync`]
     #[cfg(target_os = "linux")]
     pub fn sync_range(&self, index: usize, count: usize) -> FrozenResult<()> {
-        let offset = self.cfg.chunk_size * index;
-        let len_to_sync = self.cfg.chunk_size * count;
+        let offset = self.cfg.buffer_size * index;
+        let len_to_sync = self.cfg.buffer_size * count;
         let file = self.get_file();
 
         unsafe { file.sync_range(offset, len_to_sync) }
@@ -317,9 +317,9 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
-    ///     chunk_size: 0x10,
+    ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
-    ///     initial_chunk_amount: 0x0A,
+    ///     initial_available_buffers: 0x0A,
     /// };
     ///
     /// let file = FrozenFile::new::<MID>(cfg).unwrap();
@@ -346,9 +346,9 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
-    ///     chunk_size: 0x10,
+    ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
-    ///     initial_chunk_amount: 0x0A,
+    ///     initial_available_buffers: 0x0A,
     /// };
     ///
     /// let file = FrozenFile::new::<MID>(cfg).unwrap();
@@ -366,10 +366,10 @@ impl FrozenFile {
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn pread(&self, buf: *mut u8, index: usize) -> FrozenResult<()> {
-        let offset = self.cfg.chunk_size * index;
+        let offset = self.cfg.buffer_size * index;
         let file = self.get_file();
 
-        unsafe { file.pread(buf, offset, self.cfg.chunk_size) }
+        unsafe { file.pread(buf, offset, self.cfg.buffer_size) }
     }
 
     /// Write a single chunk at given `index` w/ `pwrite` syscall
@@ -385,9 +385,9 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
-    ///     chunk_size: 0x10,
+    ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
-    ///     initial_chunk_amount: 0x0A,
+    ///     initial_available_buffers: 0x0A,
     /// };
     ///
     /// let file = FrozenFile::new::<MID>(cfg).unwrap();
@@ -405,10 +405,10 @@ impl FrozenFile {
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn pwrite(&self, buf: *mut u8, index: usize) -> FrozenResult<()> {
-        let offset = self.cfg.chunk_size * index;
+        let offset = self.cfg.buffer_size * index;
         let file = self.get_file();
 
-        unsafe { file.pwrite(buf, offset, self.cfg.chunk_size) }
+        unsafe { file.pwrite(buf, offset, self.cfg.buffer_size) }
     }
 
     /// Read multiple chunks starting from given `index` till `bufs.len()` w/ `preadv` syscall
@@ -424,9 +424,9 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
-    ///     chunk_size: 0x10,
+    ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
-    ///     initial_chunk_amount: 0x0A,
+    ///     initial_available_buffers: 0x0A,
     /// };
     ///
     /// let file = FrozenFile::new::<MID>(cfg).unwrap();
@@ -448,10 +448,10 @@ impl FrozenFile {
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn preadv(&self, bufs: &[*mut u8], index: usize) -> FrozenResult<()> {
-        let offset = self.cfg.chunk_size * index;
+        let offset = self.cfg.buffer_size * index;
         let file = self.get_file();
 
-        unsafe { file.preadv(bufs, offset, self.cfg.chunk_size) }
+        unsafe { file.preadv(bufs, offset, self.cfg.buffer_size) }
     }
 
     /// Write multiple chunks starting from given `index` till `bufs.len()` w/ `pwritev` syscall
@@ -467,9 +467,9 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
-    ///     chunk_size: 0x10,
+    ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
-    ///     initial_chunk_amount: 0x0A,
+    ///     initial_available_buffers: 0x0A,
     /// };
     ///
     /// let file = FrozenFile::new::<MID>(cfg).unwrap();
@@ -492,15 +492,15 @@ impl FrozenFile {
     #[inline(always)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn pwritev(&self, bufs: &[*mut u8], index: usize) -> FrozenResult<()> {
-        let offset = self.cfg.chunk_size * index;
+        let offset = self.cfg.buffer_size * index;
         let file = self.get_file();
 
-        unsafe { file.pwritev(bufs, offset, self.cfg.chunk_size) }
+        unsafe { file.pwritev(bufs, offset, self.cfg.buffer_size) }
     }
 
     /// Grow file size of [`FrozenFile`] by given `count` of chunks
     ///
-    /// After successful execution, updated file length will be `current_length + (count * chunk_size)`
+    /// After successful execution, updated file length will be `current_length + (count * buffer_size)`
     ///
     /// ## Example
     ///
@@ -513,9 +513,9 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
-    ///     chunk_size: 0x10,
+    ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
-    ///     initial_chunk_amount: 0x0A,
+    ///     initial_available_buffers: 0x0A,
     /// };
     ///
     /// let file = FrozenFile::new::<MID>(cfg).unwrap();
@@ -526,7 +526,7 @@ impl FrozenFile {
     /// ```
     pub fn grow(&self, count: usize) -> FrozenResult<()> {
         let curr_len = self.length()?;
-        let len_to_add = self.cfg.chunk_size * count;
+        let len_to_add = self.cfg.buffer_size * count;
 
         unsafe { self.get_file().grow(curr_len, len_to_add) }
     }
@@ -549,9 +549,9 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
-    ///     chunk_size: 0x10,
+    ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
-    ///     initial_chunk_amount: 0x0A,
+    ///     initial_available_buffers: 0x0A,
     /// };
     ///
     /// let file = FrozenFile::new::<MID>(cfg).unwrap();
@@ -563,13 +563,13 @@ impl FrozenFile {
     #[inline]
     pub fn total_chunks(&self) -> FrozenResult<usize> {
         let curr_len = self.length()?;
-        let chunk_size = self.cfg.chunk_size;
+        let buffer_size = self.cfg.buffer_size;
 
-        if crate::hints::unlikely(curr_len % chunk_size != 0) {
+        if crate::hints::unlikely(curr_len % buffer_size != 0) {
             return new_err_default(err::CPT);
         }
 
-        Ok(curr_len / chunk_size)
+        Ok(curr_len / buffer_size)
     }
 
     #[inline]
@@ -601,16 +601,16 @@ impl core::fmt::Display for FrozenFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync;
 
     const MID: u8 = 0;
-    const INIT_CHUNKS: usize = 4;
-    const CHUNK_SIZE: usize = 0x10;
+    const INIT_BUFFERS: usize = 4;
+    const BUFFER_SIZE: usize = 0x10;
 
     fn tmp_path() -> (tempfile::TempDir, FrozenFileCfg) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_ff_file");
-        let cfg = FrozenFileCfg { path, chunk_size: CHUNK_SIZE, initial_chunk_amount: INIT_CHUNKS };
+        let cfg = FrozenFileCfg { path, buffer_size: BUFFER_SIZE, initial_available_buffers: INIT_BUFFERS };
 
         (dir, cfg)
     }
@@ -626,7 +626,7 @@ mod tests {
             let exists = file.exists().unwrap();
             assert!(exists);
 
-            assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
+            assert_eq!(file.length().unwrap(), BUFFER_SIZE * INIT_BUFFERS);
         }
 
         #[test]
@@ -634,13 +634,13 @@ mod tests {
             let (_dir, cfg) = tmp_path();
 
             let file = FrozenFile::new::<MID>(cfg.clone()).unwrap();
-            assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
+            assert_eq!(file.length().unwrap(), BUFFER_SIZE * INIT_BUFFERS);
 
             // must be dropped to release the exclusive lock
             drop(file);
 
             let reopened = FrozenFile::new::<MID>(cfg.clone()).unwrap();
-            assert_eq!(reopened.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
+            assert_eq!(reopened.length().unwrap(), BUFFER_SIZE * INIT_BUFFERS);
         }
 
         #[test]
@@ -651,7 +651,7 @@ mod tests {
             drop(file);
 
             // updated cfg
-            cfg.chunk_size *= 2;
+            cfg.buffer_size *= 2;
 
             let err = FrozenFile::new::<MID>(cfg).unwrap_err();
             assert_eq!((err.id & 0xffff) as u16, err::CPT.reason);
@@ -702,7 +702,7 @@ mod tests {
 
         #[test]
         fn ok_drop_persists_without_explicit_sync() {
-            let mut data = [0x0Bu8; CHUNK_SIZE];
+            let mut data = [0x0Bu8; BUFFER_SIZE];
             let (_dir, cfg) = tmp_path();
 
             {
@@ -713,7 +713,7 @@ mod tests {
 
             {
                 let reopened = FrozenFile::new::<MID>(cfg).unwrap();
-                let mut buf = [0u8; CHUNK_SIZE];
+                let mut buf = [0u8; BUFFER_SIZE];
 
                 reopened.pread(buf.as_mut_ptr(), 0).unwrap();
                 assert_eq!(buf, data);
@@ -754,10 +754,10 @@ mod tests {
             let (_dir, cfg) = tmp_path();
 
             let file = FrozenFile::new::<MID>(cfg).unwrap();
-            assert_eq!(file.length().unwrap(), CHUNK_SIZE * INIT_CHUNKS);
+            assert_eq!(file.length().unwrap(), BUFFER_SIZE * INIT_BUFFERS);
 
             file.grow(0x20).unwrap();
-            assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + 0x20));
+            assert_eq!(file.length().unwrap(), BUFFER_SIZE * (INIT_BUFFERS + 0x20));
         }
 
         #[test]
@@ -770,7 +770,7 @@ mod tests {
                 file.sync().unwrap();
             }
 
-            assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + (0x0A * 0x100)));
+            assert_eq!(file.length().unwrap(), BUFFER_SIZE * (INIT_BUFFERS + (0x0A * 0x100)));
         }
     }
 
@@ -806,12 +806,12 @@ mod tests {
             let (_dir, cfg) = tmp_path();
             let file = FrozenFile::new::<MID>(cfg).unwrap();
 
-            let mut data = [0x0Bu8; CHUNK_SIZE];
+            let mut data = [0x0Bu8; BUFFER_SIZE];
 
             file.pwrite(data.as_mut_ptr(), 4).unwrap();
             file.sync().unwrap();
 
-            let mut buf = [0u8; CHUNK_SIZE];
+            let mut buf = [0u8; BUFFER_SIZE];
             file.pread(buf.as_mut_ptr(), 4).unwrap();
             assert_eq!(buf, data);
         }
@@ -821,13 +821,13 @@ mod tests {
             let (_dir, cfg) = tmp_path();
             let file = FrozenFile::new::<MID>(cfg).unwrap();
 
-            let mut bufs = [[1u8; CHUNK_SIZE], [2u8; CHUNK_SIZE]];
+            let mut bufs = [[1u8; BUFFER_SIZE], [2u8; BUFFER_SIZE]];
             let bufs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
             file.pwritev(&bufs, 0).unwrap();
             file.sync().unwrap();
 
-            let mut read_bufs = [[0u8; CHUNK_SIZE], [0u8; CHUNK_SIZE]];
+            let mut read_bufs = [[0u8; BUFFER_SIZE], [0u8; BUFFER_SIZE]];
             let rbufs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
             file.preadv(&rbufs, 0).unwrap();
 
@@ -838,14 +838,14 @@ mod tests {
         #[test]
         fn ok_write_concurrent_non_overlapping() {
             let (_dir, mut cfg) = tmp_path();
-            cfg.initial_chunk_amount = 0x100;
-            let file = Arc::new(FrozenFile::new::<MID>(cfg).unwrap());
+            cfg.initial_available_buffers = 0x100;
+            let file = sync::Arc::new(FrozenFile::new::<MID>(cfg).unwrap());
 
             let mut handles = vec![];
             for i in 0..2 {
                 let f = file.clone();
                 handles.push(std::thread::spawn(move || {
-                    let mut data = [i as u8; CHUNK_SIZE];
+                    let mut data = [i as u8; BUFFER_SIZE];
                     f.pwrite(data.as_mut_ptr(), i).unwrap();
                 }));
             }
@@ -857,7 +857,7 @@ mod tests {
             file.sync().unwrap();
 
             for i in 0..2 {
-                let mut buf = [0u8; CHUNK_SIZE];
+                let mut buf = [0u8; BUFFER_SIZE];
                 file.pread(buf.as_mut_ptr(), i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
@@ -866,13 +866,13 @@ mod tests {
         #[test]
         fn ok_concurrent_grow_and_write() {
             let (_dir, cfg) = tmp_path();
-            let file = Arc::new(FrozenFile::new::<MID>(cfg).unwrap());
+            let file = sync::Arc::new(FrozenFile::new::<MID>(cfg).unwrap());
 
             let writer = {
                 let f = file.clone();
                 std::thread::spawn(move || {
-                    for i in 0..INIT_CHUNKS {
-                        let mut data = [i as u8; CHUNK_SIZE];
+                    for i in 0..INIT_BUFFERS {
+                        let mut data = [i as u8; BUFFER_SIZE];
                         f.pwrite(data.as_mut_ptr(), i).unwrap();
                     }
                 })
@@ -890,10 +890,10 @@ mod tests {
             grower.join().unwrap();
 
             file.sync().unwrap();
-            assert_eq!(file.length().unwrap(), CHUNK_SIZE * (INIT_CHUNKS + chunks_to_grow));
+            assert_eq!(file.length().unwrap(), BUFFER_SIZE * (INIT_BUFFERS + chunks_to_grow));
 
-            for i in 0..INIT_CHUNKS {
-                let mut buf = [0u8; CHUNK_SIZE];
+            for i in 0..INIT_BUFFERS {
+                let mut buf = [0u8; BUFFER_SIZE];
                 file.pread(buf.as_mut_ptr(), i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
@@ -902,13 +902,13 @@ mod tests {
         #[test]
         fn ok_concurrent_sync_and_write() {
             let (_dir, cfg) = tmp_path();
-            let file = Arc::new(FrozenFile::new::<MID>(cfg).unwrap());
+            let file = sync::Arc::new(FrozenFile::new::<MID>(cfg).unwrap());
 
             let writer = {
                 let f = file.clone();
                 std::thread::spawn(move || {
-                    for i in 0..INIT_CHUNKS {
-                        let mut data = [i as u8; CHUNK_SIZE];
+                    for i in 0..INIT_BUFFERS {
+                        let mut data = [i as u8; BUFFER_SIZE];
                         f.pwrite(data.as_mut_ptr(), i).unwrap();
                     }
                 })
@@ -928,8 +928,8 @@ mod tests {
 
             file.sync().unwrap();
 
-            for i in 0..INIT_CHUNKS {
-                let mut buf = [0; CHUNK_SIZE];
+            for i in 0..INIT_BUFFERS {
+                let mut buf = [0; BUFFER_SIZE];
                 file.pread(buf.as_mut_ptr(), i).unwrap();
                 assert!(buf.iter().all(|b| *b == i as u8));
             }
@@ -941,7 +941,7 @@ mod tests {
             let file = FrozenFile::new::<MID>(cfg).unwrap();
 
             // index > curr_chunks
-            let mut buf = [0; CHUNK_SIZE];
+            let mut buf = [0; BUFFER_SIZE];
             let err = file.pread(buf.as_mut_ptr(), 0x100).unwrap_err();
             assert_eq!((err.id & 0xffff) as u16, err::HCF.reason);
         }
