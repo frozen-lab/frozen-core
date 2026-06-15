@@ -43,8 +43,8 @@
 //!
 //! let file_cfg = ffile::FrozenFileCfg {
 //!     path,
-//!     initial_chunk_amount: 0x400,
-//!     chunk_size: BUFFER_SIZE as usize,
+//!     initial_available_buffers: 0x400,
+//!     buffer_size: BUFFER_SIZE as usize,
 //! };
 //! let file = sync::Arc::new(
 //!     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
@@ -157,8 +157,8 @@ pub struct WritePipeCfg {
 ///
 /// let file_cfg = ffile::FrozenFileCfg {
 ///     path,
-///     initial_chunk_amount: 0x400,
-///     chunk_size: BUFFER_SIZE as usize,
+///     initial_available_buffers: 0x400,
+///     buffer_size: BUFFER_SIZE as usize,
 /// };
 /// let file = sync::Arc::new(
 ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
@@ -235,8 +235,8 @@ impl WritePipe {
     ///
     /// let file_cfg = ffile::FrozenFileCfg {
     ///     path,
-    ///     initial_chunk_amount: 0x400,
-    ///     chunk_size: BUFFER_SIZE as usize,
+    ///     initial_available_buffers: 0x400,
+    ///     buffer_size: BUFFER_SIZE as usize,
     /// };
     /// let file = sync::Arc::new(
     ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
@@ -306,8 +306,8 @@ impl WritePipe {
     ///
     /// let file_cfg = ffile::FrozenFileCfg {
     ///     path,
-    ///     initial_chunk_amount: 0x400,
-    ///     chunk_size: BUFFER_SIZE as usize,
+    ///     initial_available_buffers: 0x400,
+    ///     buffer_size: BUFFER_SIZE as usize,
     /// };
     /// let file = sync::Arc::new(
     ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
@@ -493,8 +493,8 @@ pub struct WriteRequest {
 ///
 /// let file_cfg = ffile::FrozenFileCfg {
 ///     path,
-///     initial_chunk_amount: 0x400,
-///     chunk_size: BUFFER_SIZE as usize,
+///     initial_available_buffers: 0x400,
+///     buffer_size: BUFFER_SIZE as usize,
 /// };
 /// let file = sync::Arc::new(
 ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
@@ -552,8 +552,8 @@ impl WriteTicket {
     ///
     /// let file_cfg = ffile::FrozenFileCfg {
     ///     path,
-    ///     initial_chunk_amount: 0x400,
-    ///     chunk_size: BUFFER_SIZE as usize,
+    ///     initial_available_buffers: 0x400,
+    ///     buffer_size: BUFFER_SIZE as usize,
     /// };
     /// let file = sync::Arc::new(
     ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
@@ -883,8 +883,8 @@ mod tests {
     fn new_objects<P: AsRef<std::path::Path>>(path: P) -> (sync::Arc<ffile::FrozenFile>, bufpool::BufPool, WritePipe) {
         let file_cfg = ffile::FrozenFileCfg {
             path: path.as_ref().to_path_buf(),
-            chunk_size: BUFFER_SIZE as usize,
-            initial_chunk_amount: INITIAL_BUFFER_AMOUT,
+            buffer_size: BUFFER_SIZE as usize,
+            initial_available_buffers: INITIAL_BUFFER_AMOUT,
         };
         let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).unwrap());
 
@@ -935,8 +935,8 @@ mod tests {
 
             let file_cfg = ffile::FrozenFileCfg {
                 path,
-                chunk_size: BUFFER_SIZE as usize,
-                initial_chunk_amount: INITIAL_BUFFER_AMOUT,
+                buffer_size: BUFFER_SIZE as usize,
+                initial_available_buffers: INITIAL_BUFFER_AMOUT,
             };
             let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).unwrap());
 
