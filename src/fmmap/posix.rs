@@ -215,8 +215,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
-        let file = FrozenFile::new::<MOD_ID>(FrozenFileCfg {
+        let file = FrozenFile::new(FrozenFileCfg {
             path,
+            module_id: MOD_ID,
             buffer_size: BUFFER_SIZE,
             initial_available_buffers: INIT_BUFFERS,
         })
@@ -458,9 +459,14 @@ mod tests {
             // open + map + read
             unsafe {
                 let path = dir.path().join("tmp_map");
-                let cfg = FrozenFileCfg { path, buffer_size: BUFFER_SIZE, initial_available_buffers: INIT_BUFFERS };
+                let cfg = FrozenFileCfg {
+                    path,
+                    module_id: MOD_ID,
+                    buffer_size: BUFFER_SIZE,
+                    initial_available_buffers: INIT_BUFFERS,
+                };
 
-                let file = FrozenFile::new::<MOD_ID>(cfg).expect("new FF");
+                let file = FrozenFile::new(cfg).expect("new FF");
                 let mmap = POSIXMMap::new(file.fd(), LENGTH).unwrap();
 
                 let ptr = mmap.as_ptr::<u64>(0);
