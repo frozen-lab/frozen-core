@@ -43,11 +43,12 @@
 //!
 //! let file_cfg = ffile::FrozenFileCfg {
 //!     path,
+//!     module_id: MODULE_ID,
 //!     initial_available_buffers: 0x400,
 //!     buffer_size: BUFFER_SIZE as usize,
 //! };
 //! let file = sync::Arc::new(
-//!     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+//!     ffile::FrozenFile::new(file_cfg)
 //!         .expect("file creation should succeed"),
 //! );
 //!
@@ -157,11 +158,12 @@ pub struct WritePipeCfg {
 ///
 /// let file_cfg = ffile::FrozenFileCfg {
 ///     path,
+///     module_id: MODULE_ID,
 ///     initial_available_buffers: 0x400,
 ///     buffer_size: BUFFER_SIZE as usize,
 /// };
 /// let file = sync::Arc::new(
-///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+///     ffile::FrozenFile::new(file_cfg)
 ///         .expect("file creation should succeed"),
 /// );
 ///
@@ -235,11 +237,12 @@ impl WritePipe {
     ///
     /// let file_cfg = ffile::FrozenFileCfg {
     ///     path,
+    ///     module_id: MODULE_ID,
     ///     initial_available_buffers: 0x400,
     ///     buffer_size: BUFFER_SIZE as usize,
     /// };
     /// let file = sync::Arc::new(
-    ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+    ///     ffile::FrozenFile::new(file_cfg)
     ///         .expect("file creation should succeed"),
     /// );
     ///
@@ -306,11 +309,12 @@ impl WritePipe {
     ///
     /// let file_cfg = ffile::FrozenFileCfg {
     ///     path,
+    ///     module_id: MODULE_ID,
     ///     initial_available_buffers: 0x400,
     ///     buffer_size: BUFFER_SIZE as usize,
     /// };
     /// let file = sync::Arc::new(
-    ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+    ///     ffile::FrozenFile::new(file_cfg)
     ///         .expect("file creation should succeed"),
     /// );
     ///
@@ -493,11 +497,12 @@ pub struct WriteRequest {
 ///
 /// let file_cfg = ffile::FrozenFileCfg {
 ///     path,
+///     module_id: MODULE_ID,
 ///     initial_available_buffers: 0x400,
 ///     buffer_size: BUFFER_SIZE as usize,
 /// };
 /// let file = sync::Arc::new(
-///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+///     ffile::FrozenFile::new(file_cfg)
 ///         .expect("file creation should succeed"),
 /// );
 ///
@@ -552,11 +557,12 @@ impl WriteTicket {
     ///
     /// let file_cfg = ffile::FrozenFileCfg {
     ///     path,
+    ///     module_id: MODULE_ID,
     ///     initial_available_buffers: 0x400,
     ///     buffer_size: BUFFER_SIZE as usize,
     /// };
     /// let file = sync::Arc::new(
-    ///     ffile::FrozenFile::new::<MODULE_ID>(file_cfg)
+    ///     ffile::FrozenFile::new(file_cfg)
     ///         .expect("file creation should succeed"),
     /// );
     ///
@@ -882,11 +888,12 @@ mod tests {
 
     fn new_objects<P: AsRef<std::path::Path>>(path: P) -> (sync::Arc<ffile::FrozenFile>, bufpool::BufPool, WritePipe) {
         let file_cfg = ffile::FrozenFileCfg {
+            module_id: MODULE_ID,
             path: path.as_ref().to_path_buf(),
             buffer_size: BUFFER_SIZE as usize,
             initial_available_buffers: INITIAL_BUFFER_AMOUT,
         };
-        let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).unwrap());
+        let file = sync::Arc::new(ffile::FrozenFile::new(file_cfg).unwrap());
 
         let pool_cfg =
             bufpool::BufPoolCfg { buffer_size: BUFFER_SIZE, max_memory: INITIAL_BUFFER_AMOUT * BUFFER_SIZE as usize };
@@ -935,10 +942,11 @@ mod tests {
 
             let file_cfg = ffile::FrozenFileCfg {
                 path,
+                module_id: MODULE_ID,
                 buffer_size: BUFFER_SIZE as usize,
                 initial_available_buffers: INITIAL_BUFFER_AMOUT,
             };
-            let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).unwrap());
+            let file = sync::Arc::new(ffile::FrozenFile::new(file_cfg).unwrap());
 
             let pipe_cfg = WritePipeCfg { module_id: MODULE_ID, flush_duration: FLUSH_DURATION };
             assert!(WritePipe::new(pipe_cfg, file).is_ok());

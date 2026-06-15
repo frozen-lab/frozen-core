@@ -11,12 +11,13 @@
 //! let path = dir.path().join("tmp_frozen_file");
 //!
 //! let cfg = FrozenFileCfg {
+//!     module_id: MID,
 //!     buffer_size: 0x10,
 //!     path: path.to_path_buf(),
 //!     initial_available_buffers: 0x0A,
 //! };
 //!
-//! let file = FrozenFile::new::<MID>(cfg.clone()).unwrap();
+//! let file = FrozenFile::new(cfg.clone()).unwrap();
 //! assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
 //!
 //! let mut data = vec![1u8; 0x10];
@@ -27,13 +28,13 @@
 //! assert!(file.pread(buf.as_mut_ptr(), 0).is_ok());
 //! assert_eq!(buf, data);
 //!
-//! assert!(FrozenFile::new::<MID>(cfg.clone()).is_err());
+//! assert!(FrozenFile::new(cfg.clone()).is_err());
 //!
 //! assert!(file.delete().is_ok());
 //! assert!(!path.exists());
 //!
 //! drop(file);
-//! assert!(FrozenFile::new::<MID>(cfg).is_ok());
+//! assert!(FrozenFile::new(cfg).is_ok());
 //! ```
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -122,6 +123,9 @@ pub(in crate::ffile) fn new_err_default<R>(code: ErrCode) -> FrozenResult<R> {
 /// Config for [`FrozenFile`]
 #[derive(Debug, Clone)]
 pub struct FrozenFileCfg {
+    /// Identifier used for error propagation by [`frozen_core::error::FrozenError`]
+    pub module_id: u8,
+
     /// Absolute path for/of the file
     ///
     /// *NOTE:* The caller must make sure that the path represents a file and all the parent directories included in
@@ -155,12 +159,13 @@ pub struct FrozenFileCfg {
 /// let path = dir.path().join("tmp_frozen_file");
 ///
 /// let cfg = FrozenFileCfg {
+///     module_id: MID,
 ///     buffer_size: 0x10,
 ///     path: path.to_path_buf(),
 ///     initial_available_buffers: 0x0A,
 /// };
 ///
-/// let file = FrozenFile::new::<MID>(cfg.clone()).unwrap();
+/// let file = FrozenFile::new(cfg.clone()).unwrap();
 /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
 ///
 /// let mut data = vec![1u8; 0x10];
@@ -171,13 +176,13 @@ pub struct FrozenFileCfg {
 /// assert!(file.pread(buf.as_mut_ptr(), 0).is_ok());
 /// assert_eq!(buf, data);
 ///
-/// assert!(FrozenFile::new::<MID>(cfg.clone()).is_err());
+/// assert!(FrozenFile::new(cfg.clone()).is_err());
 ///
 /// assert!(file.delete().is_ok());
 /// assert!(!path.exists());
 ///
 /// drop(file);
-/// assert!(FrozenFile::new::<MID>(cfg).is_ok());
+/// assert!(FrozenFile::new(cfg).is_ok());
 /// ```
 #[derive(Debug)]
 pub struct FrozenFile {
@@ -238,15 +243,16 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
+    ///     module_id: MID,
     ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_available_buffers: 0x0A,
     /// };
     ///
-    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    /// let file = FrozenFile::new(cfg).unwrap();
     /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
     /// ```
-    pub fn new<const MODULE_ID: u8>(cfg: FrozenFileCfg) -> FrozenResult<Self> {
+    pub fn new(cfg: FrozenFileCfg) -> FrozenResult<Self> {
         let raw_file = unsafe { posix::POSIXFile::new(&cfg.path) }?;
         let slf = Self { cfg: cfg.clone(), file: core::cell::UnsafeCell::new(core::mem::ManuallyDrop::new(raw_file)) };
 
@@ -259,7 +265,7 @@ impl FrozenFile {
 
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
         // first caller sets the value and all subsequent calls reuse it
-        let _ = MID.get_or_init(|| MODULE_ID);
+        let _ = MID.get_or_init(|| cfg.module_id);
 
         let curr_len = slf.length()?;
         let init_len = cfg.buffer_size * cfg.initial_available_buffers;
@@ -317,12 +323,13 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
+    ///     module_id: MID,
     ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_available_buffers: 0x0A,
     /// };
     ///
-    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    /// let file = FrozenFile::new(cfg).unwrap();
     /// assert!(file.exists().unwrap());
     ///
     /// file.delete().unwrap();
@@ -346,12 +353,13 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
+    ///     module_id: MID,
     ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_available_buffers: 0x0A,
     /// };
     ///
-    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    /// let file = FrozenFile::new(cfg).unwrap();
     ///
     /// let mut data = [7u8; 0x10];
     /// file.pwrite(data.as_mut_ptr(), 2).unwrap();
@@ -385,12 +393,13 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
+    ///     module_id: MID,
     ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_available_buffers: 0x0A,
     /// };
     ///
-    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    /// let file = FrozenFile::new(cfg).unwrap();
     ///
     /// let mut data = [9u8; 0x10];
     /// file.pwrite(data.as_mut_ptr(), 4).unwrap();
@@ -424,12 +433,13 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
+    ///     module_id: MID,
     ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_available_buffers: 0x0A,
     /// };
     ///
-    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    /// let file = FrozenFile::new(cfg).unwrap();
     ///
     /// let mut write_bufs = [[1u8; 0x10], [2u8; 0x10]];
     /// let ptrs: Vec<*mut u8> = write_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
@@ -467,12 +477,13 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
+    ///     module_id: MID,
     ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_available_buffers: 0x0A,
     /// };
     ///
-    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    /// let file = FrozenFile::new(cfg).unwrap();
     ///
     /// let mut bufs = [[3u8; 0x10], [4u8; 0x10]];
     /// let ptrs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
@@ -513,12 +524,13 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
+    ///     module_id: MID,
     ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_available_buffers: 0x0A,
     /// };
     ///
-    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    /// let file = FrozenFile::new(cfg).unwrap();
     /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
     ///
     /// file.grow(0x20).unwrap();
@@ -549,12 +561,13 @@ impl FrozenFile {
     /// let path = dir.path().join("tmp_frozen_file");
     ///
     /// let cfg = FrozenFileCfg {
+    ///     module_id: MID,
     ///     buffer_size: 0x10,
     ///     path: path.to_path_buf(),
     ///     initial_available_buffers: 0x0A,
     /// };
     ///
-    /// let file = FrozenFile::new::<MID>(cfg).unwrap();
+    /// let file = FrozenFile::new(cfg).unwrap();
     /// assert_eq!(file.length().unwrap(), 0x10 * 0x0A);
     ///
     /// file.grow(0x20).unwrap();
@@ -610,7 +623,8 @@ mod tests {
     fn tmp_path() -> (tempfile::TempDir, FrozenFileCfg) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_ff_file");
-        let cfg = FrozenFileCfg { path, buffer_size: BUFFER_SIZE, initial_available_buffers: INIT_BUFFERS };
+        let cfg =
+            FrozenFileCfg { path, module_id: MID, buffer_size: BUFFER_SIZE, initial_available_buffers: INIT_BUFFERS };
 
         (dir, cfg)
     }
@@ -621,7 +635,7 @@ mod tests {
         #[test]
         fn ok_new_with_init_len() {
             let (_dir, cfg) = tmp_path();
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
 
             let exists = file.exists().unwrap();
             assert!(exists);
@@ -633,13 +647,13 @@ mod tests {
         fn ok_new_existing() {
             let (_dir, cfg) = tmp_path();
 
-            let file = FrozenFile::new::<MID>(cfg.clone()).unwrap();
+            let file = FrozenFile::new(cfg.clone()).unwrap();
             assert_eq!(file.length().unwrap(), BUFFER_SIZE * INIT_BUFFERS);
 
             // must be dropped to release the exclusive lock
             drop(file);
 
-            let reopened = FrozenFile::new::<MID>(cfg.clone()).unwrap();
+            let reopened = FrozenFile::new(cfg.clone()).unwrap();
             assert_eq!(reopened.length().unwrap(), BUFFER_SIZE * INIT_BUFFERS);
         }
 
@@ -647,20 +661,20 @@ mod tests {
         fn err_new_when_file_smaller_than_init_len() {
             let (_dir, mut cfg) = tmp_path();
 
-            let file = FrozenFile::new::<MID>(cfg.clone()).unwrap();
+            let file = FrozenFile::new(cfg.clone()).unwrap();
             drop(file);
 
             // updated cfg
             cfg.buffer_size *= 2;
 
-            let err = FrozenFile::new::<MID>(cfg).unwrap_err();
+            let err = FrozenFile::new(cfg).unwrap_err();
             assert_eq!((err.id & 0xffff) as u16, err::CPT.reason);
         }
 
         #[test]
         fn ok_exists_true_when_exists() {
             let (_dir, cfg) = tmp_path();
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
 
             let exists = file.exists().unwrap();
             assert!(exists);
@@ -669,7 +683,7 @@ mod tests {
         #[test]
         fn ok_exists_false_when_missing() {
             let (_dir, cfg) = tmp_path();
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
             file.delete().unwrap();
 
             let exists = file.exists().unwrap();
@@ -680,7 +694,7 @@ mod tests {
         fn ok_delete_file() {
             let (_dir, cfg) = tmp_path();
 
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
             let exists = file.exists().unwrap();
             assert!(exists);
 
@@ -693,7 +707,7 @@ mod tests {
         fn err_delete_after_delete() {
             let (_dir, cfg) = tmp_path();
 
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
             file.delete().unwrap();
 
             let err = file.delete().unwrap_err();
@@ -706,13 +720,13 @@ mod tests {
             let (_dir, cfg) = tmp_path();
 
             {
-                let file = FrozenFile::new::<MID>(cfg.clone()).unwrap();
+                let file = FrozenFile::new(cfg.clone()).unwrap();
                 file.pwrite(data.as_mut_ptr(), 0).unwrap();
                 drop(file);
             }
 
             {
-                let reopened = FrozenFile::new::<MID>(cfg).unwrap();
+                let reopened = FrozenFile::new(cfg).unwrap();
                 let mut buf = [0u8; BUFFER_SIZE];
 
                 reopened.pread(buf.as_mut_ptr(), 0).unwrap();
@@ -727,9 +741,9 @@ mod tests {
         #[test]
         fn err_new_when_already_open() {
             let (_dir, cfg) = tmp_path();
-            let file = FrozenFile::new::<MID>(cfg.clone()).unwrap();
+            let file = FrozenFile::new(cfg.clone()).unwrap();
 
-            let err = FrozenFile::new::<MID>(cfg).unwrap_err();
+            let err = FrozenFile::new(cfg).unwrap_err();
             assert_eq!((err.id & 0xffff) as u16, err::LCK.reason);
 
             drop(file);
@@ -739,10 +753,10 @@ mod tests {
         fn ok_drop_releases_exclusive_lock() {
             let (_dir, cfg) = tmp_path();
 
-            let file = FrozenFile::new::<MID>(cfg.clone()).unwrap();
+            let file = FrozenFile::new(cfg.clone()).unwrap();
             drop(file);
 
-            let _ = FrozenFile::new::<MID>(cfg).expect("must not fail after drop");
+            let _ = FrozenFile::new(cfg).expect("must not fail after drop");
         }
     }
 
@@ -753,7 +767,7 @@ mod tests {
         fn ok_grow_updates_length() {
             let (_dir, cfg) = tmp_path();
 
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
             assert_eq!(file.length().unwrap(), BUFFER_SIZE * INIT_BUFFERS);
 
             file.grow(0x20).unwrap();
@@ -763,7 +777,7 @@ mod tests {
         #[test]
         fn ok_grow_sync_cycle() {
             let (_dir, cfg) = tmp_path();
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
 
             for _ in 0..0x0A {
                 file.grow(0x100).unwrap();
@@ -780,7 +794,7 @@ mod tests {
         #[test]
         fn ok_sync_after_sync() {
             let (_dir, cfg) = tmp_path();
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
 
             file.sync().unwrap();
             file.sync().unwrap();
@@ -790,7 +804,7 @@ mod tests {
         #[test]
         fn err_sync_after_delete() {
             let (_dir, cfg) = tmp_path();
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
             file.delete().unwrap();
 
             let err = file.sync().unwrap_err();
@@ -804,7 +818,7 @@ mod tests {
         #[test]
         fn ok_single_write_read_cycle() {
             let (_dir, cfg) = tmp_path();
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
 
             let mut data = [0x0Bu8; BUFFER_SIZE];
 
@@ -819,7 +833,7 @@ mod tests {
         #[test]
         fn ok_vectored_write_read_cycle() {
             let (_dir, cfg) = tmp_path();
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
 
             let mut bufs = [[1u8; BUFFER_SIZE], [2u8; BUFFER_SIZE]];
             let bufs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
@@ -839,7 +853,7 @@ mod tests {
         fn ok_write_concurrent_non_overlapping() {
             let (_dir, mut cfg) = tmp_path();
             cfg.initial_available_buffers = 0x100;
-            let file = sync::Arc::new(FrozenFile::new::<MID>(cfg).unwrap());
+            let file = sync::Arc::new(FrozenFile::new(cfg).unwrap());
 
             let mut handles = vec![];
             for i in 0..2 {
@@ -866,7 +880,7 @@ mod tests {
         #[test]
         fn ok_concurrent_grow_and_write() {
             let (_dir, cfg) = tmp_path();
-            let file = sync::Arc::new(FrozenFile::new::<MID>(cfg).unwrap());
+            let file = sync::Arc::new(FrozenFile::new(cfg).unwrap());
 
             let writer = {
                 let f = file.clone();
@@ -902,7 +916,7 @@ mod tests {
         #[test]
         fn ok_concurrent_sync_and_write() {
             let (_dir, cfg) = tmp_path();
-            let file = sync::Arc::new(FrozenFile::new::<MID>(cfg).unwrap());
+            let file = sync::Arc::new(FrozenFile::new(cfg).unwrap());
 
             let writer = {
                 let f = file.clone();
@@ -938,7 +952,7 @@ mod tests {
         #[test]
         fn err_read_hcf_for_eof() {
             let (_dir, cfg) = tmp_path();
-            let file = FrozenFile::new::<MID>(cfg).unwrap();
+            let file = FrozenFile::new(cfg).unwrap();
 
             // index > curr_chunks
             let mut buf = [0; BUFFER_SIZE];
