@@ -32,24 +32,20 @@
 //!
 //! Observed measurements of latency and throughput,
 //!
-//! ```md
 //! | Metric                       | Value              |
 //! |:-----------------------------|:-------------------|
 //! | Allocation Latency (avg)     | ~254 nanosecond    |
 //! | Allocation Throughput (avg)  | ~3.94 million/sec  |
-//! ```
 //!
 //! _NOTE:_ All measurements includes the complete RAII lifecycle (i.e. allocation + deallocation).
 //!
 //! Observed allocation latency for `N` buffers,
 //!
-//! ```md
 //! | Buffers  | Latency  |
 //! |:---------|:---------|
 //! | 0x01     | 246 ns   |
 //! | 0x10     | 251 ns   |
 //! | 0x400    | 300 ns   |
-//! ```
 //!
 //! _INFO:_ As seen, the allocation latency stays near constant irrespective to the size of buffers
 //! and the allocated bytes.
