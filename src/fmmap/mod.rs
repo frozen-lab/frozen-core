@@ -22,14 +22,14 @@
 //! ## Example
 //!
 //! ```
-//! use frozen_core::fmmap::{FrozenMMap, FMCfg};
+//! use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
 //!
 //! const MODULE_ID: u8 = 0;
 //!
 //! let dir = tempfile::tempdir().unwrap();
 //! let path = dir.path().join("tmp_frozen_mmap");
 //!
-//! let cfg = FMCfg {
+//! let cfg = FrozenMMapCfg {
 //!     initial_count: 0x0A,
 //!     flush_duration: std::time::Duration::from_micros(0x96),
 //! };
@@ -150,7 +150,7 @@ pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: 
 
 /// Config for [`FrozenMMap`]
 #[derive(Debug, Clone)]
-pub struct FMCfg {
+pub struct FrozenMMapCfg {
     /// Number of slots to pre-allocate when [`FrozenMMap`] is initialized
     ///
     /// Each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`], where initial file length will
@@ -186,14 +186,14 @@ pub struct FMCfg {
 /// ## Example
 ///
 /// ```
-/// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+/// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
 ///
 /// const MODULE_ID: u8 = 0;
 ///
 /// let dir = tempfile::tempdir().unwrap();
 /// let path = dir.path().join("tmp_frozen_mmap");
 ///
-/// let cfg = FMCfg {
+/// let cfg = FrozenMMapCfg {
 ///     initial_count: 0x0A,
 ///     flush_duration: std::time::Duration::from_micros(0x96),
 /// };
@@ -235,7 +235,7 @@ where
     /// Memory space required for each slot of [`T`] in [`FrozenMMap`]
     pub const SLOT_SIZE: usize = std::mem::size_of::<T>();
 
-    /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`]
+    /// Create a new [`FrozenMMap`] instance w/ given [`FrozenMMapCfg`]
     ///
     /// ## Multiple Instances
     ///
@@ -247,9 +247,9 @@ where
     /// [`FrozenMMap`] does not support in-place growth of a live mapping, to increase capacity, drop the current instance
     /// and reopen w/ [`FrozenMMap::open_grown`] which provides memory mapping over grown capacity
     ///
-    /// ## [`FMCfg`]
+    /// ## [`FrozenMMapCfg`]
     ///
-    /// All configs for [`FrozenMMap`] are stored in [`FMCfg`]
+    /// All configs for [`FrozenMMap`] are stored in [`FrozenMMapCfg`]
     ///
     /// ## Working
     ///
@@ -264,14 +264,14 @@ where
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MODULE_ID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_mmap");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x0A,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
@@ -285,7 +285,7 @@ where
     /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
-    pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg) -> FrozenResult<Self> {
+    pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FrozenMMapCfg) -> FrozenResult<Self> {
         Self::validate_t()?;
         let (file, curr_length) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
         let total_slots = curr_length / Self::SLOT_SIZE;
@@ -303,7 +303,7 @@ where
         Ok(Self { core, tx: Some(tx), _t: core::marker::PhantomData })
     }
 
-    /// Create a new [`FrozenMMap`] instance w/ given [`FMCfg`], while growing the underlying [`FrozenFile`]
+    /// Create a new [`FrozenMMap`] instance w/ given [`FrozenMMapCfg`], while growing the underlying [`FrozenFile`]
     /// by `additional_slots` before creating memory mapping
     ///
     /// ## Multiple Instances
@@ -320,9 +320,9 @@ where
     /// So, instead of remmaping a live instance, the current API performs growth during open, making capacity expansion
     /// an explicit lifecycle operation, and not a side effect on a live instance
     ///
-    /// ## [`FMCfg`]
+    /// ## [`FrozenMMapCfg`]
     ///
-    /// All configs for [`FrozenMMap`] are stored in [`FMCfg`]
+    /// All configs for [`FrozenMMap`] are stored in [`FrozenMMapCfg`]
     ///
     /// ## Working
     ///
@@ -338,14 +338,14 @@ where
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MODULE_ID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_frozen_mmap");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x0A,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
@@ -359,7 +359,11 @@ where
     /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
-    pub fn new_grown<P: AsRef<std::path::Path>>(path: P, cfg: FMCfg, additional_slots: usize) -> FrozenResult<Self> {
+    pub fn new_grown<P: AsRef<std::path::Path>>(
+        path: P,
+        cfg: FrozenMMapCfg,
+        additional_slots: usize,
+    ) -> FrozenResult<Self> {
         Self::validate_t()?;
         let (file, _) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
 
@@ -382,7 +386,7 @@ where
     }
 
     /// Create/open a new [`FrozenFile`] instance
-    fn open_file(path: std::path::PathBuf, cfg: &FMCfg) -> FrozenResult<(FrozenFile, usize)> {
+    fn open_file(path: std::path::PathBuf, cfg: &FrozenMMapCfg) -> FrozenResult<(FrozenFile, usize)> {
         let ff_cfg = FrozenFileCfg { path, buffer_size: Self::SLOT_SIZE, initial_available_buffers: cfg.initial_count };
 
         let file = FrozenFile::new::<MODULE_ID>(ff_cfg)?;
@@ -428,14 +432,14 @@ where
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MODULE_ID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_wait_epoch");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x04,
     ///     flush_duration: std::time::Duration::from_micros(0x60),
     /// };
@@ -501,14 +505,14 @@ where
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MODULE_ID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_read_mmap");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x02,
     ///     flush_duration: std::time::Duration::from_micros(0x60),
     /// };
@@ -553,14 +557,14 @@ where
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MODULE_ID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_write_mmap");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x02,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
@@ -617,14 +621,14 @@ where
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MODULE_ID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_write_sync");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x02,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
@@ -682,14 +686,14 @@ where
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MODULE_ID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_grow_mmap");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x02,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
@@ -714,14 +718,14 @@ where
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MODULE_ID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_mem_usage");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x10,
     ///     flush_duration: std::time::Duration::from_micros(0x60),
     /// };
@@ -758,14 +762,14 @@ where
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_tx");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x0A,
     ///     flush_duration: std::time::Duration::from_micros(50),
     /// };
@@ -808,14 +812,14 @@ where
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MODULE_ID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_delete_mmap");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x04,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
@@ -905,14 +909,14 @@ where
 /// ## Example
 ///
 /// ```
-/// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+/// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
 ///
 /// const MID: u8 = 0;
 ///
 /// let dir = tempfile::tempdir().unwrap();
 /// let path = dir.path().join("tmp_tx");
 ///
-/// let cfg = FMCfg {
+/// let cfg = FrozenMMapCfg {
 ///     initial_count: 0x0A,
 ///     flush_duration: std::time::Duration::from_micros(50),
 /// };
@@ -957,14 +961,14 @@ impl<'a, T> FMTransaction<'a, T> {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_tx");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x10,
     ///     flush_duration: std::time::Duration::from_micros(50),
     /// };
@@ -1021,14 +1025,14 @@ impl<'a, T> FMTransaction<'a, T> {
     /// ## Example
     ///
     /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FMCfg};
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
     ///
     /// const MID: u8 = 0;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let path = dir.path().join("tmp_tx");
     ///
-    /// let cfg = FMCfg {
+    /// let cfg = FrozenMMapCfg {
     ///     initial_count: 0x10,
     ///     flush_duration: std::time::Duration::from_micros(50),
     /// };
@@ -1364,11 +1368,11 @@ mod tests {
     const MID: u8 = 0;
     const INIT_SLOTS: usize = 0x0A;
 
-    fn new_tmp() -> (tempfile::TempDir, std::path::PathBuf, FMCfg) {
+    fn new_tmp() -> (tempfile::TempDir, std::path::PathBuf, FrozenMMapCfg) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
-        let cfg = FMCfg { initial_count: INIT_SLOTS, flush_duration: FLUSH_DURATION };
+        let cfg = FrozenMMapCfg { initial_count: INIT_SLOTS, flush_duration: FLUSH_DURATION };
 
         (dir, path, cfg)
     }
