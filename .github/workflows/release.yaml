@@ -22,8 +22,6 @@ jobs:
             arch: x86_64
           - os: ubuntu-24.04-arm
             arch: aarch64
-          - os: macos-15-intel
-            arch: x86_64
           - os: macos-latest
             arch: aarch64
     runs-on: ${{ matrix.os }}
@@ -42,7 +40,7 @@ jobs:
         run: cargo check --release --all-features
 
       - name: Cargo check (tests)
-        run: cargo check --tests --release --all-features       
+        run: cargo check --tests --release --all-features 
 
   release:
     needs: lints
