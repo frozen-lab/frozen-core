@@ -19,12 +19,15 @@
 //! use frozen_core::error::{FrozenError, FrozenResult, ErrCode};
 //!
 //! fn read_file() -> FrozenResult<()> {
-//!     Err(FrozenError::new(1, 2, ErrCode::new(0x0033, "io"), "read failed"))
+//!     Err(FrozenError::new(0x10, 0x20, ErrCode::new(0x30, "io"), "read failed"))
 //! }
 //!
 //! let err = read_file().unwrap_err();
 //!
-//! assert_eq!(err.id, 0x0102_0033);
+//! assert_eq!(err.module, 0x10);
+//! assert_eq!(err.domain, 0x20);
+//! assert_eq!(err.reason, 0x30);
+//!
 //! assert!(err.context.contains("[io]"));
 //! ```
 
@@ -32,10 +35,16 @@
 pub type FrozenResult<T> = Result<T, FrozenError>;
 
 /// Utility for error propagation used across [`frozen_core`]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FrozenError {
-    /// Encoded 32-bit unique identifier for [`FrozenError`]
-    pub id: u32,
+    /// 8-bit unique identifier to identify the _module_ of [`FrozenError`] object
+    pub module: u8,
+
+    /// 8-bit unique identifier to identify the _domain_ of [`FrozenError`] object
+    pub domain: u8,
+
+    /// 8-bit unique identifier to identify the _reason_ of [`FrozenError`] object
+    pub reason: u8,
 
     /// Error context for the [`FrozenError`]
     pub context: String,
@@ -49,15 +58,18 @@ impl FrozenError {
     /// ```
     /// use frozen_core::error::{FrozenError, ErrCode};
     ///
-    /// let err = FrozenError::new(1, 2, ErrCode::new(0x0033, "io"), "failed to read file");
+    /// let err = FrozenError::new(0x10, 0x20, ErrCode::new(0x30, "io"), "failed to read file");
     ///
-    /// assert_eq!(err.id, 0x0102_0033);
+    /// assert_eq!(err.module, 0x10);
+    /// assert_eq!(err.domain, 0x20);
+    /// assert_eq!(err.reason, 0x30);
+    ///
     /// assert!(err.context.contains("[io]"));
     /// assert!(err.context.contains("failed to read file"));
     /// ```
     #[inline(always)]
     pub fn new(module: u8, domain: u8, code: ErrCode, errmsg: &str) -> Self {
-        Self { id: error_id(module, domain, code.reason), context: format!("[{}] {}", code.detail, errmsg) }
+        Self { module, domain, reason: code.reason, context: format!("[{}] {}", code.detail, errmsg) }
     }
 
     /// Construct a new [`FrozenError`] from raw [`Error`] object
@@ -68,15 +80,18 @@ impl FrozenError {
     /// use frozen_core::error::{FrozenError, ErrCode};
     ///
     /// let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
-    /// let err = FrozenError::new_raw(1, 2, ErrCode::new(0x0033, "io"), io_err);
+    /// let err = FrozenError::new_raw(0x14, 0x24, ErrCode::new(0x34, "io"), io_err);
     ///
-    /// assert_eq!(err.id, 0x0102_0033);
+    /// assert_eq!(err.module, 0x14);
+    /// assert_eq!(err.domain, 0x24);
+    /// assert_eq!(err.reason, 0x34);
+    ///
     /// assert!(err.context.contains("[io]"));
     /// assert!(err.context.contains("file missing"));
     /// ```
     #[inline(always)]
     pub fn new_raw<E: std::fmt::Display>(module: u8, domain: u8, code: ErrCode, err: E) -> Self {
-        Self { id: error_id(module, domain, code.reason), context: format!("[{}] {}", code.detail, err) }
+        Self { domain, module, reason: code.reason, context: format!("[{}] {}", code.detail, err) }
     }
 
     /// Compare two errors by their encoded id's
@@ -86,14 +101,30 @@ impl FrozenError {
     /// ```
     /// use frozen_core::error::{FrozenError, ErrCode};
     ///
-    /// let err1 = FrozenError::new(0, 0, ErrCode::new(0x30, "test"), "something failed");
-    /// let err2 = FrozenError::new(0, 0, ErrCode::new(0x30, "test"), "another message");
+    /// let err1 = FrozenError::new(0x1A, 0x2A, ErrCode::new(0x3A, "test"), "something failed");
+    /// let err2 = FrozenError::new(0x1A, 0x2A, ErrCode::new(0x3A, "test"), "another message");
     ///
-    /// assert!(err1.compare_id(&err2));
+    /// assert!(err1.is_equal(&err2));
     /// ```
     #[inline(always)]
-    pub fn compare_id(&self, err: &FrozenError) -> bool {
-        self.id == err.id
+    pub fn is_equal(&self, err: &FrozenError) -> bool {
+        self == err
+    }
+}
+
+impl std::fmt::Debug for FrozenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrozenError")
+            .field("Module", &self.module)
+            .field("Domain", &self.domain)
+            .field("Reason", &self.reason)
+            .finish()
+    }
+}
+
+impl PartialEq for FrozenError {
+    fn eq(&self, other: &Self) -> bool {
+        (self.module == other.module) && (self.domain == other.domain) && (self.reason == other.reason)
     }
 }
 
@@ -104,15 +135,15 @@ impl FrozenError {
 /// ```
 /// use frozen_core::error::ErrCode;
 ///
-/// const LOCK_ERR: ErrCode = frozen_core::error::ErrCode::new(0x300, "lock error");
+/// const LOCK_ERR: ErrCode = frozen_core::error::ErrCode::new(0xFF, "lock error");
 ///
-/// assert_eq!(LOCK_ERR.reason, 0x300);
+/// assert_eq!(LOCK_ERR.reason, 0xFF);
 /// assert_eq!(LOCK_ERR.detail, "lock error");
 /// ```
 #[derive(Debug, Clone)]
 pub struct ErrCode {
-    /// 16-bit reason code encoded into [`FrozenError::id`]
-    pub reason: u16,
+    /// 8-bit reason code encoded into [`FrozenError::id`]
+    pub reason: u8,
 
     /// Short subsystem label included in the formatted error context
     pub detail: &'static str,
@@ -128,34 +159,20 @@ impl ErrCode {
     /// ```
     /// use frozen_core::error::ErrCode;
     ///
-    /// const LOCK_ERR: ErrCode = frozen_core::error::ErrCode::new(0x300, "lock error");
+    /// const LOCK_ERR: ErrCode = frozen_core::error::ErrCode::new(0xFF, "lock error");
     ///
-    /// assert_eq!(LOCK_ERR.reason, 0x300);
+    /// assert_eq!(LOCK_ERR.reason, 0xFF);
     /// assert_eq!(LOCK_ERR.detail, "lock error");
     /// ```
     #[inline]
-    pub const fn new(reason: u16, detail: &'static str) -> Self {
+    pub const fn new(reason: u8, detail: &'static str) -> Self {
         Self { reason, detail }
     }
-}
-
-#[inline]
-const fn error_id(module: u8, domain: u8, reason: u16) -> u32 {
-    ((module as u32) << 0x18) | ((domain as u32) << 0x10) | (reason as u32)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[inline]
-    const fn from_error_id(eid: u32) -> (u8, u8, u16) {
-        let module = ((eid >> 24) & 0xff) as u8;
-        let domain = ((eid >> 16) & 0xff) as u8;
-        let reason = (eid & 0xffff) as u16;
-
-        (module, domain, reason)
-    }
 
     #[test]
     fn ok_context_exact_format() {
@@ -176,40 +193,13 @@ mod tests {
     }
 
     #[test]
-    fn ok_error_id_roundtrip_basic() {
-        let err = FrozenError::new(0x01, 0x02, ErrCode::new(0x0033, "io"), "read failed");
-        let (m, d, r) = from_error_id(err.id);
-
-        assert_eq!(err.id, 0x0102_0033);
-        assert_eq!((m, d, r), (0x01, 0x02, 0x0033));
-    }
-
-    #[test]
     fn ok_new_and_new_raw_same_id() {
         let e1 = FrozenError::new(1, 2, ErrCode::new(3, "io"), "fail");
 
         let io_err = std::io::Error::new(std::io::ErrorKind::Other, "fail");
         let e2 = FrozenError::new_raw(1, 2, ErrCode::new(3, "io"), io_err);
 
-        assert_eq!(e1.id, e2.id);
-    }
-
-    #[test]
-    fn ok_error_id_roundtrip_edges() {
-        let err = FrozenError::new(0xff, 0x00, ErrCode::new(0xffff, "edge"), "max values");
-        let (m, d, r) = from_error_id(err.id);
-
-        assert_eq!(err.id, 0xff00_ffff);
-        assert_eq!((m, d, r), (0xff, 0x00, 0xffff));
-    }
-
-    #[test]
-    fn ok_error_id_reason_only_changes_low_bits() {
-        let e1 = FrozenError::new(1, 2, ErrCode::new(1, "x"), "a");
-        let e2 = FrozenError::new(1, 2, ErrCode::new(2, "x"), "a");
-
-        assert_eq!(e1.id & 0xffff_0000, e2.id & 0xffff_0000);
-        assert_ne!(e1.id & 0x0000_ffff, e2.id & 0x0000_ffff);
+        assert_eq!(e1, e2);
     }
 
     #[test]
@@ -232,7 +222,7 @@ mod tests {
         let e1 = FrozenError::new(1, 2, ErrCode::new(3, "io"), "a");
         let e2 = FrozenError::new(1, 2, ErrCode::new(3, "io"), "b");
 
-        assert!(e1.compare_id(&e2));
+        assert_eq!(e1, e2);
     }
 
     #[test]
@@ -240,6 +230,6 @@ mod tests {
         let e1 = FrozenError::new(1, 2, ErrCode::new(3, "io"), "a");
         let e2 = FrozenError::new(1, 2, ErrCode::new(4, "io"), "a");
 
-        assert!(!e1.compare_id(&e2));
+        assert_ne!(e1, e2);
     }
 }
