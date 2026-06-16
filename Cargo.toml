@@ -3,7 +3,7 @@ edition = "2024"
 version = "0.0.23"
 name = "frozen-core"
 readme = "README.md"
-rust-version = "1.85.0"
+rust-version = "1.86.0"
 description = "Custom implementations and core utilities for frozen-lab crates"
 keywords = [
     "frozen-lab",
