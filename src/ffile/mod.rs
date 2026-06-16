@@ -40,10 +40,7 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
 
-use crate::error::{ErrCode, FrozenError, FrozenResult};
-
-/// Domain Id for [`FrozenFile`] is **17**
-const ERRDOMAIN: u8 = 0x11;
+use crate::error::FrozenResult;
 
 /// File descriptor of [`FrozenFile`]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -52,72 +49,75 @@ pub type TFileId = libc::c_int;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 type TFile = posix::POSIXFile;
 
-/// module id used for [`FrozenError`]
-static MID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-
-#[cfg(not(test))]
-#[inline(always)]
-fn mid() -> &'static u8 {
-    MID.get().unwrap()
-}
-
-#[cfg(test)]
-#[inline(always)]
-fn mid() -> &'static u8 {
-    MID.get_or_init(|| 0)
-}
-
 /// Error codes for [`FrozenFile`]
 pub(in crate::ffile) mod err {
-    use super::ErrCode;
+    use crate::error::{ErrCode, FrozenError, FrozenResult};
 
-    /// (256) internal fuck up (hault and catch fire)
-    pub const HCF: ErrCode = ErrCode::new(0x100, "hault and catch fire");
+    /// Domain Id for [`FrozenFile`] is **17**
+    const ERRDOMAIN: u8 = 0x11;
 
-    /// (257) unknown error (fallback)
-    pub const UNK: ErrCode = ErrCode::new(0x101, "unknown error");
+    /// module id used for [`FrozenError`]
+    pub static MID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 
-    /// (258) no more space available
-    pub const NSP: ErrCode = ErrCode::new(0x102, "not enough space available on the storage device");
+    #[cfg(not(test))]
+    #[inline(always)]
+    pub fn mid() -> &'static u8 {
+        MID.get().unwrap()
+    }
 
-    /// (259) syncing error
-    pub const SYN: ErrCode = ErrCode::new(0x103, "failed to sync/flush data to storage device");
+    #[cfg(test)]
+    #[inline(always)]
+    pub fn mid() -> &'static u8 {
+        MID.get_or_init(|| 0)
+    }
 
-    /// (260) no write perm
-    pub const WRT: ErrCode = ErrCode::new(0x104, "missing permissions for write");
+    /// internal fuck up (hault and catch fire)
+    pub const HCF: ErrCode = ErrCode::new(0x02, "hault and catch fire");
 
-    /// (261) no read perm
-    pub const RED: ErrCode = ErrCode::new(0x105, "missing permissions for read");
+    /// unknown error (fallback)
+    pub const UNK: ErrCode = ErrCode::new(0x04, "unknown error");
 
-    /// (262) invalid file path
-    pub const INV: ErrCode = ErrCode::new(0x106, "invalid path to file");
+    /// no more space available
+    pub const NSP: ErrCode = ErrCode::new(0x08, "not enough space available on the storage device");
 
-    /// (263) corrupted file
-    pub const CPT: ErrCode = ErrCode::new(0x107, "file is either invalid or corrupted");
+    /// syncing error
+    pub const SYN: ErrCode = ErrCode::new(0x0A, "failed to sync/flush data to storage device");
 
-    /// (264) unable to grow
-    pub const GRW: ErrCode = ErrCode::new(0x108, "unable to zero-extend file");
+    /// no write perm
+    pub const WRT: ErrCode = ErrCode::new(0x0C, "missing permissions for write");
 
-    /// (265) unable to obtain exclusive lock
-    pub const LCK: ErrCode = ErrCode::new(0x109, "failed to obtain exclusive lock as file may already opened");
+    /// no read perm
+    pub const RED: ErrCode = ErrCode::new(0x0E, "missing permissions for read");
 
-    /// (266) locks exhausted (mainly on nfs)
-    pub const LEX: ErrCode = ErrCode::new(0x10A, "failed to obtain lock, as no more locks available");
+    /// invalid file path
+    pub const INV: ErrCode = ErrCode::new(0x10, "invalid path to file");
 
-    /// (267) no write/read perm
-    pub const PRM: ErrCode = ErrCode::new(0x10B, "missing permissions for IO");
-}
+    /// corrupted file
+    pub const CPT: ErrCode = ErrCode::new(0x12, "file is either invalid or corrupted");
 
-#[inline]
-pub(in crate::ffile) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenResult<R> {
-    let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, error);
-    Err(err)
-}
+    /// unable to grow
+    pub const GRW: ErrCode = ErrCode::new(0x14, "unable to zero-extend file");
 
-#[inline]
-pub(in crate::ffile) fn new_err_default<R>(code: ErrCode) -> FrozenResult<R> {
-    let err = FrozenError::new(*mid(), ERRDOMAIN, code, "");
-    Err(err)
+    /// locks exhausted (mainly on nfs)
+    pub const LEX: ErrCode = ErrCode::new(0x18, "failed to obtain lock, as no more locks available");
+
+    /// no write/read perm
+    pub const PRM: ErrCode = ErrCode::new(0x1A, "missing permissions for IO");
+
+    /// unable to obtain exclusive lock
+    pub const LCK: ErrCode = ErrCode::new(0x1C, "failed to obtain exclusive lock as file may already opened");
+
+    #[inline]
+    pub(in crate::ffile) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenResult<R> {
+        let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, error);
+        Err(err)
+    }
+
+    #[inline]
+    pub(in crate::ffile) fn new_err_default<R>(code: ErrCode) -> FrozenResult<R> {
+        let err = FrozenError::new(*mid(), ERRDOMAIN, code, "");
+        Err(err)
+    }
 }
 
 /// Config for [`FrozenFile`]
@@ -128,21 +128,22 @@ pub struct FrozenFileCfg {
 
     /// Absolute path for/of the file
     ///
-    /// *NOTE:* The caller must make sure that the path represents a file and all the parent directories included in
-    /// the path do exists
+    /// *NOTE:* The caller must make sure that the path represents a file and all the parent
+    /// directories included in the path do exists.
     pub path: std::path::PathBuf,
 
     /// Size (in bytes) of a single chunk in file
     ///
-    /// A chunk is a small fixed size allocation and addressing unit used by [`FrozenFile`] for all the write/read ops.
-    /// These ops are operated by index of the chunk and not the offset of the byte
+    /// A chunk is a small fixed size allocation and addressing unit used by [`FrozenFile`] for all
+    /// the write/read ops. These ops are operated by index of the chunk and not the offset of the
+    /// byte.
     ///
     /// *NOTE:* Chunk size when power of 2, is cache efficient and good for performance
     pub buffer_size: usize,
 
     /// Number of chunks to pre-allocate on fs when [`FrozenFile`] is initialized
     ///
-    /// Initial file length will be `buffer_size * initial_available_buffers` (bytes)
+    /// Initial file length will be `buffer_size * initial_available_buffers` (bytes).
     pub initial_available_buffers: usize,
 }
 
@@ -220,17 +221,19 @@ impl FrozenFile {
     ///
     /// ## Important
     ///
-    /// The provided [`FrozenFileCfg`] must remain identical across all reopen cycles of the [`FrozenFile`].
+    /// The provided [`FrozenFileCfg`] must remain identical across all reopen cycles of the
+    /// [`FrozenFile`].
     ///
-    /// Changing any of the feilds after initial creation, may violate internal layout invariants and
-    /// cause the file to be treated as corrupted.
+    /// Changing any of the feilds after initial creation, may violate internal layout invariants
+    /// and cause the file to be treated as corrupted.
     ///
     /// ## Multiple Instances
     ///
-    /// Every instance of [`FrozenFile`] tries to acquire an exclusive lock, which protects against operating with
-    /// multiple simultenious instances.
+    /// Every instance of [`FrozenFile`] tries to acquire an exclusive lock, which protects against
+    /// operating with multiple simultenious instances.
     ///
-    /// If trying to call [`FrozenFile::new`] when already called, [`FFileErr::Lck`] error will be thrown.
+    /// If trying to call [`FrozenFile::new`] when already called, [`FFileErr::Lck`] error will be
+    /// thrown.
     ///
     /// ## Example
     ///
@@ -258,14 +261,14 @@ impl FrozenFile {
 
         let file = slf.get_file();
 
-        // INFO: right after open is successful, we must obtain an exclusive lock on the entire file. So the
-        // another instance of [`FrozenFile`] will try to access the same lock, would correctly fail with
-        // [`FFileErr::Lck`] error.
+        // INFO: right after open is successful, we must obtain an exclusive lock on the entire file.
+        // So the another instance of [`FrozenFile`] will try to access the same lock, would
+        // correctly fail with [`FFileErr::Lck`] error.
         unsafe { file.flock() }?;
 
-        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
-        // first caller sets the value and all subsequent calls reuse it
-        let _ = MID.get_or_init(|| cfg.module_id);
+        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock`
+        // guarantees that the first caller sets the value and all subsequent calls reuse it
+        let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let curr_len = slf.length()?;
         let init_len = cfg.buffer_size * cfg.initial_available_buffers;
@@ -274,16 +277,16 @@ impl FrozenFile {
             0 => slf.grow(cfg.initial_available_buffers)?,
             _ => {
                 // NOTE: we can treat these invariants as errors only because, our system guarantees,
-                // whenever file size is updated, i.e. has grown, it'll always be a multiple of `buffer_size`,
-                // and will have minimum of `buffer_size * initial_available_buffers` (bytes) as it's length, although
-                // it only holds true when any of the params in provided `cfg` are never updated after the initial
-                // creation of the file
+                // whenever file size is updated, i.e. has grown, it'll always be a multiple of
+                // `buffer_size`, and will have minimum of `buffer_size * initial_available_buffers`
+                // (bytes) as it's length, although it only holds true when any of the params in
+                // provided `cfg` are never updated after the initial creation of the file
                 //
                 // INFO: when true, we close the file to avoid resource leaks
                 if (curr_len < init_len) || (curr_len % cfg.buffer_size != 0) {
                     // NOTE: we supress the close error as we are already in an errored state
                     let _ = unsafe { file.close() };
-                    return new_err_default(err::CPT);
+                    return err::new_err_default(err::CPT);
                 }
             }
         }
@@ -299,8 +302,8 @@ impl FrozenFile {
 
     /// A best-effort call to prompt kernel to start flushing dirty pages in the specified range
     ///
-    /// This call, by itself, does not guarantee any kind of durability, and must always be paired with
-    /// strong sync call i.e. [`FrozenFile::sync`]
+    /// This call, by itself, does not guarantee any kind of durability, and must always be paired
+    /// with strong sync call i.e. [`FrozenFile::sync`]
     #[cfg(target_os = "linux")]
     pub fn sync_range(&self, index: usize, count: usize) -> FrozenResult<()> {
         let offset = self.cfg.buffer_size * index;
@@ -547,8 +550,9 @@ impl FrozenFile {
     ///
     /// ## Working
     ///
-    /// This call performs a syscall to fetch current length of [`FrozenFile`] from fs, as the current length of the
-    /// file is not cached anywhere in the pipeline to avoid TOCTAU race conditions
+    /// This call performs a syscall to fetch current length of [`FrozenFile`] from fs, as the
+    /// current length of the file is not cached anywhere in the pipeline to avoid TOCTAU race
+    /// conditions.
     ///
     /// ## Example
     ///
@@ -579,7 +583,7 @@ impl FrozenFile {
         let buffer_size = self.cfg.buffer_size;
 
         if crate::hints::unlikely(curr_len % buffer_size != 0) {
-            return new_err_default(err::CPT);
+            return err::new_err_default(err::CPT);
         }
 
         Ok(curr_len / buffer_size)
@@ -668,7 +672,7 @@ mod tests {
             cfg.buffer_size *= 2;
 
             let err = FrozenFile::new(cfg).unwrap_err();
-            assert_eq!((err.id & 0xffff) as u16, err::CPT.reason);
+            assert_eq!(err.reason, err::CPT.reason);
         }
 
         #[test]
@@ -711,7 +715,7 @@ mod tests {
             file.delete().unwrap();
 
             let err = file.delete().unwrap_err();
-            assert_eq!((err.id & 0xffff) as u16, err::INV.reason);
+            assert_eq!(err.reason, err::INV.reason);
         }
 
         #[test]
@@ -744,7 +748,7 @@ mod tests {
             let file = FrozenFile::new(cfg.clone()).unwrap();
 
             let err = FrozenFile::new(cfg).unwrap_err();
-            assert_eq!((err.id & 0xffff) as u16, err::LCK.reason);
+            assert_eq!(err.reason, err::LCK.reason);
 
             drop(file);
         }
@@ -808,7 +812,7 @@ mod tests {
             file.delete().unwrap();
 
             let err = file.sync().unwrap_err();
-            assert_eq!((err.id & 0xffff) as u16, err::HCF.reason);
+            assert_eq!(err.reason, err::HCF.reason);
         }
     }
 
@@ -957,7 +961,7 @@ mod tests {
             // index > curr_chunks
             let mut buf = [0; BUFFER_SIZE];
             let err = file.pread(buf.as_mut_ptr(), 0x100).unwrap_err();
-            assert_eq!((err.id & 0xffff) as u16, err::HCF.reason);
+            assert_eq!(err.reason, err::HCF.reason);
         }
     }
 }
