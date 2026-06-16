@@ -117,20 +117,17 @@ pub(in crate::fmmap) mod err {
     /// flush_tx error (unable to spawn)
     pub const FXE: ErrCode = ErrCode::new(0x10, "unable to spawn flush_tx");
 
-    /// lock poisoned
-    pub const LPN: ErrCode = ErrCode::new(0x12, "lock poisoned internally");
-
     /// type `T` implements drop
-    pub const DRP: ErrCode = ErrCode::new(0x14, "type T must not implement `Drop`");
+    pub const DRP: ErrCode = ErrCode::new(0x12, "type T must not implement `Drop`");
 
     /// type `T` is not 8 bytes aligned
-    pub const ALN: ErrCode = ErrCode::new(0x16, "type T must be 8-bytes aligned");
+    pub const ALN: ErrCode = ErrCode::new(0x14, "type T must be 8-bytes aligned");
 
     /// `size_of::<T>()` is not multiple of 8
-    pub const SZE: ErrCode = ErrCode::new(0x18, "`size_of::<T>()` must be multiple of 8 bytes");
+    pub const SZE: ErrCode = ErrCode::new(0x16, "`size_of::<T>()` must be multiple of 8 bytes");
 
     /// type `T` must not be zero sized
-    pub const ZRO: ErrCode = ErrCode::new(0x1A, "type T must not be zero sized");
+    pub const ZRO: ErrCode = ErrCode::new(0x18, "type T must not be zero sized");
 
     #[inline]
     pub(in crate::fmmap) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenResult<R> {
@@ -302,8 +299,8 @@ where
         let (file, curr_length) = Self::open_file(path.as_ref().to_path_buf(), &cfg)?;
         let total_slots = curr_length / Self::SLOT_SIZE;
 
-        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
-        // first caller sets the value and all subsequent calls reuse it
+        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock`
+        // guarantees that the first caller sets the value and all subsequent calls reuse it
         let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
@@ -347,8 +344,8 @@ where
     /// ## Important
     ///
     /// The `cfg` must not change any of its properties for the entire life of [`FrozenFile`],
-    /// which is used under the hood, one must use config stores like [`Rta`](https://crates.io/crates/rta)
-    /// to store config.
+    /// which is used under the hood, one must use config stores like
+    /// [`Rta`](https://crates.io/crates/rta) to store config.
     ///
     /// ## Example
     ///
@@ -388,8 +385,8 @@ where
         let curr_length = file.length()?; // we must read the updated (grown) length
         let total_slots = curr_length / Self::SLOT_SIZE;
 
-        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
-        // first caller sets the value and all subsequent calls reuse it
+        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock`
+        // guarantees that the first caller sets the value and all subsequent calls reuse it
         let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
@@ -485,11 +482,7 @@ where
             return Ok(());
         }
 
-        let mut guard = match self.core.durable_lock.lock() {
-            Ok(g) => g,
-            Err(e) => return err::new_err(err::LPN, e),
-        };
-
+        let mut guard = self.core.acquire_durable_lock();
         loop {
             if let Some(sync_err) = self.core.get_sync_error() {
                 return Err(sync_err);
@@ -499,10 +492,8 @@ where
                 return Ok(());
             }
 
-            guard = match self.core.durable_cv.wait(guard) {
-                Ok(g) => g,
-                Err(e) => return err::new_err(err::LPN, e),
-            };
+            // NOTE: See [`Core::acquire_durable_lock`] implementation for rationale behind poison recovery
+            guard = self.core.durable_cv.wait(guard).unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -555,8 +546,8 @@ where
         let offset = Self::SLOT_SIZE * index;
         let _lock = self.core.locks.lock(index);
 
-        // NOTE: We do avoid acquiring io_lock for read ops to increase the throughput (under the assumption of
-        // OS guarantees visibility)
+        // NOTE: We do avoid acquiring io_lock for read ops to increase the throughput (under the
+        // assumption of OS guarantees visibility)
 
         let ptr = unsafe { self.core.map.as_ptr(offset) };
         Ok(f(ptr))
@@ -613,7 +604,7 @@ where
 
         let offset = Self::SLOT_SIZE * index;
 
-        let _guard = self.core.acquire_io_lock()?;
+        let _guard = self.core.acquire_io_lock();
         let _lock = self.core.locks.lock(index);
 
         let ptr = unsafe { self.core.map.as_mut_ptr(offset) };
@@ -678,10 +669,10 @@ where
         let offset = Self::SLOT_SIZE * index;
 
         // block flush_tx scheduling
-        let _flush_guard = self.core.lock.lock().map_err(|e| err::new_err_raw(err::LPN, e))?;
+        let _flush_guard = self.core.acquire_lock();
 
         // we use exlusive lock as we perform blocking hard sync
-        let _guard = self.core.acquire_exclusive_io_lock()?;
+        let _guard = self.core.acquire_exclusive_io_lock();
 
         let _lock = self.core.locks.lock(index);
         let ptr = unsafe { self.core.map.as_mut_ptr(offset) };
@@ -690,15 +681,16 @@ where
         // blocking hard sync
         self.core.sync()?;
 
-        // NOTE: we hard sync we flushed an entier batch, so we can skip the sync via flush_tx as the
-        // current batch is durable
+        // NOTE: we hard sync we flushed an entier batch, so we can skip the sync via flush_tx as
+        // the current batch is durable
 
         self.core.mark_epoch_durable();
         let prev = self.core.dirty.swap(false, atomic::Ordering::AcqRel);
 
-        // NOTE: we must also notify cv's waiting for durability (we skip if there was no batch to sync)
+        // NOTE: we must also notify cv's waiting for durability (we skip if there was no batch to
+        // sync)
         if prev {
-            let _g = self.core.durable_lock.lock().map_err(|e| err::new_err_raw(err::LPN, e))?;
+            let _g = self.core.acquire_durable_lock();
             self.core.durable_cv.notify_all();
         }
 
@@ -832,8 +824,8 @@ where
     ///
     /// ## Working
     ///
-    /// When `delete` is called, all read, write, and (background) sync ops are paused (indefinitely),
-    /// whule deletion is done with following steps:
+    /// When `delete` is called, all read, write, and (background) sync ops are paused
+    /// (indefinitely), whule deletion is done with following steps:
     ///
     /// - acquire an exclusive `io_lock` (all other ops are paused indefinitely)
     /// - if any batch is pending for sync,
@@ -875,7 +867,7 @@ where
         }
 
         // pause all new write ops
-        let _lock = self.core.acquire_exclusive_io_lock()?;
+        let _lock = self.core.acquire_exclusive_io_lock();
 
         self.munmap()?;
         self.core.file.delete()
@@ -1096,7 +1088,7 @@ impl<'a, T> FMTransaction<'a, T> {
             return Err(err);
         }
 
-        let _guard = self.core.acquire_io_lock()?;
+        let _guard = self.core.acquire_io_lock();
 
         // NOTE: we must acquire all locks beforehand, to make sure all the write go through
         let mut guards = Vec::with_capacity(self.ops_vec.len());
@@ -1204,14 +1196,40 @@ impl Core {
         }
     }
 
+    /// ## Why we ignore [`std::sync::PoisonError`]?
+    ///
+    /// The mutex used for lock, is solely used as a parking primitive for [`Condvar`] and does not
+    /// protect any mutable state. All the pool invariants and accounting are maintained via atomics
+    /// and are completely seperated from the mutex.
+    ///
+    /// A poisoned mutex only indicates that another tx panicked while holding the lock, and indicates
+    /// an inconsistent state of the protected value. Since no state can be left partially modified
+    /// under this lock, there is no possible consistency risk to recover from and propagating the
+    /// poison error would only introduce unnecessary failures into the allocation path.
+    ///
+    /// Therefore, as best effort, we consume the [`std::sync::PoisonError`] and continue operating
+    /// with the recovered guard.
     #[inline]
-    fn acquire_io_lock(&self) -> FrozenResult<sync::RwLockReadGuard<'_, ()>> {
-        self.io_lock.read().map_err(|e| err::new_err_raw(err::LPN, e))
+    fn acquire_durable_lock(&self) -> sync::MutexGuard<'_, ()> {
+        self.durable_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// NOTE: See [`Core::acquire_durable_lock`] implementation for rationale behind poison recovery
     #[inline]
-    fn acquire_exclusive_io_lock(&self) -> FrozenResult<sync::RwLockWriteGuard<'_, ()>> {
-        self.io_lock.write().map_err(|e| err::new_err_raw(err::LPN, e))
+    fn acquire_lock(&self) -> sync::MutexGuard<'_, ()> {
+        self.lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// NOTE: See [`Core::acquire_durable_lock`] implementation for rationale behind poison recovery
+    #[inline]
+    fn acquire_io_lock(&self) -> sync::RwLockReadGuard<'_, ()> {
+        self.io_lock.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// NOTE: See [`Core::acquire_durable_lock`] implementation for rationale behind poison recovery
+    #[inline]
+    fn acquire_exclusive_io_lock(&self) -> sync::RwLockWriteGuard<'_, ()> {
+        self.io_lock.write().unwrap_or_else(|e| e.into_inner())
     }
 
     #[inline]
@@ -1272,14 +1290,7 @@ impl Core {
             // INFO: we must acquire an exclusive IO lock for sync, hence no write, read or
             // grow could kick in while sync is in progress
 
-            let io_lock = match core.acquire_exclusive_io_lock() {
-                Ok(lock) => lock,
-                Err(e) => {
-                    core.set_sync_error(e);
-                    core.cv.notify_all();
-                    return;
-                }
-            };
+            let io_lock = core.acquire_exclusive_io_lock();
 
             // INFO: we must drop the guard before syscall, as its a blocking operation and holding
             // the mutex while the syscall takes place is not a good idea, while we drop the mutex
@@ -1303,13 +1314,7 @@ impl Core {
                 Ok(_) => {
                     core.durable_epoch.store(target_epoch, atomic::Ordering::Release);
 
-                    let _g = match core.durable_lock.lock() {
-                        Ok(g) => g,
-                        Err(e) => {
-                            core.set_sync_error(err::new_err_raw(err::LPN, e));
-                            return;
-                        }
-                    };
+                    let _g = core.acquire_durable_lock();
 
                     core.clear_sync_error();
                     core.durable_cv.notify_all();
@@ -1321,14 +1326,7 @@ impl Core {
             }
 
             drop(io_lock);
-            guard = match core.lock.lock() {
-                Ok(g) => g,
-                Err(e) => {
-                    core.set_sync_error(err::new_err_raw(err::LPN, e));
-                    core.durable_cv.notify_all();
-                    return;
-                }
-            };
+            guard = core.acquire_lock();
         }
     }
 }

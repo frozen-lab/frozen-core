@@ -638,17 +638,17 @@ impl std::future::Future for WriteTicket {
 
 /// ## Why we ignore [`std::sync::PoisonError`]?
 ///
-/// The mutex used for lock, is solely used as a parking primitive for [`Condvar`] and does not protect any mutable
-/// state. All the pool invariants and accounting are maintained via atomics and are completely seperated from
-/// the mutex.
+/// The mutex used for lock, is solely used as a parking primitive for [`Condvar`] and does not
+/// protect any mutable state. All the pool invariants and accounting are maintained via atomics
+/// and are completely seperated from the mutex.
 ///
-/// A poisoned mutex only indicates that another tx panicked while holding the lock, and indicates an inconsistent
-/// state of the protected value. Since no state can be left partially modified under this lock, there is no
-/// possible consistency risk to recover from and propagating the poison error would only introduce unnecessary
-/// failures into the allocation path.
+/// A poisoned mutex only indicates that another tx panicked while holding the lock, and indicates
+/// an inconsistent state of the protected value. Since no state can be left partially modified
+/// under this lock, there is no possible consistency risk to recover from and propagating the
+/// poison error would only introduce unnecessary failures into the allocation path.
 ///
-/// Therefore, as best effort, we consume the [`std::sync::PoisonError`] and continue operating with the recovered
-/// guard.
+/// Therefore, as best effort, we consume the [`std::sync::PoisonError`] and continue operating
+/// with the recovered guard.
 fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
     let mut guard = core.flush_guard.lock().unwrap_or_else(|e| e.into_inner());
     loop {
