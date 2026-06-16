@@ -15,6 +15,9 @@ Add following to your `Cargo.toml`,
 frozen-core = { version = "0.0.23", default-features = true }
 ```
 
+> [!NOTE]
+> Current `frozen-core` requires Rust 1.86 or later.
+
 > [!TIP]
 > All the features are enabled by default. To disable, set `default-features` to `false`.
 
