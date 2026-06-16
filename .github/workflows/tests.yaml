@@ -90,18 +90,12 @@ jobs:
           key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
       - run: cargo test --all-features --release -- --nocapture
 
-  legacy_support:
+  macos_intel:
+    name: MacOs x86
     needs: lints
-    name: Legacy Support
+    runs-on: macos-15-intel
     env:
       RUSTFLAGS: "-D warnings"
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            arch: x86_64
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
 
@@ -111,7 +105,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
+          key: rust-macos-x86-stable
 
       - name: Cargo check (lib)
         run: cargo check --release --all-features
