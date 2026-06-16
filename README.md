@@ -12,7 +12,7 @@ Add following to your `Cargo.toml`,
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.22", default-features = true }
+frozen-core = { version = "0.0.23", default-features = true }
 ```
 
 > [!TIP]

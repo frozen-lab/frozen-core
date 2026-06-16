@@ -1,5 +1,19 @@
 # Changelog
 
+## `0.0.23`
+
+- Improved `FrozenError` in `error` module
+- Fixed syntax error for bench table in module docs for `bufpool`
+- `ffile`
+  - Renamed `FFCfg` -> `FrozenFileCfg`
+  - Added `module_id` in `FrozenFileCfg`
+  - Migrated to use latest `FrozenError`
+- `fmmap`
+  - Renamed `FMCfg` -> `FrozenMMapCfg`
+  - Added `module_id` in `FrozenMMapCfg`
+  - Migrated to use latest `FrozenError`
+  - Impl of error recovery for lock poisoning on Mutex & RwLock
+
 ## `0.0.22`
 
 - Impl of `wpipe` module (#53)
