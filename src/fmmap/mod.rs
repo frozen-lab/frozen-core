@@ -58,7 +58,7 @@
 mod posix;
 
 use crate::{
-    error::{ErrCode, FrozenError, FrozenResult},
+    error::{FrozenError, FrozenResult},
     ffile::{FrozenFile, FrozenFileCfg},
     hints,
 };
@@ -68,86 +68,86 @@ use std::{
     thread, time,
 };
 
-/// Domain Id for [`FrozenMMap`] is **18**
-const ERRDOMAIN: u8 = 0x12;
-
 /// type for `epoch` used by write ops
 pub type TEpoch = u64;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 type TMap = posix::POSIXMMap;
 
-/// module id used for [`FrozenMMap`]
-static MID: sync::OnceLock<u8> = sync::OnceLock::new();
-
-#[cfg(not(test))]
-#[inline(always)]
-fn mid() -> &'static u8 {
-    MID.get().unwrap()
-}
-
-#[cfg(test)]
-#[inline(always)]
-fn mid() -> &'static u8 {
-    MID.get_or_init(|| 0)
-}
-
 /// Error codes for [`FrozenMMap`]
 pub(in crate::fmmap) mod err {
-    use super::ErrCode;
+    use crate::error::{ErrCode, FrozenError, FrozenResult};
 
-    /// (512) internal fuck up (hault and catch fire)
-    pub const HCF: ErrCode = ErrCode::new(0x200, "hault and catch fire");
+    /// Domain Id for [`FrozenMMap`] is **18**
+    const ERRDOMAIN: u8 = 0x12;
 
-    /// (513) unknown error (fallback)
-    pub const UNK: ErrCode = ErrCode::new(0x201, "unknown error");
+    /// module id used for [`FrozenMMap`]
+    pub static MID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 
-    /// (514) no more memory available
-    pub const NMM: ErrCode = ErrCode::new(0x202, "not enough memory available on the device");
+    #[cfg(not(test))]
+    #[inline(always)]
+    pub fn mid() -> &'static u8 {
+        MID.get().unwrap()
+    }
 
-    /// (515) syncing error
-    pub const SYN: ErrCode = ErrCode::new(0x203, "failed to sync/flush data to storage device");
+    #[cfg(test)]
+    #[inline(always)]
+    pub fn mid() -> &'static u8 {
+        MID.get_or_init(|| 0)
+    }
 
-    /// (516) no write/read perm
-    pub const PRM: ErrCode = ErrCode::new(0x204, "missing permissions for IO");
+    /// internal fuck up (hault and catch fire)
+    pub const HCF: ErrCode = ErrCode::new(0x02, "hault and catch fire");
 
-    /// (517) flush_tx error (panic inside)
-    pub const TXE: ErrCode = ErrCode::new(0x205, "flush_tx paniced inside");
+    /// unknown error (fallback)
+    pub const UNK: ErrCode = ErrCode::new(0x04, "unknown error");
 
-    /// (518) flush_tx error (unable to spawn)
-    pub const FXE: ErrCode = ErrCode::new(0x206, "unable to spawn flush_tx");
+    /// no more memory available
+    pub const NMM: ErrCode = ErrCode::new(0x06, "not enough memory available on the device");
 
-    /// (519) lock poisoned
-    pub const LPN: ErrCode = ErrCode::new(0x207, "lock poisoned internally");
+    /// syncing error
+    pub const SYN: ErrCode = ErrCode::new(0x08, "failed to sync/flush data to storage device");
 
-    /// (520) type `T` implements drop
-    pub const DRP: ErrCode = ErrCode::new(0x208, "type T must not implement `Drop`");
+    /// no write/read perm
+    pub const PRM: ErrCode = ErrCode::new(0x0A, "missing permissions for IO");
 
-    /// (521) type `T` is not 8 bytes aligned
-    pub const ALN: ErrCode = ErrCode::new(0x209, "type T must be 8-bytes aligned");
+    /// flush_tx error (panic inside)
+    pub const TXE: ErrCode = ErrCode::new(0x0C, "flush_tx paniced inside");
 
-    /// (522) `size_of::<T>()` is not multiple of 8
-    pub const SZE: ErrCode = ErrCode::new(0x20A, "`size_of::<T>()` must be multiple of 8 bytes");
+    /// flush_tx error (unable to spawn)
+    pub const FXE: ErrCode = ErrCode::new(0x10, "unable to spawn flush_tx");
 
-    /// (523) type `T` must not be zero sized
-    pub const ZRO: ErrCode = ErrCode::new(0x20B, "type T must not be zero sized");
-}
+    /// lock poisoned
+    pub const LPN: ErrCode = ErrCode::new(0x12, "lock poisoned internally");
 
-#[inline]
-pub(in crate::fmmap) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenResult<R> {
-    let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, error);
-    Err(err)
-}
+    /// type `T` implements drop
+    pub const DRP: ErrCode = ErrCode::new(0x14, "type T must not implement `Drop`");
 
-#[inline]
-pub(in crate::fmmap) fn new_err_default<R>(code: ErrCode) -> FrozenResult<R> {
-    let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, "");
-    Err(err)
-}
+    /// type `T` is not 8 bytes aligned
+    pub const ALN: ErrCode = ErrCode::new(0x16, "type T must be 8-bytes aligned");
 
-#[inline]
-pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenError {
-    FrozenError::new_raw(*mid(), ERRDOMAIN, code, error)
+    /// `size_of::<T>()` is not multiple of 8
+    pub const SZE: ErrCode = ErrCode::new(0x18, "`size_of::<T>()` must be multiple of 8 bytes");
+
+    /// type `T` must not be zero sized
+    pub const ZRO: ErrCode = ErrCode::new(0x1A, "type T must not be zero sized");
+
+    #[inline]
+    pub(in crate::fmmap) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenResult<R> {
+        let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, error);
+        Err(err)
+    }
+
+    #[inline]
+    pub(in crate::fmmap) fn new_err_default<R>(code: ErrCode) -> FrozenResult<R> {
+        let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, "");
+        Err(err)
+    }
+
+    #[inline]
+    pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenError {
+        FrozenError::new_raw(*mid(), ERRDOMAIN, code, error)
+    }
 }
 
 /// Config for [`FrozenMMap`]
@@ -304,7 +304,7 @@ where
 
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
         // first caller sets the value and all subsequent calls reuse it
-        let _ = MID.get_or_init(|| cfg.module_id);
+        let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
         let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length, total_slots));
@@ -390,7 +390,7 @@ where
 
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
         // first caller sets the value and all subsequent calls reuse it
-        let _ = MID.get_or_init(|| cfg.module_id);
+        let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
         let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length, total_slots));
@@ -419,21 +419,21 @@ where
     #[inline]
     fn validate_t() -> FrozenResult<()> {
         if std::mem::needs_drop::<T>() {
-            return new_err_default(err::DRP);
+            return err::new_err_default(err::DRP);
         }
 
         let align = std::mem::align_of::<T>();
         if align != 8 {
-            return new_err_default(err::ALN);
+            return err::new_err_default(err::ALN);
         }
 
         let size = std::mem::size_of::<T>();
         if size == 0 {
-            return new_err_default(err::ZRO);
+            return err::new_err_default(err::ZRO);
         }
 
         if size % 8 != 0 {
-            return new_err_default(err::SZE);
+            return err::new_err_default(err::SZE);
         }
 
         Ok(())
@@ -487,7 +487,7 @@ where
 
         let mut guard = match self.core.durable_lock.lock() {
             Ok(g) => g,
-            Err(e) => return new_err(err::LPN, e),
+            Err(e) => return err::new_err(err::LPN, e),
         };
 
         loop {
@@ -501,7 +501,7 @@ where
 
             guard = match self.core.durable_cv.wait(guard) {
                 Ok(g) => g,
-                Err(e) => return new_err(err::LPN, e),
+                Err(e) => return err::new_err(err::LPN, e),
             };
         }
     }
@@ -678,7 +678,7 @@ where
         let offset = Self::SLOT_SIZE * index;
 
         // block flush_tx scheduling
-        let _flush_guard = self.core.lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
+        let _flush_guard = self.core.lock.lock().map_err(|e| err::new_err_raw(err::LPN, e))?;
 
         // we use exlusive lock as we perform blocking hard sync
         let _guard = self.core.acquire_exclusive_io_lock()?;
@@ -698,7 +698,7 @@ where
 
         // NOTE: we must also notify cv's waiting for durability (we skip if there was no batch to sync)
         if prev {
-            let _g = self.core.durable_lock.lock().map_err(|e| new_err_raw(err::LPN, e))?;
+            let _g = self.core.durable_lock.lock().map_err(|e| err::new_err_raw(err::LPN, e))?;
             self.core.durable_cv.notify_all();
         }
 
@@ -1041,7 +1041,7 @@ impl<'a, T> FMTransaction<'a, T> {
         // If any of these is violated, there is a certain risk of deadlock in multi tx env's
         if let Some((last_idx, _)) = self.ops_vec.last() {
             if index <= *last_idx {
-                return new_err(
+                return err::new_err(
                     err::HCF,
                     "tx writes must be strictly ordered, with no more then single ops on given index",
                 );
@@ -1206,12 +1206,12 @@ impl Core {
 
     #[inline]
     fn acquire_io_lock(&self) -> FrozenResult<sync::RwLockReadGuard<'_, ()>> {
-        self.io_lock.read().map_err(|e| new_err_raw(err::LPN, e))
+        self.io_lock.read().map_err(|e| err::new_err_raw(err::LPN, e))
     }
 
     #[inline]
     fn acquire_exclusive_io_lock(&self) -> FrozenResult<sync::RwLockWriteGuard<'_, ()>> {
-        self.io_lock.write().map_err(|e| new_err_raw(err::LPN, e))
+        self.io_lock.write().map_err(|e| err::new_err_raw(err::LPN, e))
     }
 
     #[inline]
@@ -1228,7 +1228,7 @@ impl Core {
     fn spawn_tx(core: sync::Arc<Self>) -> FrozenResult<thread::JoinHandle<()>> {
         match thread::Builder::new().name("fm-flush-tx".into()).spawn(move || Self::flush_tx(core)) {
             Ok(tx) => Ok(tx),
-            Err(error) => new_err(err::FXE, error),
+            Err(error) => err::new_err(err::FXE, error),
         }
     }
 
@@ -1237,7 +1237,7 @@ impl Core {
         let mut guard = match core.lock.lock() {
             Ok(g) => g,
             Err(error) => {
-                core.set_sync_error(new_err_raw(err::FXE, error));
+                core.set_sync_error(err::new_err_raw(err::FXE, error));
                 core.cv.notify_all();
                 return;
             }
@@ -1248,7 +1248,7 @@ impl Core {
             guard = match core.cv.wait_timeout(guard, core.flush_duration) {
                 Ok((g, _)) => g,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(err::TXE, e));
+                    core.set_sync_error(err::new_err_raw(err::TXE, e));
                     core.cv.notify_all();
                     return;
                 }
@@ -1306,7 +1306,7 @@ impl Core {
                     let _g = match core.durable_lock.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            core.set_sync_error(new_err_raw(err::LPN, e));
+                            core.set_sync_error(err::new_err_raw(err::LPN, e));
                             return;
                         }
                     };
@@ -1324,7 +1324,7 @@ impl Core {
             guard = match core.lock.lock() {
                 Ok(g) => g,
                 Err(e) => {
-                    core.set_sync_error(new_err_raw(err::LPN, e));
+                    core.set_sync_error(err::new_err_raw(err::LPN, e));
                     core.durable_cv.notify_all();
                     return;
                 }

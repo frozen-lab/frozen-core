@@ -1,4 +1,4 @@
-use super::{err, new_err};
+use super::err;
 use crate::{error::FrozenResult, hints};
 use core::{ffi::CStr, ptr};
 use libc::{
@@ -96,19 +96,19 @@ unsafe fn mmap_raw(fd: i32, length: size_t) -> FrozenResult<TPtr> {
                         continue;
                     }
 
-                    return new_err(err::UNK, err_msg);
+                    return err::new_err(err::UNK, err_msg);
                 }
 
                 // invalid fd, invalid fd type, invalid length, etc.
-                EINVAL | EBADF | EOVERFLOW => return new_err(err::HCF, err_msg),
+                EINVAL | EBADF | EOVERFLOW => return err::new_err(err::HCF, err_msg),
 
                 // no more memory available
-                ENOMEM => return new_err(err::NMM, err_msg),
+                ENOMEM => return err::new_err(err::NMM, err_msg),
 
                 // permission denied or read-only file
-                EACCES | EPERM | ENODEV | ETXTBSY => return new_err(err::PRM, err_msg),
+                EACCES | EPERM | ENODEV | ETXTBSY => return err::new_err(err::PRM, err_msg),
 
-                _ => return new_err(err::UNK, err_msg),
+                _ => return err::new_err(err::UNK, err_msg),
             };
         }
 
@@ -127,9 +127,9 @@ unsafe fn munmap_raw(ptr: TPtr, length: size_t) -> FrozenResult<()> {
 
     match errno {
         // invalid/unaligned ptr or address range is not mapped
-        EINVAL | ENOMEM => new_err(err::HCF, err_msg),
+        EINVAL | ENOMEM => err::new_err(err::HCF, err_msg),
 
-        _ => new_err(err::UNK, err_msg),
+        _ => err::new_err(err::UNK, err_msg),
     }
 }
 
@@ -161,19 +161,19 @@ unsafe fn msync_raw(ptr: TPtr, length: size_t) -> FrozenResult<()> {
 
                 // NOTE: sync error indicates that retries exhausted and durability is broken
                 // in the current/last window/batch
-                return new_err(err::SYN, err_msg);
+                return err::new_err(err::SYN, err_msg);
             }
 
             // fatal error, i.e. no sync for writes in recent window/batch
-            EIO => return new_err(err::SYN, err_msg),
+            EIO => return err::new_err(err::SYN, err_msg),
 
             // invalid fd or lack of support for sync
-            EINVAL => return new_err(err::HCF, err_msg),
+            EINVAL => return err::new_err(err::HCF, err_msg),
 
             // no-more memory available
-            ENOMEM => return new_err(err::NMM, err_msg),
+            ENOMEM => return err::new_err(err::NMM, err_msg),
 
-            _ => return new_err(err::UNK, err_msg),
+            _ => return err::new_err(err::UNK, err_msg),
         }
     }
 }
