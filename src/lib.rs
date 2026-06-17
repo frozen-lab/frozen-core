@@ -2,6 +2,9 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../README.md")]
 
+#[cfg(feature = "ack")]
+pub mod ack;
+
 #[cfg(feature = "bufpool")]
 pub mod bufpool;
 

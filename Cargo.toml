@@ -29,6 +29,7 @@ opt-level = 3
 inherits = "release"
 
 [features]
+ack = ["error", "hints"]
 crc32 = []
 error = []
 hints = []
@@ -54,6 +55,7 @@ fmmap = [
     "ffile",
 ]
 default = [
+    "ack",
     "error",
     "hints",
     "mpscq",
