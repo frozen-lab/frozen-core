@@ -101,7 +101,12 @@ impl<T> MPSCQueue<T> {
 
         loop {
             unsafe { (*node).next = head };
-            match self.head.compare_exchange_weak(head, node, atomic::Ordering::AcqRel, atomic::Ordering::Relaxed) {
+            match self.head.compare_exchange_weak(
+                head,
+                node,
+                atomic::Ordering::AcqRel,
+                atomic::Ordering::Relaxed,
+            ) {
                 Ok(_) => return,
                 Err(h) => head = h,
             }

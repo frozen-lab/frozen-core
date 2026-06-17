@@ -38,20 +38,24 @@ fn bench_bpool(c: &mut Criterion) {
     //
 
     for &threads in &[1, 2, 4] {
-        group.bench_with_input(BenchmarkId::new("alloc_contention", threads), &threads, |b, &threads| {
-            let pool = Arc::new(new_pool(usize::MAX >> 2));
+        group.bench_with_input(
+            BenchmarkId::new("alloc_contention", threads),
+            &threads,
+            |b, &threads| {
+                let pool = Arc::new(new_pool(usize::MAX >> 2));
 
-            b.iter(|| {
-                std::thread::scope(|s| {
-                    for _ in 0..threads {
-                        let pool = pool.clone();
-                        s.spawn(move || {
-                            black_box(pool.allocate(8));
-                        });
-                    }
+                b.iter(|| {
+                    std::thread::scope(|s| {
+                        for _ in 0..threads {
+                            let pool = pool.clone();
+                            s.spawn(move || {
+                                black_box(pool.allocate(8));
+                            });
+                        }
+                    });
                 });
-            });
-        });
+            },
+        );
     }
 
     //

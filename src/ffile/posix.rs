@@ -1,10 +1,11 @@
 use super::{TFileId, err};
 use crate::{error::FrozenResult, hints};
 use libc::{
-    _SC_IOV_MAX, EACCES, EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE, ENOENT, ENOLCK, ENOSPC,
-    ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX, LOCK_NB, O_CLOEXEC, O_CREAT, O_DIRECTORY,
-    O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, access, c_int, c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t,
-    open, pread, preadv, pwrite, pwritev, size_t, stat, strerror, sysconf, unlink,
+    _SC_IOV_MAX, EACCES, EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, EIO, EISDIR, EMSGSIZE,
+    ENOENT, ENOLCK, ENOSPC, ENOTDIR, EOPNOTSUPP, EPERM, EROFS, ESPIPE, EWOULDBLOCK, F_OK, LOCK_EX,
+    LOCK_NB, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, S_IRUSR, S_IWUSR, access, c_int,
+    c_uint, c_void, close, flock, fstat, ftruncate, iovec, off_t, open, pread, preadv, pwrite,
+    pwritev, size_t, stat, strerror, sysconf, unlink,
 };
 use std::{ffi::CStr, mem, sync::atomic};
 
@@ -283,12 +284,22 @@ impl POSIXFile {
 
     /// Read a single chunk from given `offset` w/ `pread` syscall
     #[inline(always)]
-    pub(super) unsafe fn pread(&self, ptr: *mut u8, offset: usize, chunk_size: usize) -> FrozenResult<()> {
+    pub(super) unsafe fn pread(
+        &self,
+        ptr: *mut u8,
+        offset: usize,
+        chunk_size: usize,
+    ) -> FrozenResult<()> {
         let fd = self.fd();
 
         let mut read = 0usize;
         while read < chunk_size {
-            let res = pread(fd, ptr.add(read) as *mut c_void, (chunk_size - read) as size_t, (offset + read) as off_t);
+            let res = pread(
+                fd,
+                ptr.add(read) as *mut c_void,
+                (chunk_size - read) as size_t,
+                (offset + read) as off_t,
+            );
 
             // unexpected EOF
             if res == 0 {
@@ -323,7 +334,12 @@ impl POSIXFile {
 
     /// Write a single chunk at given `offset` w/ `pwrite` syscall
     #[inline(always)]
-    pub(super) unsafe fn pwrite(&self, ptr: *mut u8, offset: usize, chunk_size: usize) -> FrozenResult<()> {
+    pub(super) unsafe fn pwrite(
+        &self,
+        ptr: *mut u8,
+        offset: usize,
+        chunk_size: usize,
+    ) -> FrozenResult<()> {
         let fd = self.fd();
 
         let mut written = 0usize;
@@ -371,10 +387,18 @@ impl POSIXFile {
     /// - All chunks in given bufs slice must be of same length
     /// - The caller must not try to read byound current length of `[POSIXFile]`
     #[inline(always)]
-    pub(super) unsafe fn preadv(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenResult<()> {
+    pub(super) unsafe fn preadv(
+        &self,
+        bufs: &[*mut u8],
+        offset: usize,
+        chunk_size: usize,
+    ) -> FrozenResult<()> {
         let (mut heap, mut stack) = build_iovecs(bufs, chunk_size);
-        let (iov_ptr, iovs_len) =
-            if let Some(ref mut s) = stack { (s.as_mut_ptr(), bufs.len()) } else { (heap.as_mut_ptr(), heap.len()) };
+        let (iov_ptr, iovs_len) = if let Some(ref mut s) = stack {
+            (s.as_mut_ptr(), bufs.len())
+        } else {
+            (heap.as_mut_ptr(), heap.len())
+        };
 
         let fd = self.fd();
         let mut head = 0usize;
@@ -405,7 +429,9 @@ impl POSIXFile {
                     EACCES | EPERM => return err::new_err(err::RED, err_msg),
 
                     // invalid fd, bad pointer, illegal seek, etc.
-                    EINVAL | EBADF | EFAULT | ESPIPE | EMSGSIZE => return err::new_err(err::HCF, err_msg),
+                    EINVAL | EBADF | EFAULT | ESPIPE | EMSGSIZE => {
+                        return err::new_err(err::HCF, err_msg);
+                    }
 
                     _ => return err::new_err(err::UNK, err_msg),
                 }
@@ -448,10 +474,18 @@ impl POSIXFile {
     /// - All chunk objects in given slice must be of same length
     /// - The caller must not try to write byound current length of `[POSIXFile]`
     #[inline(always)]
-    pub(super) unsafe fn pwritev(&self, bufs: &[*mut u8], offset: usize, chunk_size: usize) -> FrozenResult<()> {
+    pub(super) unsafe fn pwritev(
+        &self,
+        bufs: &[*mut u8],
+        offset: usize,
+        chunk_size: usize,
+    ) -> FrozenResult<()> {
         let (mut heap, mut stack) = build_iovecs(bufs, chunk_size);
-        let (iov_ptr, iovs_len) =
-            if let Some(ref mut s) = stack { (s.as_mut_ptr(), bufs.len()) } else { (heap.as_mut_ptr(), heap.len()) };
+        let (iov_ptr, iovs_len) = if let Some(ref mut s) = stack {
+            (s.as_mut_ptr(), bufs.len())
+        } else {
+            (heap.as_mut_ptr(), heap.len())
+        };
 
         let fd = self.fd();
         let mut head = 0usize;
@@ -480,7 +514,9 @@ impl POSIXFile {
                     EACCES | EPERM => return err::new_err(err::WRT, err_msg),
 
                     // invalid fd, bad pointer, illegal seek, etc.
-                    EINVAL | EBADF | EFAULT | ESPIPE | EMSGSIZE => return err::new_err(err::HCF, err_msg),
+                    EINVAL | EBADF | EFAULT | ESPIPE | EMSGSIZE => {
+                        return err::new_err(err::HCF, err_msg);
+                    }
 
                     _ => return err::new_err(err::UNK, err_msg),
                 }
@@ -539,7 +575,11 @@ unsafe fn open_raw(path: &std::path::Path, flags: c_int) -> FrozenResult<TFileId
 
     let mut retries = 0; // only for EINTR errors
     loop {
-        let fd = if flags & O_CREAT != 0 { open(cpath.as_ptr(), flags, perm) } else { open(cpath.as_ptr(), flags) };
+        let fd = if flags & O_CREAT != 0 {
+            open(cpath.as_ptr(), flags, perm)
+        } else {
+            open(cpath.as_ptr(), flags)
+        };
 
         if hints::unlikely(fd < 0) {
             let errno = last_errno();
@@ -1179,7 +1219,10 @@ unsafe fn f_advise_raw(fd: TFileId) -> FrozenResult<()> {
 ///
 /// This design reduces allocator traffic & improves cache locality for common small batch workloads ;)
 #[inline(always)]
-unsafe fn build_iovecs(bufs: &[*mut u8], chunk_size: usize) -> (Vec<iovec>, Option<[iovec; STACK_IOV]>) {
+unsafe fn build_iovecs(
+    bufs: &[*mut u8],
+    chunk_size: usize,
+) -> (Vec<iovec>, Option<[iovec; STACK_IOV]>) {
     if bufs.len() <= STACK_IOV {
         let mut stack: mem::MaybeUninit<[iovec; STACK_IOV]> = mem::MaybeUninit::uninit();
         let ptr = stack.as_mut_ptr() as *mut iovec;
@@ -1529,7 +1572,8 @@ mod tests {
                 file.pwritev(&ptrs, 0, 0x80).unwrap();
 
                 let mut read_bufs = [vec![0u8; 0x80], vec![0u8; 0x80], vec![0u8; 0x80]];
-                let read_ptrs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+                let read_ptrs: Vec<*mut u8> =
+                    read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
                 file.preadv(&read_ptrs, 0, 0x80).unwrap();
 
                 assert!(read_bufs[0].iter().all(|b| *b == 1));
@@ -1584,7 +1628,8 @@ mod tests {
                 let file = POSIXFile::new(&path).unwrap();
 
                 let mut read_bufs = [vec![0u8; 0x80], vec![0u8; 0x80]];
-                let read_ptrs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+                let read_ptrs: Vec<*mut u8> =
+                    read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
                 file.preadv(&read_ptrs, 0, 0x80).unwrap();
 
                 assert!(read_bufs[0].iter().all(|b| *b == 9));
@@ -1654,14 +1699,16 @@ mod tests {
                 let count = file.max_iovs * 3 + 17; // force multiple internal loops
                 file.grow(0, count * page).unwrap();
 
-                let mut buffers: Vec<Vec<u8>> = (0..count).map(|i| vec![(i % 0xFB) as u8; page]).collect();
+                let mut buffers: Vec<Vec<u8>> =
+                    (0..count).map(|i| vec![(i % 0xFB) as u8; page]).collect();
                 let ptrs: Vec<*mut u8> = buffers.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
                 file.pwritev(&ptrs, 0, page).unwrap();
                 file.sync().unwrap();
 
                 let mut read_bufs: Vec<Vec<u8>> = (0..count).map(|_| vec![0u8; page]).collect();
-                let read_ptrs: Vec<*mut u8> = read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+                let read_ptrs: Vec<*mut u8> =
+                    read_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
 
                 file.preadv(&read_ptrs, 0, page).unwrap();
                 for (i, item) in read_bufs.iter().enumerate().take(count) {
@@ -1757,8 +1804,14 @@ mod tests {
 
                 match (res, should_ok) {
                     (Ok(cs), true) => {
-                        let expected = CString::new(*bytes).expect("valid test case must not contain interior NUL");
-                        assert_eq!(cs.as_bytes(), expected.as_bytes(), "mismatch for input: {:?}", bytes);
+                        let expected = CString::new(*bytes)
+                            .expect("valid test case must not contain interior NUL");
+                        assert_eq!(
+                            cs.as_bytes(),
+                            expected.as_bytes(),
+                            "mismatch for input: {:?}",
+                            bytes
+                        );
                     }
                     (Err(_), false) => {}
                     (other, _) => {

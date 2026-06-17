@@ -284,7 +284,9 @@ impl WritePipe {
             .spawn(move || bg_flush_thread(cloned_core, cfg.flush_duration))
         {
             Ok(handle) => Some(handle),
-            Err(observed_error) => return Err(err::new_error(cfg.module_id, err::FXE, observed_error)),
+            Err(observed_error) => {
+                return Err(err::new_error(cfg.module_id, err::FXE, observed_error));
+            }
         };
 
         Ok(Self { core: core, flush_tx_handle })
@@ -613,7 +615,10 @@ impl std::future::Future for WriteTicket {
     type Output = FrozenResult<u64>;
 
     #[inline(always)]
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         if self.is_ready() {
             return std::task::Poll::Ready(Ok(self.epoch));
         }
@@ -652,7 +657,8 @@ impl std::future::Future for WriteTicket {
 fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
     let mut guard = core.flush_guard.lock().unwrap_or_else(|e| e.into_inner());
     loop {
-        (guard, _) = core.flush_cv.wait_timeout(guard, flush_duration).unwrap_or_else(|e| e.into_inner());
+        (guard, _) =
+            core.flush_cv.wait_timeout(guard, flush_duration).unwrap_or_else(|e| e.into_inner());
 
         // NOTE: we must read values of close brodcast before acquire exclusive lock, if done
         // otherwise, we impose serious deadlock sort of situation for the the flusher tx
@@ -752,7 +758,10 @@ impl Core {
     }
 
     #[inline(always)]
-    fn write_queued_ops(&self, queued_ops: Vec<WriteRequestInternal>) -> FrozenResult<(usize, usize, u64)> {
+    fn write_queued_ops(
+        &self,
+        queued_ops: Vec<WriteRequestInternal>,
+    ) -> FrozenResult<(usize, usize, u64)> {
         let mut max_epoch = 0;
         let mut max_index = 0;
         let mut min_index = usize::MAX;
@@ -869,7 +878,11 @@ mod err {
     const DOMAIN_ID: u8 = 0x02;
 
     #[inline]
-    pub fn new_error<E: std::fmt::Display>(module_id: u8, code: ErrCode, observed_error: E) -> FrozenError {
+    pub fn new_error<E: std::fmt::Display>(
+        module_id: u8,
+        code: ErrCode,
+        observed_error: E,
+    ) -> FrozenError {
         FrozenError::new_raw(module_id, DOMAIN_ID, code, observed_error)
     }
 
@@ -886,7 +899,9 @@ mod tests {
     const INITIAL_BUFFER_AMOUT: usize = 0x200;
     const FLUSH_DURATION: time::Duration = time::Duration::from_millis(1);
 
-    fn new_objects<P: AsRef<std::path::Path>>(path: P) -> (sync::Arc<ffile::FrozenFile>, bufpool::BufPool, WritePipe) {
+    fn new_objects<P: AsRef<std::path::Path>>(
+        path: P,
+    ) -> (sync::Arc<ffile::FrozenFile>, bufpool::BufPool, WritePipe) {
         let file_cfg = ffile::FrozenFileCfg {
             module_id: MODULE_ID,
             path: path.as_ref().to_path_buf(),
@@ -895,8 +910,10 @@ mod tests {
         };
         let file = sync::Arc::new(ffile::FrozenFile::new(file_cfg).unwrap());
 
-        let pool_cfg =
-            bufpool::BufPoolCfg { buffer_size: BUFFER_SIZE, max_memory: INITIAL_BUFFER_AMOUT * BUFFER_SIZE as usize };
+        let pool_cfg = bufpool::BufPoolCfg {
+            buffer_size: BUFFER_SIZE,
+            max_memory: INITIAL_BUFFER_AMOUT * BUFFER_SIZE as usize,
+        };
         let pool = bufpool::BufPool::new(pool_cfg);
 
         let pipe_cfg = WritePipeCfg { module_id: MODULE_ID, flush_duration: FLUSH_DURATION };
@@ -905,7 +922,11 @@ mod tests {
         (file, pool, pipe)
     }
 
-    fn prep_write(buf_ptr: *const u8, n: usize, pool: &bufpool::BufPool) -> bufpool::BufPoolAllocation {
+    fn prep_write(
+        buf_ptr: *const u8,
+        n: usize,
+        pool: &bufpool::BufPool,
+    ) -> bufpool::BufPoolAllocation {
         let allocation = pool.allocate(n);
         for allocated_buf in allocation.iter() {
             unsafe { ptr::copy_nonoverlapping(buf_ptr, allocated_buf, BUFFER_SIZE as usize) };
@@ -1070,13 +1091,16 @@ mod tests {
             const BUFFER: [u8; BUFFER_SIZE as usize] = [0x0Au8; BUFFER_SIZE as usize];
 
             let allocation1 = prep_write(BUFFER.as_ptr(), 1, &pool);
-            let ticket1 = pipe.write(WriteRequest { allocation: allocation1, slot_index: 0 }).unwrap();
+            let ticket1 =
+                pipe.write(WriteRequest { allocation: allocation1, slot_index: 0 }).unwrap();
 
             let allocation2 = prep_write(BUFFER.as_ptr(), 1, &pool);
-            let ticket2 = pipe.write(WriteRequest { allocation: allocation2, slot_index: 1 }).unwrap();
+            let ticket2 =
+                pipe.write(WriteRequest { allocation: allocation2, slot_index: 1 }).unwrap();
 
             let allocation3 = prep_write(BUFFER.as_ptr(), 1, &pool);
-            let ticket3 = pipe.write(WriteRequest { allocation: allocation3, slot_index: 2 }).unwrap();
+            let ticket3 =
+                pipe.write(WriteRequest { allocation: allocation3, slot_index: 2 }).unwrap();
 
             assert!(ticket3.epoch() > ticket2.epoch());
             assert!(ticket2.epoch() > ticket1.epoch());
@@ -1159,10 +1183,12 @@ mod tests {
             const BUFFER: [u8; BUFFER_SIZE as usize] = [0x0Au8; BUFFER_SIZE as usize];
 
             let allocation1 = prep_write(BUFFER.as_ptr(), REQUIRED, &pool);
-            let ticket1 = pipe.write(WriteRequest { allocation: allocation1, slot_index: 0 }).unwrap();
+            let ticket1 =
+                pipe.write(WriteRequest { allocation: allocation1, slot_index: 0 }).unwrap();
 
             let allocation2 = prep_write(BUFFER.as_ptr(), REQUIRED, &pool);
-            let ticket2 = pipe.write(WriteRequest { allocation: allocation2, slot_index: 0 }).unwrap();
+            let ticket2 =
+                pipe.write(WriteRequest { allocation: allocation2, slot_index: 0 }).unwrap();
 
             let (e1, e2) = futures::executor::block_on(async { futures::join!(ticket1, ticket2) });
 

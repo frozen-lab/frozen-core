@@ -99,16 +99,21 @@ pub(in crate::ffile) mod err {
     pub const GRW: ErrCode = ErrCode::new(0x14, "unable to zero-extend file");
 
     /// locks exhausted (mainly on nfs)
-    pub const LEX: ErrCode = ErrCode::new(0x18, "failed to obtain lock, as no more locks available");
+    pub const LEX: ErrCode =
+        ErrCode::new(0x18, "failed to obtain lock, as no more locks available");
 
     /// no write/read perm
     pub const PRM: ErrCode = ErrCode::new(0x1A, "missing permissions for IO");
 
     /// unable to obtain exclusive lock
-    pub const LCK: ErrCode = ErrCode::new(0x1C, "failed to obtain exclusive lock as file may already opened");
+    pub const LCK: ErrCode =
+        ErrCode::new(0x1C, "failed to obtain exclusive lock as file may already opened");
 
     #[inline]
-    pub(in crate::ffile) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenResult<R> {
+    pub(in crate::ffile) fn new_err<R, E: std::fmt::Display>(
+        code: ErrCode,
+        error: E,
+    ) -> FrozenResult<R> {
         let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, error);
         Err(err)
     }
@@ -257,7 +262,10 @@ impl FrozenFile {
     /// ```
     pub fn new(cfg: FrozenFileCfg) -> FrozenResult<Self> {
         let raw_file = unsafe { posix::POSIXFile::new(&cfg.path) }?;
-        let slf = Self { cfg: cfg.clone(), file: core::cell::UnsafeCell::new(core::mem::ManuallyDrop::new(raw_file)) };
+        let slf = Self {
+            cfg: cfg.clone(),
+            file: core::cell::UnsafeCell::new(core::mem::ManuallyDrop::new(raw_file)),
+        };
 
         let file = slf.get_file();
 
@@ -627,8 +635,12 @@ mod tests {
     fn tmp_path() -> (tempfile::TempDir, FrozenFileCfg) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_ff_file");
-        let cfg =
-            FrozenFileCfg { path, module_id: MID, buffer_size: BUFFER_SIZE, initial_available_buffers: INIT_BUFFERS };
+        let cfg = FrozenFileCfg {
+            path,
+            module_id: MID,
+            buffer_size: BUFFER_SIZE,
+            initial_available_buffers: INIT_BUFFERS,
+        };
 
         (dir, cfg)
     }

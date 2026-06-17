@@ -13,15 +13,24 @@ const OPS_PER_THREAD: usize = OPS / THREADS;
 const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
 const PAYLOAD: [u8; BUFFER_SIZE as usize] = [0xAAu8; BUFFER_SIZE as usize];
 
-fn init<P: AsRef<std::path::Path>>(path: P) -> (sync::Arc<ffile::FrozenFile>, bufpool::BufPool, wpipe::WritePipe) {
-    let file_cfg =
-        ffile::FFCfg { path: path.as_ref().to_path_buf(), chunk_size: BUFFER_SIZE as usize, initial_chunk_amount: OPS };
+fn init<P: AsRef<std::path::Path>>(
+    path: P,
+) -> (sync::Arc<ffile::FrozenFile>, bufpool::BufPool, wpipe::WritePipe) {
+    let file_cfg = ffile::FFCfg {
+        path: path.as_ref().to_path_buf(),
+        chunk_size: BUFFER_SIZE as usize,
+        initial_chunk_amount: OPS,
+    };
     let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).expect("new ffile"));
 
-    let pool_cfg = bufpool::BufPoolCfg { buffer_size: BUFFER_SIZE, max_memory: OPS * BUFFER_SIZE as usize };
+    let pool_cfg =
+        bufpool::BufPoolCfg { buffer_size: BUFFER_SIZE, max_memory: OPS * BUFFER_SIZE as usize };
     let pool = bufpool::BufPool::new(pool_cfg);
 
-    let pipe_cfg = wpipe::WritePipeCfg { module_id: MODULE_ID, flush_duration: time::Duration::from_millis(1) };
+    let pipe_cfg = wpipe::WritePipeCfg {
+        module_id: MODULE_ID,
+        flush_duration: time::Duration::from_millis(1),
+    };
     let pipe = wpipe::WritePipe::new(pipe_cfg, file.clone()).expect("new wpipe");
 
     (file, pool, pipe)
@@ -31,7 +40,9 @@ fn record_bench(pipe: &wpipe::WritePipe, pool: &bufpool::BufPool) -> Histogram<u
     let mut hist = Histogram::<u64>::new(3).expect("new histogram");
     for i in 0..OPS {
         let allocation = pool.allocate(1);
-        unsafe { ptr::copy_nonoverlapping(PAYLOAD.as_ptr(), allocation.first(), BUFFER_SIZE as usize) };
+        unsafe {
+            ptr::copy_nonoverlapping(PAYLOAD.as_ptr(), allocation.first(), BUFFER_SIZE as usize)
+        };
 
         let req = wpipe::WriteRequest { allocation, slot_index: i };
         let start = time::Instant::now();
@@ -70,7 +81,9 @@ fn single_tx_write_latency() {
     // warmup
     for i in 0..WARMUP_OPS {
         let allocation = pool.allocate(1);
-        unsafe { ptr::copy_nonoverlapping(PAYLOAD.as_ptr(), allocation.first(), BUFFER_SIZE as usize) };
+        unsafe {
+            ptr::copy_nonoverlapping(PAYLOAD.as_ptr(), allocation.first(), BUFFER_SIZE as usize)
+        };
 
         let req = wpipe::WriteRequest { allocation, slot_index: i };
         let _ticket = pipe.write(req).expect("push write");
@@ -104,7 +117,13 @@ fn multi_tx_write_latency() {
             // warmup
             for i in 0..WARMUP_OPS {
                 let allocation = pool.allocate(1);
-                unsafe { ptr::copy_nonoverlapping(PAYLOAD.as_ptr(), allocation.first(), BUFFER_SIZE as usize) };
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        PAYLOAD.as_ptr(),
+                        allocation.first(),
+                        BUFFER_SIZE as usize,
+                    )
+                };
 
                 let req = wpipe::WriteRequest { allocation, slot_index: i };
                 let _ticket = pipe.write(req).expect("push write");
@@ -113,7 +132,13 @@ fn multi_tx_write_latency() {
             let mut hist = Histogram::<u64>::new(3).expect("new histogram");
             for i in 0..OPS_PER_THREAD {
                 let allocation = pool.allocate(1);
-                unsafe { ptr::copy_nonoverlapping(PAYLOAD.as_ptr(), allocation.first(), BUFFER_SIZE as usize) };
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        PAYLOAD.as_ptr(),
+                        allocation.first(),
+                        BUFFER_SIZE as usize,
+                    )
+                };
 
                 let req = wpipe::WriteRequest { allocation, slot_index: tid * OPS_PER_THREAD + i };
                 let start = time::Instant::now();
