@@ -69,7 +69,12 @@ impl FrozenError {
     /// ```
     #[inline(always)]
     pub fn new(module: u8, domain: u8, code: ErrCode, errmsg: &str) -> Self {
-        Self { module, domain, reason: code.reason, context: format!("[{}] {}", code.detail, errmsg) }
+        Self {
+            module,
+            domain,
+            reason: code.reason,
+            context: format!("[{}] {}", code.detail, errmsg),
+        }
     }
 
     /// Construct a new [`FrozenError`] from raw [`Error`] object
@@ -124,7 +129,9 @@ impl std::fmt::Debug for FrozenError {
 
 impl PartialEq for FrozenError {
     fn eq(&self, other: &Self) -> bool {
-        (self.module == other.module) && (self.domain == other.domain) && (self.reason == other.reason)
+        (self.module == other.module)
+            && (self.domain == other.domain)
+            && (self.reason == other.reason)
     }
 }
 

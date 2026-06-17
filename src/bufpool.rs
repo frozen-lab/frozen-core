@@ -372,7 +372,13 @@ impl BufPool {
         let pointer = allocate_layout(layout);
         self.active_allocations.fetch_add(1, atomic::Ordering::Relaxed);
 
-        BufPoolAllocation { layout, pointer, required_bytes, buffers: required, pool: ptr::NonNull::from(self) }
+        BufPoolAllocation {
+            layout,
+            pointer,
+            required_bytes,
+            buffers: required,
+            pool: ptr::NonNull::from(self),
+        }
     }
 
     /// Applies backpressure until enough memory budget is available for the allocation
@@ -394,7 +400,9 @@ impl BufPool {
     #[inline]
     fn backpressure(&self, required_bytes: usize) {
         let mut guard = self.allocation_lock.lock().unwrap_or_else(|e| e.into_inner());
-        while self.allocated_memory.load(atomic::Ordering::Acquire) + required_bytes > self.cfg.max_memory {
+        while self.allocated_memory.load(atomic::Ordering::Acquire) + required_bytes
+            > self.cfg.max_memory
+        {
             guard = self.allocation_cv.wait(guard).unwrap_or_else(|e| e.into_inner());
         }
     }
@@ -841,10 +849,16 @@ mod tests {
             let alloc1 = bpool.allocate(2);
             let alloc2 = bpool.allocate(2);
 
-            assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), BUF_SIZE.bytes() * 4);
+            assert_eq!(
+                bpool.allocated_memory.load(atomic::Ordering::Acquire),
+                BUF_SIZE.bytes() * 4
+            );
             drop(alloc1);
 
-            assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), BUF_SIZE.bytes() * 2);
+            assert_eq!(
+                bpool.allocated_memory.load(atomic::Ordering::Acquire),
+                BUF_SIZE.bytes() * 2
+            );
             drop(alloc2);
 
             assert_eq!(bpool.allocated_memory.load(atomic::Ordering::Acquire), 0);

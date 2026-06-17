@@ -340,7 +340,10 @@ fn crc32c_slice8_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
 
     // sanity checks
     debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
-    debug_assert!(buffers.iter().all(|b| b.len() == len), "each buf in bytes_bufs must be of same length");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
 
     let table = &CRC_TABLE[..];
 
@@ -402,7 +405,10 @@ fn crc32c_slice8_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
 
     // sanity checks
     debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
-    debug_assert!(buffers.iter().all(|b| b.len() == len), "each buf in bytes_bufs must be of same length");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
 
     let table = &CRC_TABLE[..];
 
@@ -521,7 +527,10 @@ unsafe fn crc32c_hardware_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
 
     // sanity checks
     debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
-    debug_assert!(buffers.iter().all(|b| b.len() == len), "each buf in bytes_bufs must be of same length");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
 
     let mut c0: u64 = (!0u32) as u64;
     let mut c1: u64 = (!0u32) as u64;
@@ -555,7 +564,10 @@ unsafe fn crc32c_hardware_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
 
     // sanity checks
     debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
-    debug_assert!(buffers.iter().all(|b| b.len() == len), "each buf in bytes_bufs must be of same length");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
 
     let mut c0: u64 = (!0u32) as u64;
     let mut c1: u64 = (!0u32) as u64;
@@ -624,7 +636,10 @@ unsafe fn crc32c_hardware_2x(buffers: [&TBuf; 2]) -> [TCrc; 2] {
 
     // sanity checks
     debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
-    debug_assert!(buffers.iter().all(|b| b.len() == len), "each buf in bytes_bufs must be of same length");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
 
     let mut c0: TCrc = !0;
     let mut c1: TCrc = !0;
@@ -659,7 +674,10 @@ unsafe fn crc32c_hardware_4x(buffers: [&TBuf; 4]) -> [TCrc; 4] {
 
     // sanity checks
     debug_assert!(len & 7 == 0, "bytes_buf must be 8 bytes aligned");
-    debug_assert!(buffers.iter().all(|b| b.len() == len), "each buf in bytes_bufs must be of same length");
+    debug_assert!(
+        buffers.iter().all(|b| b.len() == len),
+        "each buf in bytes_bufs must be of same length"
+    );
 
     let mut c0: TCrc = !0;
     let mut c1: TCrc = !0;

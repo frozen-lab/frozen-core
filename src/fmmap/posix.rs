@@ -2,8 +2,9 @@ use super::err;
 use crate::{error::FrozenResult, hints};
 use core::{ffi::CStr, ptr};
 use libc::{
-    EACCES, EAGAIN, EBADF, EBUSY, EINTR, EINVAL, EIO, ENODEV, ENOMEM, EOVERFLOW, EPERM, ETXTBSY, MAP_FAILED,
-    MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, c_void, mmap, msync, munmap, off_t, size_t, strerror,
+    EACCES, EAGAIN, EBADF, EBUSY, EINTR, EINVAL, EIO, ENODEV, ENOMEM, EOVERFLOW, EPERM, ETXTBSY,
+    MAP_FAILED, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, c_void, mmap, msync, munmap, off_t,
+    size_t, strerror,
 };
 
 /// Base pointer for `mmap(2)` mapped memory

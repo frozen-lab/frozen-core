@@ -130,7 +130,10 @@ pub(in crate::fmmap) mod err {
     pub const ZRO: ErrCode = ErrCode::new(0x18, "type T must not be zero sized");
 
     #[inline]
-    pub(in crate::fmmap) fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenResult<R> {
+    pub(in crate::fmmap) fn new_err<R, E: std::fmt::Display>(
+        code: ErrCode,
+        error: E,
+    ) -> FrozenResult<R> {
         let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, error);
         Err(err)
     }
@@ -142,7 +145,10 @@ pub(in crate::fmmap) mod err {
     }
 
     #[inline]
-    pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenError {
+    pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(
+        code: ErrCode,
+        error: E,
+    ) -> FrozenError {
         FrozenError::new_raw(*mid(), ERRDOMAIN, code, error)
     }
 }
@@ -304,7 +310,8 @@ where
         let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
-        let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length, total_slots));
+        let core =
+            sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length, total_slots));
 
         // INFO: we spawn the thread for background sync
         let tx = Core::spawn_tx(core.clone())?;
@@ -390,7 +397,8 @@ where
         let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
-        let core = sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length, total_slots));
+        let core =
+            sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length, total_slots));
 
         // INFO: we spawn the thread for background sync
         let tx = Core::spawn_tx(core.clone())?;
@@ -399,7 +407,10 @@ where
     }
 
     /// Create/open a new [`FrozenFile`] instance
-    fn open_file(path: std::path::PathBuf, cfg: &FrozenMMapCfg) -> FrozenResult<(FrozenFile, usize)> {
+    fn open_file(
+        path: std::path::PathBuf,
+        cfg: &FrozenMMapCfg,
+    ) -> FrozenResult<(FrozenFile, usize)> {
         let ff_cfg = FrozenFileCfg {
             path,
             module_id: cfg.module_id,
@@ -1244,7 +1255,8 @@ impl Core {
     }
 
     fn spawn_tx(core: sync::Arc<Self>) -> FrozenResult<thread::JoinHandle<()>> {
-        match thread::Builder::new().name("fm-flush-tx".into()).spawn(move || Self::flush_tx(core)) {
+        match thread::Builder::new().name("fm-flush-tx".into()).spawn(move || Self::flush_tx(core))
+        {
             Ok(tx) => Ok(tx),
             Err(error) => err::new_err(err::FXE, error),
         }
@@ -1357,7 +1369,12 @@ impl Locks {
 
         loop {
             if val
-                .compare_exchange_weak(Self::UNLOCK, Self::LOCK, atomic::Ordering::Acquire, atomic::Ordering::Relaxed)
+                .compare_exchange_weak(
+                    Self::UNLOCK,
+                    Self::LOCK,
+                    atomic::Ordering::Acquire,
+                    atomic::Ordering::Relaxed,
+                )
                 .is_ok()
             {
                 return LockGuard(val);
@@ -1409,7 +1426,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tmp_map");
 
-        let cfg = FrozenMMapCfg { module_id: MODULE_ID, initial_count: INIT_SLOTS, flush_duration: FLUSH_DURATION };
+        let cfg = FrozenMMapCfg {
+            module_id: MODULE_ID,
+            initial_count: INIT_SLOTS,
+            flush_duration: FLUSH_DURATION,
+        };
 
         (dir, path, cfg)
     }
