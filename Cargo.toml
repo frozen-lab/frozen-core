@@ -29,7 +29,12 @@ opt-level = 3
 inherits = "release"
 
 [features]
-ack = ["error", "hints"]
+ack = [
+    "error",
+    "hints",
+    "futures",
+    "event-listener",
+]
 crc32 = []
 error = []
 hints = []
@@ -68,6 +73,7 @@ default = [
 
 [dependencies]
 futures = {version = "0.3.32", optional = true}
+event-listener = {version = "5.4.1", optional = true}
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.178", optional = true }
