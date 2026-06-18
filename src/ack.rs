@@ -1,7 +1,25 @@
 //! Acknowledge primitives for durability tracking
 //!
-//! In storage system an acknowledgement is a confirmation that a previously submitted operations
-//! has reached a durable state.
+//! In our storage system, an acknowledgement represents the eventual durability state of
+//! previously submitted write operation.
+//!
+//! ## Example
+//!
+//! ```
+//! use frozen_core::ack::{AckTicket, Completion};
+//! use std::sync::Arc;
+//!
+//! let completion = Arc::new(Completion::default());
+//!
+//! let epoch = completion.increment_current_epoch();
+//! let ticket = AckTicket::new(epoch, completion.clone());
+//!
+//! completion.mark_epoch_as_durable(epoch);
+//! completion.notify_all_listeners();
+//!
+//! let durable_epoch = futures::executor::block_on(ticket).unwrap();
+//! assert_eq!(durable_epoch, epoch);
+//! ```
 
 use crate::{
     error::{FrozenError, FrozenResult},
@@ -30,7 +48,25 @@ impl Drop for AckError {
     }
 }
 
+/// A shared durability acknowledgement state used for issuing [`AckTicket`]'s
 ///
+/// The completion state tracks following things:
+///
+/// * The latest assigned epoch
+/// * The latest durable epoch
+/// * Waiters blocked on durability advancement
+/// * Durability errors (if any) blocking durability progress
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::ack::Completion;
+///
+/// let completion = Completion::default();
+///
+/// assert_eq!(completion.read_current_epoch(), 0);
+/// assert_eq!(completion.read_durable_epoch(), 0);
+/// ```
 #[derive(Debug)]
 pub struct Completion {
     current_epoch: atomic::AtomicU64,
@@ -51,13 +87,42 @@ impl Default for Completion {
 }
 
 impl Completion {
+    /// Advance current and return next durability epoch
     ///
+    /// *NOTE:* Epoch value is monotonically increasing and used to identify unique write
+    /// operations.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ack::Completion;
+    ///
+    /// let completion = Completion::default();
+    ///
+    /// assert_eq!(completion.increment_current_epoch(), 1);
+    /// assert_eq!(completion.increment_current_epoch(), 2);
+    /// assert_eq!(completion.increment_current_epoch(), 3);
+    /// ```
     #[inline]
     pub fn increment_current_epoch(&self) -> TEpoch {
         self.current_epoch.fetch_add(1, atomic::Ordering::AcqRel).wrapping_add(1)
     }
 
+    /// Mark given [`TEpoch`] as durable
     ///
+    /// *NOTE:* Once an epoch is marked durable, all earlier epochs are implicitly understood to be
+    /// durable.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ack::Completion;
+    ///
+    /// let completion = Completion::default();
+    /// completion.mark_epoch_as_durable(0x0A);
+    ///
+    /// assert_eq!(completion.read_durable_epoch(), 0x0A);
+    /// ```
     #[inline]
     pub fn mark_epoch_as_durable(&self, epoch: TEpoch) {
         self.durable_epoch.store(epoch, atomic::Ordering::Release);
@@ -131,19 +196,53 @@ impl Completion {
         }
     }
 
+    /// Read the latest assigned epoch
     ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ack::Completion;
+    ///
+    /// let completion = Completion::default();
+    /// completion.increment_current_epoch();
+    ///
+    /// assert_eq!(completion.read_current_epoch(), 1);
+    /// ```
     #[inline]
     pub fn read_current_epoch(&self) -> TEpoch {
         self.current_epoch.load(atomic::Ordering::Acquire)
     }
 
+    /// Read the latest durable epoch
     ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ack::Completion;
+    ///
+    /// let completion = Completion::default();
+    /// completion.mark_epoch_as_durable(0x3A);
+    ///
+    /// assert_eq!(completion.read_durable_epoch(), 0x3A);
+    /// ```
     #[inline]
     pub fn read_durable_epoch(&self) -> TEpoch {
         self.durable_epoch.load(atomic::Ordering::Acquire)
     }
 
+    /// Wake all the listeners currently waiting for durability progress
     ///
+    /// *NOTE:* Waking listeners does not modify any durable state and are typically called after
+    /// advancing the durable epoch or after occurence of [`AckError`].
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ack::Completion;
+    ///
+    /// let completion = Completion::default();
+    /// completion.notify_all_listeners();
+    /// ```
     #[inline]
     pub fn notify_all_listeners(&self) {
         self.event.notify(usize::MAX);
@@ -173,13 +272,37 @@ pub struct AckTicket {
 }
 
 impl AckTicket {
-    /// Construct a new [`AckTicket`]
+    /// Construct a new [`AckTicket`] for a write operation
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ack::{AckTicket, Completion};
+    /// use std::sync::Arc;
+    ///
+    /// let completion = Arc::new(Completion::default());
+    /// let ticket = AckTicket::new(1, completion);
+    ///
+    /// assert_eq!(ticket.epoch(), 1);
+    /// ```
     #[inline]
     pub const fn new(epoch: TEpoch, completion: sync::Arc<Completion>) -> Self {
         Self { epoch, completion, listener: None }
     }
 
     /// Read assigned durability epoch for the [`AckTicket`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ack::{AckTicket, Completion};
+    /// use std::sync::Arc;
+    ///
+    /// let completion = Arc::new(Completion::default());
+    /// let ticket = AckTicket::new(0x4C, completion);
+    ///
+    /// assert_eq!(ticket.epoch(), 0x4C);
+    /// ```
     #[inline(always)]
     pub const fn epoch(&self) -> TEpoch {
         self.epoch
