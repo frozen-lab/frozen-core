@@ -1032,4 +1032,78 @@ mod tests {
             assert_eq!(durable_epoch, (THREADS * WRITES_PER_THREAD) as u64,);
         }
     }
+
+    mod parallel_listeners {
+        use super::*;
+
+        #[test]
+        fn ok_many_parallel_waiters_same_durability_window() {
+            const WAITERS: usize = 0x20;
+            const BUFFER: [u8; BUFFER_SIZE as usize] = [0xAA; BUFFER_SIZE as usize];
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("parallel_waiters");
+
+            let (_file, pool, pipe) = new_objects(path);
+
+            let mut tickets = Vec::with_capacity(WAITERS);
+            for i in 0..WAITERS {
+                let allocation = prep_write(BUFFER.as_ptr(), 1, &pool);
+                let ticket = pipe.write(WriteRequest { allocation, slot_index: i }).unwrap();
+
+                tickets.push(ticket);
+            }
+
+            let mut handles = Vec::with_capacity(WAITERS);
+            for ticket in tickets {
+                handles.push(thread::spawn(move || {
+                    let epoch = ticket.epoch();
+                    let durable_epoch = futures::executor::block_on(ticket).unwrap();
+
+                    assert!(durable_epoch >= epoch);
+                }));
+            }
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        }
+
+        #[test]
+        fn ok_parallel_waiters_multiple_batches() {
+            const THREADS: usize = 0x0A;
+            const WRITES: usize = 0x10;
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("parallel_batches");
+
+            let (_file, pool, pipe) = new_objects(path);
+
+            let pipe = sync::Arc::new(pipe);
+            let pool = sync::Arc::new(pool);
+
+            let mut handles = Vec::new();
+            for tid in 0..THREADS {
+                let pipe = pipe.clone();
+                let pool = pool.clone();
+
+                handles.push(thread::spawn(move || {
+                    let buffer = [tid as u8; BUFFER_SIZE as usize];
+
+                    for i in 0..WRITES {
+                        let allocation = prep_write(buffer.as_ptr(), 1, &pool);
+                        let ticket = pipe
+                            .write(WriteRequest { allocation, slot_index: tid * WRITES + i })
+                            .unwrap();
+
+                        futures::executor::block_on(ticket).unwrap();
+                    }
+                }));
+            }
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        }
+    }
 }
