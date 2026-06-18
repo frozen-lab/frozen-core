@@ -1886,4 +1886,65 @@ mod tests {
             }
         }
     }
+
+    mod ack_ticket {
+        use super::*;
+
+        #[test]
+        fn ok_parallel_waiters_same_epoch_window() {
+            let (_dir, path, cfg) = new_tmp();
+            let mmap = sync::Arc::new(FrozenMMap::<u64>::new(path, cfg).unwrap());
+
+            let barrier = sync::Arc::new(sync::Barrier::new(0x10));
+
+            let mut handles = Vec::new();
+            for i in 0..0x10usize {
+                let mmap = mmap.clone();
+                let barrier = barrier.clone();
+
+                handles.push(thread::spawn(move || {
+                    barrier.wait();
+
+                    let ticket = unsafe { mmap.write(i % INIT_SLOTS, |v| *v = i as u64).unwrap() };
+
+                    let epoch = ticket.epoch();
+                    let durable = futures::executor::block_on(ticket).unwrap();
+
+                    assert!(durable >= epoch);
+                }));
+            }
+
+            for handle in handles {
+                handle.join().expect("worker thread panicked");
+            }
+        }
+
+        #[test]
+        fn ok_parallel_waiters_same_epoch() {
+            let completion = sync::Arc::new(ack::Completion::default());
+
+            let mut handles = Vec::new();
+            for _ in 0..0x10 {
+                let completion = completion.clone();
+
+                handles.push(thread::spawn(move || {
+                    let ticket = ack::AckTicket::new(1, completion);
+
+                    assert_eq!(
+                        futures::executor::block_on(ticket).expect("ticket must complete"),
+                        1
+                    );
+                }));
+            }
+
+            thread::sleep(time::Duration::from_millis(0x0A));
+
+            completion.mark_epoch_as_durable(1);
+            completion.notify_all_listeners();
+
+            for handle in handles {
+                handle.join().expect("worker thread panicked");
+            }
+        }
+    }
 }
