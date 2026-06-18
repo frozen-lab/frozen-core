@@ -350,3 +350,181 @@ impl future::Future for AckTicket {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrCode;
+    use std::{sync, thread, time};
+
+    mod completion {
+        use super::*;
+
+        #[test]
+        fn ok_increment_current_epoch() {
+            let completion = Completion::default();
+
+            assert_eq!(completion.increment_current_epoch(), 1);
+            assert_eq!(completion.increment_current_epoch(), 2);
+            assert_eq!(completion.increment_current_epoch(), 3);
+        }
+
+        #[test]
+        fn ok_mark_epoch_as_durable() {
+            let completion = Completion::default();
+            completion.mark_epoch_as_durable(0x0C);
+
+            assert_eq!(completion.read_durable_epoch(), 0x0C);
+        }
+
+        #[test]
+        fn ok_set_get_err() {
+            let completion = Completion::default();
+            let err = FrozenError::new(0x10, 0x20, ErrCode::new(0x30, "io"), "failure");
+            completion.set_err(err.clone());
+
+            assert_eq!(completion.get_err(), Some(err));
+        }
+
+        #[test]
+        fn ok_del_err() {
+            let completion = Completion::default();
+
+            completion.set_err(FrozenError::new(0x10, 0x20, ErrCode::new(0x30, "io"), "failure"));
+            assert!(completion.get_err().is_some());
+
+            completion.del_err();
+            assert!(completion.get_err().is_none());
+        }
+
+        #[test]
+        fn ok_set_err_overwrites_previous() {
+            let completion = Completion::default();
+
+            let err_1 = FrozenError::new(0x10, 0x20, ErrCode::new(0x30, "io"), "first");
+            let err_2 = FrozenError::new(0x11, 0x21, ErrCode::new(0x31, "sync"), "second");
+
+            completion.set_err(err_1);
+            completion.set_err(err_2.clone());
+
+            assert_eq!(completion.get_err(), Some(err_2));
+        }
+    }
+
+    mod ack_ticket {
+        use super::*;
+
+        #[test]
+        fn ok_new() {
+            let completion = sync::Arc::new(Completion::default());
+            let ticket = AckTicket::new(0x23, completion);
+
+            assert_eq!(ticket.epoch(), 0x23);
+        }
+
+        #[test]
+        fn ok_await_when_epoch_already_durable() {
+            let completion = sync::Arc::new(Completion::default());
+            completion.mark_epoch_as_durable(0x0A);
+
+            let ticket = AckTicket::new(0x0A, completion);
+            let durable_epoch = futures::executor::block_on(ticket).expect("ticket must complete");
+
+            assert_eq!(durable_epoch, 0x0A);
+        }
+
+        #[test]
+        fn ok_await_after_durability_progress() {
+            let completion = sync::Arc::new(Completion::default());
+            let ticket = AckTicket::new(1, completion.clone());
+
+            thread::spawn({
+                let completion = completion.clone();
+
+                move || {
+                    thread::sleep(time::Duration::from_millis(0x0A));
+
+                    completion.mark_epoch_as_durable(1);
+                    completion.notify_all_listeners();
+                }
+            });
+
+            let durable_epoch = futures::executor::block_on(ticket).expect("ticket must complete");
+
+            assert_eq!(durable_epoch, 1);
+        }
+
+        #[test]
+        fn err_await_when_error_is_present() {
+            let completion = sync::Arc::new(Completion::default());
+            let expected_error = FrozenError::new(0x10, 0x20, ErrCode::new(0x30, "io"), "failure");
+
+            completion.set_err(expected_error.clone());
+
+            let ticket = AckTicket::new(1, completion);
+            let err = futures::executor::block_on(ticket).expect_err("ticket must fail");
+
+            assert_eq!(err, expected_error);
+        }
+
+        #[test]
+        fn err_await_when_error_arrives_later() {
+            let completion = sync::Arc::new(Completion::default());
+            let ticket = AckTicket::new(1, completion.clone());
+            let expected_error = FrozenError::new(0x10, 0x20, ErrCode::new(0x30, "io"), "failure");
+
+            thread::spawn({
+                let completion = completion.clone();
+                let expected_error = expected_error.clone();
+
+                move || {
+                    thread::sleep(time::Duration::from_millis(0x0A));
+
+                    completion.set_err(expected_error);
+                    completion.notify_all_listeners();
+                }
+            });
+
+            let err = futures::executor::block_on(ticket).expect_err("ticket must fail");
+            assert_eq!(err, expected_error);
+        }
+
+        #[test]
+        fn ok_multiple_tickets_waiting_for_same_epoch() {
+            let completion = sync::Arc::new(Completion::default());
+
+            let ticket_1 = AckTicket::new(1, completion.clone());
+            let ticket_2 = AckTicket::new(1, completion.clone());
+            let ticket_3 = AckTicket::new(1, completion.clone());
+
+            thread::spawn({
+                let completion = completion.clone();
+                move || {
+                    thread::sleep(time::Duration::from_millis(0x0A));
+
+                    completion.mark_epoch_as_durable(1);
+                    completion.notify_all_listeners();
+                }
+            });
+
+            assert_eq!(futures::executor::block_on(ticket_1).expect("ticket_1 must complete"), 1);
+            assert_eq!(futures::executor::block_on(ticket_2).expect("ticket_2 must complete"), 1);
+            assert_eq!(futures::executor::block_on(ticket_3).expect("ticket_3 must complete"), 1);
+        }
+
+        #[test]
+        fn ok_multiple_epochs_complete_in_order() {
+            let completion = sync::Arc::new(Completion::default());
+
+            let ticket_1 = AckTicket::new(1, completion.clone());
+            let ticket_2 = AckTicket::new(2, completion.clone());
+            let ticket_3 = AckTicket::new(3, completion.clone());
+
+            completion.mark_epoch_as_durable(3);
+
+            assert_eq!(futures::executor::block_on(ticket_1).expect("ticket_1 must complete"), 1);
+            assert_eq!(futures::executor::block_on(ticket_2).expect("ticket_2 must complete"), 2);
+            assert_eq!(futures::executor::block_on(ticket_3).expect("ticket_3 must complete"), 3);
+        }
+    }
+}
