@@ -750,6 +750,61 @@ where
         self.core.file.delete()
     }
 
+    /// Flush the dirty mmap data to persistant storage
+    ///
+    /// *NOTE:* This call must be paired w/ [`FrozenMMap::flush_file`] for stronger durability
+    /// guarantee
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
+    ///
+    /// const MODULE_ID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_delete_mmap");
+    ///
+    /// let cfg = FrozenMMapCfg {
+    ///     module_id: MODULE_ID,
+    ///     initial_count: 0x04,
+    ///     flush_duration: std::time::Duration::from_micros(0x96),
+    /// };
+    ///
+    /// let mut mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
+    /// assert!(unsafe { mmap.flush_mmap() }.is_ok());
+    /// ```
+    #[inline]
+    pub unsafe fn flush_mmap(&self) -> FrozenResult<()> {
+        self.core.map.sync(self.core.curr_length)
+    }
+
+    /// Perform hard flush for the dirty mmap'ed data for stronger durability guarantee
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
+    ///
+    /// const MODULE_ID: u8 = 0;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("tmp_delete_mmap");
+    ///
+    /// let cfg = FrozenMMapCfg {
+    ///     module_id: MODULE_ID,
+    ///     initial_count: 0x04,
+    ///     flush_duration: std::time::Duration::from_micros(0x96),
+    /// };
+    ///
+    /// let mut mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
+    /// assert!(unsafe { mmap.flush_file() }.is_ok());
+    /// ```
+    #[inline]
+    pub unsafe fn flush_file(&self) -> FrozenResult<()> {
+        self.core.file.sync()
+    }
+
     #[inline]
     fn munmap(&self) -> FrozenResult<()> {
         let length = self.core.curr_length;
