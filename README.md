@@ -12,7 +12,7 @@ Add following to your `Cargo.toml`,
 
 ```toml
 [dependencies]
-frozen-core = { version = "0.0.23", default-features = true }
+frozen-core = { version = "0.0.24", default-features = true }
 ```
 
 > [!NOTE]
@@ -23,6 +23,7 @@ frozen-core = { version = "0.0.23", default-features = true }
 
 ## Feature Flags
 
+- [`ack`](https://docs.rs/frozen-core/latest/frozen_core/ack/index.html)
 - [`error`](https://docs.rs/frozen-core/latest/frozen_core/error/index.html)
 - [`hints`](https://docs.rs/frozen-core/latest/frozen_core/hints/index.html)
 - [`ffile`](https://docs.rs/frozen-core/latest/frozen_core/ffile/index.html)
