@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.24`
+
+- Impl of `ack` module (#58)
+
 ## `0.0.23`
 
 - Improved `FrozenError` in `error` module
