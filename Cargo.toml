@@ -54,6 +54,7 @@ ffile = [
     "hints",
 ]
 fmmap = [
+    "ack",
     "libc",
     "error",
     "hints",

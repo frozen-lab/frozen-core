@@ -58,7 +58,8 @@
 mod posix;
 
 use crate::{
-    error::{FrozenError, FrozenResult},
+    ack,
+    error::FrozenResult,
     ffile::{FrozenFile, FrozenFileCfg},
     hints,
 };
@@ -111,8 +112,8 @@ pub(in crate::fmmap) mod err {
     /// no write/read perm
     pub const PRM: ErrCode = ErrCode::new(0x0A, "missing permissions for IO");
 
-    /// flush_tx error (panic inside)
-    pub const TXE: ErrCode = ErrCode::new(0x0C, "flush_tx paniced inside");
+    /// type `T` must not be zero sized
+    pub const ZRO: ErrCode = ErrCode::new(0x0C, "type T must not be zero sized");
 
     /// flush_tx error (unable to spawn)
     pub const FXE: ErrCode = ErrCode::new(0x10, "unable to spawn flush_tx");
@@ -125,9 +126,6 @@ pub(in crate::fmmap) mod err {
 
     /// `size_of::<T>()` is not multiple of 8
     pub const SZE: ErrCode = ErrCode::new(0x16, "`size_of::<T>()` must be multiple of 8 bytes");
-
-    /// type `T` must not be zero sized
-    pub const ZRO: ErrCode = ErrCode::new(0x18, "type T must not be zero sized");
 
     #[inline]
     pub(in crate::fmmap) fn new_err<R, E: std::fmt::Display>(
@@ -142,14 +140,6 @@ pub(in crate::fmmap) mod err {
     pub(in crate::fmmap) fn new_err_default<R>(code: ErrCode) -> FrozenResult<R> {
         let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, "");
         Err(err)
-    }
-
-    #[inline]
-    pub(in crate::fmmap) fn new_err_raw<E: std::fmt::Display>(
-        code: ErrCode,
-        error: E,
-    ) -> FrozenError {
-        FrozenError::new_raw(*mid(), ERRDOMAIN, code, error)
     }
 }
 
@@ -231,7 +221,7 @@ where
     T: Sized + Send + Sync,
 {
     core: sync::Arc<Core>,
-    tx: Option<thread::JoinHandle<()>>,
+    flush_tx_handle: Option<thread::JoinHandle<()>>,
     _t: core::marker::PhantomData<T>,
 }
 
@@ -310,13 +300,20 @@ where
         let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
-        let core =
-            sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length, total_slots));
+        let core = sync::Arc::new(Core::new(mmap, file, curr_length, total_slots));
 
-        // INFO: we spawn the thread for background sync
-        let tx = Core::spawn_tx(core.clone())?;
+        let cloned_core = sync::Arc::clone(&core);
+        let flush_tx_handle = match thread::Builder::new()
+            .name(format!("mod{}_fmmap_flush_tx", cfg.module_id))
+            .spawn(move || bg_flush_thread(cloned_core, cfg.flush_duration))
+        {
+            Ok(handle) => Some(handle),
+            Err(observed_error) => {
+                return err::new_err(err::FXE, observed_error);
+            }
+        };
 
-        Ok(Self { core, tx: Some(tx), _t: core::marker::PhantomData })
+        Ok(Self { core, flush_tx_handle, _t: core::marker::PhantomData })
     }
 
     /// Create a new [`FrozenMMap`] instance w/ given [`FrozenMMapCfg`], while growing the
@@ -397,13 +394,20 @@ where
         let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
-        let core =
-            sync::Arc::new(Core::new(mmap, file, cfg.flush_duration, curr_length, total_slots));
+        let core = sync::Arc::new(Core::new(mmap, file, curr_length, total_slots));
 
-        // INFO: we spawn the thread for background sync
-        let tx = Core::spawn_tx(core.clone())?;
+        let cloned_core = sync::Arc::clone(&core);
+        let flush_tx_handle = match thread::Builder::new()
+            .name(format!("mod{}_fmmap_flush_tx", cfg.module_id))
+            .spawn(move || bg_flush_thread(cloned_core, cfg.flush_duration))
+        {
+            Ok(handle) => Some(handle),
+            Err(observed_error) => {
+                return err::new_err(err::FXE, observed_error);
+            }
+        };
 
-        Ok(Self { core, tx: Some(tx), _t: core::marker::PhantomData })
+        Ok(Self { core, flush_tx_handle, _t: core::marker::PhantomData })
     }
 
     /// Create/open a new [`FrozenFile`] instance
@@ -445,67 +449,6 @@ where
         }
 
         Ok(())
-    }
-
-    /// Blocks until given `epoch` becomes durable
-    ///
-    /// ## Batching
-    ///
-    /// With respect to `flush_duration`, all write ops are batched before sync, which is executed
-    /// by flusher tx working in background, while each write is assigned w/ current durable epoch,
-    /// and all writes which observe the exact same epoch, belong to the same durability window, and
-    /// are all sync'ed together
-    ///
-    /// When a background sync succeeds, the internal durable epoch is incremented, indicating that
-    /// all writes that observed the previous epoch are now durable on disk
-    ///
-    /// ## Example
-    ///
-    /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
-    ///
-    /// const MODULE_ID: u8 = 0;
-    ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let path = dir.path().join("tmp_wait_epoch");
-    ///
-    /// let cfg = FrozenMMapCfg {
-    ///     module_id: MODULE_ID,
-    ///     initial_count: 0x04,
-    ///     flush_duration: std::time::Duration::from_micros(0x60),
-    /// };
-    ///
-    /// let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
-    ///
-    /// let epoch = unsafe { mmap.write(0, |v| *v = 0x8A) }.unwrap();
-    /// mmap.wait_for_durability(epoch).unwrap();
-    ///
-    /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
-    /// assert_eq!(val, 0x8A);
-    /// ```
-    pub fn wait_for_durability(&self, epoch: u64) -> FrozenResult<()> {
-        if let Some(sync_err) = self.core.get_sync_error() {
-            return Err(sync_err);
-        }
-
-        let durable_epoch = self.core.durable_epoch.load(atomic::Ordering::Acquire);
-        if durable_epoch >= epoch {
-            return Ok(());
-        }
-
-        let mut guard = self.core.acquire_durable_lock();
-        loop {
-            if let Some(sync_err) = self.core.get_sync_error() {
-                return Err(sync_err);
-            }
-
-            if self.core.durable_epoch.load(atomic::Ordering::Acquire) >= epoch {
-                return Ok(());
-            }
-
-            // NOTE: See [`Core::acquire_durable_lock`] implementation for rationale behind poison recovery
-            guard = self.core.durable_cv.wait(guard).unwrap_or_else(|e| e.into_inner());
-        }
     }
 
     /// Read a `T` at given `index` via callback (`f`)
@@ -609,7 +552,7 @@ where
     #[inline(always)]
     pub unsafe fn write(&self, index: usize, f: impl FnOnce(*mut T)) -> FrozenResult<TEpoch> {
         // propagate prev errors
-        if let Some(err) = self.core.get_sync_error() {
+        if let Some(err) = self.core.completion.get_err() {
             return Err(err);
         }
 
@@ -622,90 +565,9 @@ where
         f(ptr);
 
         self.core.dirty.store(true, atomic::Ordering::Release);
-        let epoch = self.core.incr_curr_epoch();
+        let epoch = self.core.completion.increment_current_epoch();
 
         Ok(epoch)
-    }
-
-    /// Write/update a `T` at given `index` via callback (`f`) w/ instant durability
-    ///
-    /// This function performs a blocking hard-sync, unlike [`FrozenMMap::write`], the update is
-    /// immediately persisted to the underlying storage device
-    ///
-    /// ## Concurrency
-    ///
-    /// Internally, [`FrozenMMap`] implements per-slot locking, so concurrent reads and writes for
-    /// at same index is atomic and thread safe, while operations on different indices may proceed
-    /// fully in parallel.
-    ///
-    /// ## Safety
-    ///
-    /// The caller must ensure following:
-    ///
-    /// - given `index` is within bounds
-    /// - underlying memory contains a valid instance of `T`
-    /// - provided callback `f` must not  store or leak pointer beyound there lifetime
-    ///
-    /// Violating any of the above may result in undefined behavior
-    ///
-    /// ## Example
-    ///
-    /// ```
-    /// use frozen_core::fmmap::{FrozenMMap, FrozenMMapCfg};
-    ///
-    /// const MODULE_ID: u8 = 0;
-    ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let path = dir.path().join("tmp_write_sync");
-    ///
-    /// let cfg = FrozenMMapCfg {
-    ///     module_id: MODULE_ID,
-    ///     initial_count: 0x02,
-    ///     flush_duration: std::time::Duration::from_micros(0x96),
-    /// };
-    ///
-    /// let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
-    /// unsafe { mmap.write_sync(0, |v| *v = 0xC0DE) }.unwrap();
-    ///
-    /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
-    /// assert_eq!(val, 0xC0DE);
-    /// ```
-    #[inline(always)]
-    pub unsafe fn write_sync(&self, index: usize, f: impl FnOnce(*mut T)) -> FrozenResult<()> {
-        // propagate prev errors
-        if let Some(err) = self.core.get_sync_error() {
-            return Err(err);
-        }
-
-        let offset = Self::SLOT_SIZE * index;
-
-        // block flush_tx scheduling
-        let _flush_guard = self.core.acquire_lock();
-
-        // we use exlusive lock as we perform blocking hard sync
-        let _guard = self.core.acquire_exclusive_io_lock();
-
-        let _lock = self.core.locks.lock(index);
-        let ptr = unsafe { self.core.map.as_mut_ptr(offset) };
-        f(ptr);
-
-        // blocking hard sync
-        self.core.sync()?;
-
-        // NOTE: we hard sync we flushed an entier batch, so we can skip the sync via flush_tx as
-        // the current batch is durable
-
-        self.core.mark_epoch_durable();
-        let prev = self.core.dirty.swap(false, atomic::Ordering::AcqRel);
-
-        // NOTE: we must also notify cv's waiting for durability (we skip if there was no batch to
-        // sync)
-        if prev {
-            let _g = self.core.acquire_durable_lock();
-            self.core.durable_cv.notify_all();
-        }
-
-        Ok(())
     }
 
     /// Read current available count of slots, where each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`]
@@ -873,7 +735,7 @@ where
         self.core.closed.store(true, atomic::Ordering::Release);
         self.core.durable_cv.notify_one();
 
-        if let Some(handle) = self.tx.take() {
+        if let Some(handle) = self.flush_tx_handle.take() {
             let _ = handle.join();
         }
 
@@ -899,20 +761,12 @@ where
         let is_closed = self.core.closed.swap(true, atomic::Ordering::Release);
         self.core.cv.notify_one(); // notify flusher tx to shut
 
-        if let Some(handle) = self.tx.take() {
+        if let Some(handle) = self.flush_tx_handle.take() {
             let _ = handle.join();
         }
 
         // we must acquire an exclusive lock, to prevent dropping while sync, growing or any io ops
         let _io_lock = self.core.acquire_exclusive_io_lock();
-
-        // free up the boxed error (if any)
-        let ptr = self.core.error.swap(std::ptr::null_mut(), atomic::Ordering::AcqRel);
-        if !ptr.is_null() {
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
-        }
 
         if !is_closed {
             let _ = self.munmap();
@@ -932,6 +786,80 @@ where
             self.total_slots(),
             self.core.curr_length,
         )
+    }
+}
+
+/// ## Why we ignore [`std::sync::PoisonError`]?
+///
+/// The mutex used for lock, is solely used as a parking primitive for [`Condvar`] and does not
+/// protect any mutable state. All the pool invariants and accounting are maintained via atomics
+/// and are completely seperated from the mutex.
+///
+/// A poisoned mutex only indicates that another tx panicked while holding the lock, and indicates
+/// an inconsistent state of the protected value. Since no state can be left partially modified
+/// under this lock, there is no possible consistency risk to recover from and propagating the
+/// poison error would only introduce unnecessary failures into the allocation path.
+///
+/// Therefore, as best effort, we consume the [`std::sync::PoisonError`] and continue operating
+/// with the recovered guard.
+fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
+    // init phase (acquiring locks)
+    let mut guard = core.lock.lock().unwrap_or_else(|e| e.into_inner());
+
+    // sync loop w/ non-busy waiting
+    loop {
+        (guard, _) = core.cv.wait_timeout(guard, flush_duration).unwrap_or_else(|e| e.into_inner());
+
+        // NOTE: we must read values of close brodcast before acquire exclusive lock, if done
+        // otherwise, we impose serious deadlock sort of situation for the the flusher tx
+
+        let dirty = core.dirty.swap(false, atomic::Ordering::AcqRel);
+        let closing = core.closed.load(atomic::Ordering::Acquire);
+
+        if !dirty {
+            if closing {
+                core.cv.notify_all();
+                return;
+            }
+
+            continue;
+        }
+
+        // INFO: we must acquire an exclusive IO lock for sync, hence no write, read or
+        // grow could kick in while sync is in progress
+
+        let io_lock = core.acquire_exclusive_io_lock();
+
+        // INFO: we must drop the guard before syscall, as its a blocking operation and holding
+        // the mutex while the syscall takes place is not a good idea, while we drop the mutex
+        // and acqurie it again, in-between other process could acquire it and use it
+        drop(guard);
+
+        // NOTE: We snapshot `current_epoch` before sync to establish a strict batch boundary,
+        // all writes up to `target_epoch` are guaranteed to be part of this flush window,
+        // while anything beyound belongs to the next batch
+        let target_epoch = core.completion.read_current_epoch();
+
+        // NOTE:
+        //
+        // - if sync fails, we update the Core::error w/ the received error object
+        // - we clear it up when another sync call succeeds
+        // - this is valid, as the underlying sync flushes entire mmaped region, hence
+        //   even if the last call failed, and the new one succeeded, we do get the durability
+        //   guarenty for the old data as well
+
+        if let Err(new_error) = core.sync() {
+            core.completion.set_err(new_error);
+        } else {
+            core.completion.mark_epoch_as_durable(target_epoch);
+            core.completion.del_err();
+        }
+
+        // NOTE: notify all listeners currently waiting for durability progress
+        core.completion.notify_all_listeners();
+
+        drop(io_lock);
+        guard = core.acquire_lock();
     }
 }
 
@@ -1095,7 +1023,7 @@ impl<'a, T> FMTransaction<'a, T> {
     /// ```
     #[inline(always)]
     pub fn commit(self) -> FrozenResult<u64> {
-        if let Some(err) = self.core.get_sync_error() {
+        if let Some(err) = self.core.completion.get_err() {
             return Err(err);
         }
 
@@ -1114,7 +1042,7 @@ impl<'a, T> FMTransaction<'a, T> {
         }
 
         self.core.dirty.store(true, atomic::Ordering::Release);
-        let epoch = self.core.incr_curr_epoch();
+        let epoch = self.core.completion.increment_current_epoch();
 
         Ok(epoch)
     }
@@ -1122,50 +1050,36 @@ impl<'a, T> FMTransaction<'a, T> {
 
 #[derive(Debug)]
 struct Core {
-    map: TMap,
-    locks: Locks,
-    file: FrozenFile,
+    completion: ack::Completion,
     cv: sync::Condvar,
     curr_length: usize,
-    lock: sync::Mutex<()>,
-    io_lock: sync::RwLock<()>,
     dirty: atomic::AtomicBool,
+    io_lock: sync::RwLock<()>,
+    map: TMap,
+    locks: Locks,
+    lock: sync::Mutex<()>,
+    file: FrozenFile,
     durable_cv: sync::Condvar,
     closed: atomic::AtomicBool,
-    durable_lock: sync::Mutex<()>,
-    flush_duration: time::Duration,
-    current_epoch: atomic::AtomicU64,
-    durable_epoch: atomic::AtomicU64,
-    error: atomic::AtomicPtr<sync::Arc<FrozenError>>,
 }
 
 unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
 impl Core {
-    fn new(
-        map: TMap,
-        file: FrozenFile,
-        flush_duration: time::Duration,
-        curr_length: usize,
-        total_slots: usize,
-    ) -> Self {
+    fn new(map: TMap, file: FrozenFile, curr_length: usize, total_slots: usize) -> Self {
         Self {
             map,
             file,
             curr_length,
-            flush_duration,
+            completion: ack::Completion::default(),
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
             io_lock: sync::RwLock::new(()),
             locks: Locks::new(total_slots),
             durable_cv: sync::Condvar::new(),
-            durable_lock: sync::Mutex::new(()),
             dirty: atomic::AtomicBool::new(false),
             closed: atomic::AtomicBool::new(false),
-            current_epoch: atomic::AtomicU64::new(0),
-            durable_epoch: atomic::AtomicU64::new(0),
-            error: atomic::AtomicPtr::new(std::ptr::null_mut()),
         }
     }
 
@@ -1175,171 +1089,22 @@ impl Core {
         self.file.sync()
     }
 
-    #[inline(always)]
-    fn set_sync_error(&self, err: FrozenError) {
-        let boxed = Box::into_raw(Box::new(sync::Arc::new(err)));
-        let old = self.error.swap(boxed, atomic::Ordering::AcqRel);
-
-        // NOTE: we must free the old error, if any, to avoid mem leaks
-        if !old.is_null() {
-            unsafe { drop(Box::from_raw(old)) };
-        }
-    }
-
-    #[inline(always)]
-    fn get_sync_error(&self) -> Option<FrozenError> {
-        let ptr = self.error.load(atomic::Ordering::Acquire);
-        if hints::likely(ptr.is_null()) {
-            return None;
-        }
-
-        let arc = unsafe { &*ptr }.clone();
-        Some((*arc).clone())
-    }
-
-    #[inline]
-    fn clear_sync_error(&self) {
-        let old = self.error.swap(std::ptr::null_mut(), atomic::Ordering::AcqRel);
-        if hints::unlikely(!old.is_null()) {
-            unsafe {
-                drop(Box::from_raw(old));
-            }
-        }
-    }
-
-    /// ## Why we ignore [`std::sync::PoisonError`]?
-    ///
-    /// The mutex used for lock, is solely used as a parking primitive for [`Condvar`] and does not
-    /// protect any mutable state. All the pool invariants and accounting are maintained via atomics
-    /// and are completely seperated from the mutex.
-    ///
-    /// A poisoned mutex only indicates that another tx panicked while holding the lock, and indicates
-    /// an inconsistent state of the protected value. Since no state can be left partially modified
-    /// under this lock, there is no possible consistency risk to recover from and propagating the
-    /// poison error would only introduce unnecessary failures into the allocation path.
-    ///
-    /// Therefore, as best effort, we consume the [`std::sync::PoisonError`] and continue operating
-    /// with the recovered guard.
-    #[inline]
-    fn acquire_durable_lock(&self) -> sync::MutexGuard<'_, ()> {
-        self.durable_lock.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// NOTE: See [`Core::acquire_durable_lock`] implementation for rationale behind poison recovery
+    /// NOTE: See [`bg_flush_thread`] implementation for rationale behind poison recovery
     #[inline]
     fn acquire_lock(&self) -> sync::MutexGuard<'_, ()> {
         self.lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// NOTE: See [`Core::acquire_durable_lock`] implementation for rationale behind poison recovery
+    /// NOTE: See [`bg_flush_thread`] implementation for rationale behind poison recovery
     #[inline]
     fn acquire_io_lock(&self) -> sync::RwLockReadGuard<'_, ()> {
         self.io_lock.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// NOTE: See [`Core::acquire_durable_lock`] implementation for rationale behind poison recovery
+    /// NOTE: See [`bg_flush_thread`] implementation for rationale behind poison recovery
     #[inline]
     fn acquire_exclusive_io_lock(&self) -> sync::RwLockWriteGuard<'_, ()> {
         self.io_lock.write().unwrap_or_else(|e| e.into_inner())
-    }
-
-    #[inline]
-    fn incr_curr_epoch(&self) -> u64 {
-        self.current_epoch.fetch_add(1, atomic::Ordering::Release) + 1
-    }
-
-    #[inline]
-    fn mark_epoch_durable(&self) {
-        let curr_epoch = self.current_epoch.load(atomic::Ordering::Acquire);
-        self.durable_epoch.store(curr_epoch, atomic::Ordering::Release);
-    }
-
-    fn spawn_tx(core: sync::Arc<Self>) -> FrozenResult<thread::JoinHandle<()>> {
-        match thread::Builder::new().name("fm-flush-tx".into()).spawn(move || Self::flush_tx(core))
-        {
-            Ok(tx) => Ok(tx),
-            Err(error) => err::new_err(err::FXE, error),
-        }
-    }
-
-    fn flush_tx(core: sync::Arc<Self>) {
-        // init phase (acquiring locks)
-        let mut guard = match core.lock.lock() {
-            Ok(g) => g,
-            Err(error) => {
-                core.set_sync_error(err::new_err_raw(err::FXE, error));
-                core.cv.notify_all();
-                return;
-            }
-        };
-
-        // sync loop w/ non-busy waiting
-        loop {
-            guard = match core.cv.wait_timeout(guard, core.flush_duration) {
-                Ok((g, _)) => g,
-                Err(e) => {
-                    core.set_sync_error(err::new_err_raw(err::TXE, e));
-                    core.cv.notify_all();
-                    return;
-                }
-            };
-
-            // NOTE: we must read values of close brodcast before acquire exclusive lock, if done
-            // otherwise, we impose serious deadlock sort of situation for the the flusher tx
-
-            let dirty = core.dirty.swap(false, atomic::Ordering::AcqRel);
-            let closing = core.closed.load(atomic::Ordering::Acquire);
-
-            if !dirty {
-                if closing {
-                    core.cv.notify_all();
-                    return;
-                }
-
-                continue;
-            }
-
-            // INFO: we must acquire an exclusive IO lock for sync, hence no write, read or
-            // grow could kick in while sync is in progress
-
-            let io_lock = core.acquire_exclusive_io_lock();
-
-            // INFO: we must drop the guard before syscall, as its a blocking operation and holding
-            // the mutex while the syscall takes place is not a good idea, while we drop the mutex
-            // and acqurie it again, in-between other process could acquire it and use it
-            drop(guard);
-
-            // NOTE: We snapshot `current_epoch` before sync to establish a strict batch boundary,
-            // all writes up to `target_epoch` are guaranteed to be part of this flush window,
-            // while anything beyound belongs to the next batch
-            let target_epoch = core.current_epoch.load(atomic::Ordering::Acquire);
-
-            // NOTE:
-            //
-            // - if sync fails, we update the Core::error w/ the received error object
-            // - we clear it up when another sync call succeeds
-            // - this is valid, as the underlying sync flushes entire mmaped region, hence
-            //   even if the last call failed, and the new one succeeded, we do get the durability
-            //   guarenty for the old data as well
-
-            match core.sync() {
-                Ok(_) => {
-                    core.durable_epoch.store(target_epoch, atomic::Ordering::Release);
-
-                    let _g = core.acquire_durable_lock();
-
-                    core.clear_sync_error();
-                    core.durable_cv.notify_all();
-                }
-                Err(err) => {
-                    core.set_sync_error(err);
-                    core.durable_cv.notify_all();
-                }
-            }
-
-            drop(io_lock);
-            guard = core.acquire_lock();
-        }
     }
 }
 
