@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.25`
+
+- Migrated `fmmap::FrozenMMap` to use `ack` for future impl and durability guarantee (#57)
+
 ## `0.0.24`
 
 - Impl of `ack` module (#58)
