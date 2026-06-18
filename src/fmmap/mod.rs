@@ -648,12 +648,12 @@ where
         mmap_bytes + lock_bytes
     }
 
-    /// Create a new [`FMTransaction`] context for grouping multi write ops into a single atomic
+    /// Create a new [`FrozenMMapTransaction`] context for grouping multi write ops into a single atomic
     /// operation
     ///
     /// ## Overview
     ///
-    /// The use of [`FMTransaction`] allows to group multiple write ops into a single atomic
+    /// The use of [`FrozenMMapTransaction`] allows to group multiple write ops into a single atomic
     /// operation, hence creating a transactional write operation, which gives following guarantees:
     ///
     /// - All write ops succeed together
@@ -693,8 +693,8 @@ where
     /// assert_eq!((v0, v1), (0x0A, 0x14));
     /// ```
     #[inline]
-    pub fn new_tx(&self) -> FMTransaction<'_, T> {
-        FMTransaction { core: &self.core, ops_vec: Vec::new() }
+    pub fn new_tx(&self) -> FrozenMMapTransaction<'_, T> {
+        FrozenMMapTransaction { core: &self.core, ops_vec: Vec::new() }
     }
 
     /// Delete the underlying [`FrozenFile`] used for [`FrozenMMap`] from fs
@@ -871,7 +871,7 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
 ///
 /// ## Overview
 ///
-/// Use of [`FMTransaction`] allows to group multiple write ops into a single atomic operation.
+/// Use of [`FrozenMMapTransaction`] allows to group multiple write ops into a single atomic operation.
 ///
 /// - All included writes are applied together
 /// - Single epoch is assinged for an entier transaction
@@ -909,13 +909,13 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
 ///
 /// assert_eq!((v0, v1, v2), (0x0A, 0x14, 0x18));
 /// ```
-pub struct FMTransaction<'a, T> {
+pub struct FrozenMMapTransaction<'a, T> {
     core: &'a Core,
     ops_vec: Vec<(usize, Box<dyn FnOnce(*mut T) + 'a>)>,
 }
 
-impl<'a, T> FMTransaction<'a, T> {
-    /// Append a write op into the [`FMTransaction`]
+impl<'a, T> FrozenMMapTransaction<'a, T> {
+    /// Append a write op into the [`FrozenMMapTransaction`]
     ///
     /// ## Requirements
     ///
