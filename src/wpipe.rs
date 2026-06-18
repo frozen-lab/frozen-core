@@ -97,13 +97,8 @@
 //! assert!(durable_epoch >= 3);
 //! ```
 
-use crate::{
-    bufpool,
-    error::{FrozenError, FrozenResult},
-    ffile, hints, mpscq,
-};
+use crate::{ack, bufpool, error::FrozenResult, ffile, mpscq};
 use std::{
-    ptr,
     sync::{self, atomic},
     thread, time,
 };
@@ -350,17 +345,17 @@ impl WritePipe {
     /// );
     /// ```
     #[inline]
-    pub fn write(&self, request: WriteRequest) -> FrozenResult<WriteTicket> {
+    pub fn write(&self, request: WriteRequest) -> FrozenResult<ack::AckTicket> {
         let _io_lock = self.core.acquire_shared_io_lock();
-        if let Some(frozen_error) = self.core.completion.error.get() {
+        if let Some(frozen_error) = self.core.completion.get_err() {
             return Err(frozen_error);
         }
 
-        let epoch = self.core.increment_current_epoch();
+        let epoch = self.core.completion.increment_current_epoch();
         let internal_req = WriteRequestInternal { request, epoch };
         self.core.queue.push(internal_req);
 
-        Ok(WriteTicket { epoch, completion: self.core.completion.clone() })
+        Ok(ack::AckTicket::new(epoch, self.core.completion.clone()))
     }
 }
 
@@ -469,178 +464,6 @@ pub struct WriteRequest {
     pub slot_index: usize,
 }
 
-/// Durability handle associated with the submitted write operation via [`WritePipe::write`]
-///
-/// ## Epoch
-///
-/// Every ticket is assigned a monotonically increasing epoch to moniter durability
-///
-/// ## Durability Guarantee
-///
-/// If wanted, the ticket could be awaited to poll till the epoch becomes durable.
-///
-/// Once a await on ticket is completed successfully, all writes assigned to earlier epochs are
-/// also guaranteed to be durable.
-///
-/// *NOTE:* Using `await` is optional. Callers that only require fire-and-forget semantics may
-/// simply discard the returned ticket.
-///
-/// ## Example
-///
-/// ```
-/// use frozen_core::{bufpool, ffile, utils, wpipe};
-/// use std::{ptr, sync, time};
-///
-/// const MODULE_ID: u8 = 0x00;
-/// const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
-///
-/// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
-/// let path = dir.path().join("wpipe_example");
-///
-/// let file_cfg = ffile::FrozenFileCfg {
-///     path,
-///     module_id: MODULE_ID,
-///     initial_available_buffers: 0x400,
-///     buffer_size: BUFFER_SIZE as usize,
-/// };
-/// let file = sync::Arc::new(
-///     ffile::FrozenFile::new(file_cfg)
-///         .expect("file creation should succeed"),
-/// );
-///
-/// let pool_cfg = bufpool::BufPoolCfg {
-///     buffer_size: utils::BufferSize::S128,
-///     max_memory: 0x400 * BUFFER_SIZE as usize,
-/// };
-/// let pool = bufpool::BufPool::new(pool_cfg);
-///
-/// let pipe_cfg = wpipe::WritePipeCfg {
-///     module_id: MODULE_ID,
-///     flush_duration: time::Duration::from_millis(1),
-/// };
-/// let pipe = wpipe::WritePipe::new(pipe_cfg, file)
-///     .expect("pipe creation should succeed");
-///
-/// let payload = vec![0x0A; BUFFER_SIZE as usize];
-/// let allocation = pool.allocate(1);
-///
-/// unsafe {ptr::copy_nonoverlapping(
-///     payload.as_ptr(),
-///     allocation.first(),
-///     payload.len()
-/// )};
-///
-/// let ticket = pipe.write(wpipe::WriteRequest {allocation, slot_index: 0})
-///     .unwrap();
-/// let epoch = ticket.epoch();
-///
-/// assert!(epoch > 0);
-/// ```
-#[derive(Debug)]
-pub struct WriteTicket {
-    epoch: u64,
-    completion: sync::Arc<Completion>,
-}
-
-impl WriteTicket {
-    /// Read assigned durability epoch for the [`WriteTicket`]
-    ///
-    /// ## Example
-    ///
-    /// ```
-    /// use frozen_core::{bufpool, ffile, utils, wpipe};
-    /// use std::{ptr, sync, time};
-    ///
-    /// const MODULE_ID: u8 = 0x00;
-    /// const BUFFER_SIZE: utils::BufferSize = utils::BufferSize::S128;
-    ///
-    /// let dir = tempfile::tempdir().expect("tempdir creation should succeed");
-    /// let path = dir.path().join("wpipe_example");
-    ///
-    /// let file_cfg = ffile::FrozenFileCfg {
-    ///     path,
-    ///     module_id: MODULE_ID,
-    ///     initial_available_buffers: 0x400,
-    ///     buffer_size: BUFFER_SIZE as usize,
-    /// };
-    /// let file = sync::Arc::new(
-    ///     ffile::FrozenFile::new(file_cfg)
-    ///         .expect("file creation should succeed"),
-    /// );
-    ///
-    /// let pool_cfg = bufpool::BufPoolCfg {
-    ///     buffer_size: utils::BufferSize::S128,
-    ///     max_memory: 0x400 * BUFFER_SIZE as usize,
-    /// };
-    /// let pool = bufpool::BufPool::new(pool_cfg);
-    ///
-    /// let pipe_cfg = wpipe::WritePipeCfg {
-    ///     module_id: MODULE_ID,
-    ///     flush_duration: time::Duration::from_millis(1),
-    /// };
-    /// let pipe = wpipe::WritePipe::new(pipe_cfg, file)
-    ///     .expect("pipe creation should succeed");
-    ///
-    /// let payload = vec![0x0A; BUFFER_SIZE as usize];
-    /// let allocation = pool.allocate(1);
-    ///
-    /// unsafe {ptr::copy_nonoverlapping(
-    ///     payload.as_ptr(),
-    ///     allocation.first(),
-    ///     payload.len()
-    /// )};
-    ///
-    /// let ticket = pipe.write(wpipe::WriteRequest {allocation, slot_index: 0})
-    ///     .unwrap();
-    /// let epoch = ticket.epoch();
-    ///
-    /// assert!(epoch > 0);
-    /// ```
-    pub const fn epoch(&self) -> u64 {
-        self.epoch
-    }
-
-    #[inline]
-    fn is_ready(&self) -> bool {
-        let durable = self.completion.durable_epoch.load(atomic::Ordering::Acquire);
-        if hints::likely(durable >= self.epoch) {
-            return true;
-        }
-
-        false
-    }
-}
-
-impl std::future::Future for WriteTicket {
-    type Output = FrozenResult<u64>;
-
-    #[inline(always)]
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        if self.is_ready() {
-            return std::task::Poll::Ready(Ok(self.epoch));
-        }
-
-        if let Some(frozen_error) = self.completion.error.get() {
-            return std::task::Poll::Ready(Err(frozen_error));
-        }
-
-        self.completion.waker.register(cx.waker());
-
-        if self.is_ready() {
-            return std::task::Poll::Ready(Ok(self.epoch));
-        }
-
-        if let Some(frozen_error) = self.completion.error.get() {
-            return std::task::Poll::Ready(Err(frozen_error));
-        }
-
-        std::task::Poll::Pending
-    }
-}
-
 /// ## Why we ignore [`std::sync::PoisonError`]?
 ///
 /// The mutex used for lock, is solely used as a parking primitive for [`Condvar`] and does not
@@ -681,8 +504,8 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
         let (_min_index, _max_index, max_epoch) = match core.write_queued_ops(queued_ops) {
             Ok(res) => res,
             Err(new_error) => {
-                core.completion.error.set(new_error);
-                core.completion.waker.wake();
+                core.completion.set_err(new_error);
+                core.completion.notify_all_listeners();
                 drop(_io_lock);
 
                 continue;
@@ -692,8 +515,8 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
         // NOTE: On linux, we can initiate writeback (best-effort only) for a given range
         #[cfg(target_os = "linux")]
         if let Err(new_error) = core.file.sync_range(_min_index, _max_index - _min_index) {
-            core.completion.error.set(new_error);
-            core.completion.waker.wake();
+            core.completion.set_err(new_error);
+            core.completion.notify_all_listeners();
             drop(_io_lock);
 
             continue;
@@ -707,23 +530,23 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
         // old data as well.
 
         if let Err(new_error) = core.file.sync() {
-            core.completion.error.set(new_error);
-            core.completion.waker.wake();
+            core.completion.set_err(new_error);
             drop(_io_lock);
 
             continue;
         } else {
             core.completion.mark_epoch_as_durable(max_epoch);
-            core.completion.error.del();
+            core.completion.del_err();
         }
+
+        core.completion.notify_all_listeners();
     }
 }
 
 #[derive(Debug)]
 struct Core {
-    completion: sync::Arc<Completion>,
+    completion: sync::Arc<ack::Completion>,
     closed: atomic::AtomicBool,
-    epoch: atomic::AtomicU64,
     file: sync::Arc<ffile::FrozenFile>,
     flush_cv: sync::Condvar,
     flush_guard: sync::Mutex<()>,
@@ -735,9 +558,8 @@ impl Core {
     fn new(file: sync::Arc<ffile::FrozenFile>) -> Self {
         Self {
             file,
-            completion: sync::Arc::new(Completion::default()),
+            completion: sync::Arc::new(ack::Completion::default()),
             closed: atomic::AtomicBool::new(false),
-            epoch: atomic::AtomicU64::new(0),
             flush_cv: sync::Condvar::new(),
             flush_guard: sync::Mutex::new(()),
             io_lock: sync::RwLock::new(()),
@@ -785,90 +607,12 @@ impl Core {
 
         Ok((min_index, max_index, max_epoch))
     }
-
-    #[inline]
-    fn increment_current_epoch(&self) -> u64 {
-        self.epoch.fetch_add(1, atomic::Ordering::AcqRel).wrapping_add(1)
-    }
 }
 
 #[derive(Debug)]
 struct WriteRequestInternal {
     epoch: u64,
     request: WriteRequest,
-}
-
-#[derive(Debug)]
-struct Completion {
-    durable_epoch: atomic::AtomicU64,
-    error: FlushError,
-    waker: futures::task::AtomicWaker,
-}
-
-impl Default for Completion {
-    fn default() -> Self {
-        Self {
-            durable_epoch: atomic::AtomicU64::new(0),
-            waker: futures::task::AtomicWaker::new(),
-            error: FlushError::default(),
-        }
-    }
-}
-
-impl Completion {
-    fn mark_epoch_as_durable(&self, epoch: u64) {
-        self.durable_epoch.store(epoch, atomic::Ordering::Release);
-        self.waker.wake();
-    }
-}
-
-#[derive(Debug)]
-struct FlushError(atomic::AtomicPtr<FrozenError>);
-
-impl Default for FlushError {
-    fn default() -> Self {
-        Self(atomic::AtomicPtr::new(ptr::null_mut()))
-    }
-}
-
-impl Drop for FlushError {
-    fn drop(&mut self) {
-        let err_ptr = self.0.load(atomic::Ordering::Acquire);
-        if !err_ptr.is_null() {
-            let _ = unsafe { Box::from_raw(err_ptr) };
-        }
-    }
-}
-
-impl FlushError {
-    #[inline]
-    fn get(&self) -> Option<FrozenError> {
-        let curr_err = self.0.load(atomic::Ordering::Acquire);
-        if hints::unlikely(!curr_err.is_null()) {
-            let frozen_error = unsafe { (*curr_err).clone() };
-            return Some(frozen_error);
-        }
-
-        None
-    }
-
-    #[inline]
-    fn set(&self, new_error: FrozenError) {
-        let boxed_error = Box::into_raw(Box::new(new_error));
-        let old_err = self.0.swap(boxed_error, atomic::Ordering::AcqRel);
-
-        if hints::unlikely(!old_err.is_null()) {
-            let _ = unsafe { Box::from_raw(old_err) };
-        }
-    }
-
-    #[inline]
-    fn del(&self) {
-        let old_err = self.0.swap(ptr::null_mut(), atomic::Ordering::AcqRel);
-        if hints::unlikely(!old_err.is_null()) {
-            let _ = unsafe { Box::from_raw(old_err) };
-        }
-    }
 }
 
 mod err {
@@ -929,7 +673,7 @@ mod tests {
     ) -> bufpool::BufPoolAllocation {
         let allocation = pool.allocate(n);
         for allocated_buf in allocation.iter() {
-            unsafe { ptr::copy_nonoverlapping(buf_ptr, allocated_buf, BUFFER_SIZE as usize) };
+            unsafe { std::ptr::copy_nonoverlapping(buf_ptr, allocated_buf, BUFFER_SIZE as usize) };
         }
 
         allocation
@@ -1276,14 +1020,14 @@ mod tests {
             }
             assert_eq!(tickets.len(), THREADS * WRITES_PER_THREAD,);
 
-            let mut epochs: Vec<u64> = tickets.iter().map(WriteTicket::epoch).collect();
+            let mut epochs: Vec<u64> = tickets.iter().map(ack::AckTicket::epoch).collect();
             epochs.sort_unstable();
 
             for (ed, observed) in (1u64..=epochs.len() as u64).zip(epochs.iter().copied()) {
                 assert_eq!(ed, observed);
             }
 
-            let latest_ticket = tickets.into_iter().max_by_key(WriteTicket::epoch).unwrap();
+            let latest_ticket = tickets.into_iter().max_by_key(ack::AckTicket::epoch).unwrap();
             let durable_epoch = futures::executor::block_on(latest_ticket).unwrap();
             assert_eq!(durable_epoch, (THREADS * WRITES_PER_THREAD) as u64,);
         }

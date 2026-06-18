@@ -41,12 +41,11 @@ hints = []
 mpscq = []
 bufpool = ["error", "hints"]
 wpipe = [
+    "ack",
     "error",
     "ffile",
     "mpscq",
-    "hints",
     "bufpool",
-    "futures",
 ]
 ffile = [
     "libc",
