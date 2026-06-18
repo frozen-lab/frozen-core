@@ -550,7 +550,11 @@ where
     /// assert_eq!(val, 0x2B);
     /// ```
     #[inline(always)]
-    pub unsafe fn write(&self, index: usize, f: impl FnOnce(*mut T)) -> FrozenResult<TEpoch> {
+    pub unsafe fn write(
+        &self,
+        index: usize,
+        f: impl FnOnce(*mut T),
+    ) -> FrozenResult<ack::AckTicket> {
         // propagate prev errors
         if let Some(err) = self.core.completion.get_err() {
             return Err(err);
@@ -567,7 +571,7 @@ where
         self.core.dirty.store(true, atomic::Ordering::Release);
         let epoch = self.core.completion.increment_current_epoch();
 
-        Ok(epoch)
+        Ok(ack::AckTicket::new(epoch, self.core.completion.clone()))
     }
 
     /// Read current available count of slots, where each slot has size of [`FrozenMMap::<T>::SLOT_SIZE`]
@@ -1022,7 +1026,7 @@ impl<'a, T> FMTransaction<'a, T> {
     /// assert_eq!((v0, v1), (0x0A, 0x0C));
     /// ```
     #[inline(always)]
-    pub fn commit(self) -> FrozenResult<u64> {
+    pub fn commit(self) -> FrozenResult<ack::AckTicket> {
         if let Some(err) = self.core.completion.get_err() {
             return Err(err);
         }
@@ -1044,13 +1048,13 @@ impl<'a, T> FMTransaction<'a, T> {
         self.core.dirty.store(true, atomic::Ordering::Release);
         let epoch = self.core.completion.increment_current_epoch();
 
-        Ok(epoch)
+        Ok(ack::AckTicket::new(epoch, self.core.completion.clone()))
     }
 }
 
 #[derive(Debug)]
 struct Core {
-    completion: ack::Completion,
+    completion: sync::Arc<ack::Completion>,
     cv: sync::Condvar,
     curr_length: usize,
     dirty: atomic::AtomicBool,
@@ -1072,7 +1076,7 @@ impl Core {
             map,
             file,
             curr_length,
-            completion: ack::Completion::default(),
+            completion: sync::Arc::new(ack::Completion::default()),
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
             io_lock: sync::RwLock::new(()),
@@ -1208,18 +1212,23 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
-            assert_eq!(mmap.core.flush_duration, FLUSH_DURATION);
             assert!(!mmap.core.dirty.load(atomic::Ordering::Acquire));
             assert!(!mmap.core.closed.load(atomic::Ordering::Acquire));
-            assert_eq!(mmap.core.durable_epoch.load(atomic::Ordering::Acquire), 0);
             assert_eq!(mmap.core.curr_length, INIT_SLOTS * FrozenMMap::<u64>::SLOT_SIZE);
 
+            assert_eq!(mmap.core.completion.read_current_epoch(), 0);
+            assert_eq!(mmap.core.completion.read_durable_epoch(), 0);
+
             // satisfies the bg thread was spawned correctly
-            assert!(mmap.core.error.load(atomic::Ordering::Acquire).is_null());
+            assert!(mmap.core.completion.get_err().is_none());
 
             // satisfies wait on epoch works
-            let epoch = unsafe { mmap.write(0, |f| *f = 0x0A).unwrap() };
-            assert!(mmap.wait_for_durability(epoch).is_ok());
+            let ticket = unsafe { mmap.write(0, |f| *f = 0x0A).unwrap() };
+
+            let ticket_epoch = ticket.epoch();
+            let durable_epoch = futures::executor::block_on(ticket).unwrap();
+
+            assert!(durable_epoch >= ticket_epoch);
         }
 
         #[test]
@@ -1501,8 +1510,12 @@ mod tests {
             let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
             // write + sync
-            let epoch = unsafe { mmap.write(0, |ptr| *ptr = VAL).unwrap() };
-            mmap.wait_for_durability(epoch).unwrap();
+            let ticket = unsafe { mmap.write(0, |ptr| *ptr = VAL).unwrap() };
+
+            let ticket_epoch = ticket.epoch();
+            let durable_epoch = futures::executor::block_on(ticket).unwrap();
+
+            assert!(durable_epoch >= ticket_epoch);
 
             // read + verify
             let val = unsafe { mmap.read(0, |ptr| *ptr).unwrap() };
@@ -1521,79 +1534,6 @@ mod tests {
         }
     }
 
-    mod fm_write_sync_read {
-        use super::*;
-
-        #[test]
-        fn ok_write_sync_read() {
-            let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
-
-            unsafe { mmap.write_sync(0, |v| *v = 0x4C).unwrap() };
-
-            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
-            assert_eq!(val, 0x4C);
-        }
-
-        #[test]
-        fn ok_write_sync_wait_returns_immediately() {
-            let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
-
-            let _ = unsafe { mmap.write_sync(0, |v| *v = 0x6A).unwrap() };
-
-            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
-            assert_eq!(val, 0x6A);
-        }
-
-        #[test]
-        fn ok_write_sync_followed_by_async_write() {
-            let (_dir, path, cfg) = new_tmp();
-
-            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
-            unsafe { mmap.write_sync(0, |v| *v = 0x0A).unwrap() };
-
-            let epoch = unsafe { mmap.write(0, |v| *v = 0x14).unwrap() };
-            mmap.wait_for_durability(epoch).unwrap();
-
-            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
-            assert_eq!(val, 0x14);
-        }
-
-        #[test]
-        fn ok_write_sync_makes_prev_batch_durable() {
-            let (_dir, path, cfg) = new_tmp();
-            let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
-
-            let async_epoch = unsafe { mmap.write(0, |v| *v = 1).unwrap() };
-            unsafe { mmap.write_sync(1, |v| *v = 2).unwrap() };
-            mmap.wait_for_durability(async_epoch).unwrap();
-
-            let v1 = unsafe { mmap.read(0, |v| *v).unwrap() };
-            let v2 = unsafe { mmap.read(1, |v| *v).unwrap() };
-
-            assert_eq!(v1, 1);
-            assert_eq!(v2, 2);
-        }
-
-        #[test]
-        fn ok_write_sync_persists_across_reopen() {
-            let (_dir, path, cfg) = new_tmp();
-            const VAL: u64 = 0x1000;
-
-            {
-                let mmap = FrozenMMap::<u64>::new(&path, cfg.clone()).unwrap();
-                unsafe { mmap.write_sync(0, |v| *v = VAL).unwrap() };
-            }
-
-            {
-                let mmap = FrozenMMap::<u64>::new(&path, cfg.clone()).unwrap();
-                let val = unsafe { mmap.read(0, |v| *v).unwrap() };
-                assert_eq!(val, VAL);
-            }
-        }
-    }
-
     mod fm_tx {
         use super::*;
 
@@ -1609,8 +1549,12 @@ mod tests {
                 tx.write(2, |v| *v = 3).unwrap();
             }
 
-            let epoch = tx.commit().unwrap();
-            mmap.wait_for_durability(epoch).unwrap();
+            let ticket = tx.commit().unwrap();
+
+            let ticket_epoch = ticket.epoch();
+            let durable_epoch = futures::executor::block_on(ticket).unwrap();
+
+            assert!(durable_epoch >= ticket_epoch);
 
             let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
             let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
@@ -1632,10 +1576,10 @@ mod tests {
 
             // NOTE: next write must have strictly higher epoch then current one
 
-            let epoch = tx.commit().unwrap();
-            let next_epoch = unsafe { mmap.write(2, |v| *v = 0x1E).unwrap() };
+            let ticket = tx.commit().unwrap();
+            let next_ticket = unsafe { mmap.write(2, |v| *v = 0x1E).unwrap() };
 
-            assert!(next_epoch > epoch);
+            assert!(next_ticket.epoch() > ticket.epoch());
         }
 
         #[test]
@@ -1680,8 +1624,12 @@ mod tests {
                         tx.write(i * 2 + 1, |v| *v = i as u64).unwrap();
                     }
 
-                    let epoch = tx.commit().unwrap();
-                    mmap.wait_for_durability(epoch).unwrap();
+                    let ticket = tx.commit().unwrap();
+
+                    let ticket_epoch = ticket.epoch();
+                    let durable_epoch = futures::executor::block_on(ticket).unwrap();
+
+                    assert!(durable_epoch >= ticket_epoch);
                 }));
             }
 
@@ -1714,8 +1662,12 @@ mod tests {
                 tx2.write(0, |v| *v = 2).unwrap();
             }
 
-            let epoch = tx2.commit().unwrap();
-            mmap.wait_for_durability(epoch).unwrap();
+            let ticket = tx2.commit().unwrap();
+
+            let ticket_epoch = ticket.epoch();
+            let durable_epoch = futures::executor::block_on(ticket).unwrap();
+
+            assert!(durable_epoch >= ticket_epoch);
 
             let val = unsafe { mmap.read(0, |v| *v).unwrap() };
             assert_eq!(val, 2);
@@ -1734,8 +1686,12 @@ mod tests {
                     tx.write(1, |v| *v = 0x54).unwrap();
                 }
 
-                let epoch = tx.commit().unwrap();
-                mmap.wait_for_durability(epoch).unwrap();
+                let ticket = tx.commit().unwrap();
+
+                let ticket_epoch = ticket.epoch();
+                let durable_epoch = futures::executor::block_on(ticket).unwrap();
+
+                assert!(durable_epoch >= ticket_epoch);
             }
 
             {
@@ -1757,8 +1713,12 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
-            let epoch = unsafe { mmap.write(0, |v| *v = 7).unwrap() };
-            mmap.wait_for_durability(epoch).unwrap();
+            let ticket = unsafe { mmap.write(0, |v| *v = 7).unwrap() };
+
+            let ticket_epoch = ticket.epoch();
+            let durable_epoch = futures::executor::block_on(ticket).unwrap();
+
+            assert!(durable_epoch >= ticket_epoch);
 
             drop(mmap);
         }
@@ -1768,12 +1728,11 @@ mod tests {
             let (_dir, path, cfg) = new_tmp();
             let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
-            let e1 = unsafe { mmap.write(0, |v| *v = 1).unwrap() };
-            mmap.wait_for_durability(e1).unwrap();
+            let t1 = unsafe { mmap.write(0, |v| *v = 1).unwrap() };
+            let t2 = unsafe { mmap.write(0, |v| *v = 2).unwrap() };
 
-            let e2 = unsafe { mmap.write(0, |v| *v = 2).unwrap() };
-            mmap.wait_for_durability(e2).unwrap();
-            assert!(e2 >= e1);
+            let durable_epoch = futures::executor::block_on(t2).unwrap();
+            assert!(durable_epoch >= t1.epoch());
         }
 
         #[test]
@@ -1785,8 +1744,12 @@ mod tests {
             for _ in 0..2 {
                 let mmap = mmap.clone();
                 handles.push(thread::spawn(move || {
-                    let epoch = unsafe { mmap.write(0, |v| *v += 1).unwrap() };
-                    mmap.wait_for_durability(epoch).unwrap();
+                    let ticket = unsafe { mmap.write(0, |v| *v += 1).unwrap() };
+
+                    let ticket_epoch = ticket.epoch();
+                    let durable_epoch = futures::executor::block_on(ticket).unwrap();
+
+                    assert!(durable_epoch >= ticket_epoch);
                 }));
             }
 
