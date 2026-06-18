@@ -39,8 +39,8 @@
 //! let mmap = FrozenMMap::<u64>::new(&path, cfg.clone()).unwrap();
 //! assert_eq!(mmap.total_slots(), 0x0A);
 //!
-//! let epoch = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
-//! mmap.wait_for_durability(epoch).unwrap();
+//! let ticket = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
+//! let _ = futures::executor::block_on(ticket).unwrap();
 //!
 //! let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
 //! assert_eq!(val, 0xDEADC0DE);
@@ -201,8 +201,8 @@ pub struct FrozenMMapCfg {
 /// let mmap = FrozenMMap::<u64>::new(&path, cfg.clone()).unwrap();
 /// assert_eq!(mmap.total_slots(), 0x0A);
 ///
-/// let epoch = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
-/// mmap.wait_for_durability(epoch).unwrap();
+/// let ticket = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
+/// let _ = futures::executor::block_on(ticket).unwrap();
 ///
 /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
 /// assert_eq!(val, 0xDEADC0DE);
@@ -284,8 +284,8 @@ where
     /// let mmap = FrozenMMap::<u64>::new(&path, cfg.clone()).unwrap();
     /// assert_eq!(mmap.total_slots(), 0x0A);
     ///
-    /// let epoch = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
-    /// mmap.wait_for_durability(epoch).unwrap();
+    /// let ticket = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
+    /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
     /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0xDEADC0DE);
@@ -370,8 +370,8 @@ where
     /// let mmap = FrozenMMap::<u64>::new_grown(&path, cfg.clone(), 0x0A).unwrap();
     /// assert_eq!(mmap.total_slots(), 0x0A * 2);
     ///
-    /// let epoch = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
-    /// mmap.wait_for_durability(epoch).unwrap();
+    /// let ticket = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
+    /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
     /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0xDEADC0DE);
@@ -489,8 +489,8 @@ where
     ///
     /// let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
     ///
-    /// let epoch = unsafe { mmap.write(0, |v| *v = 0x0A) }.unwrap();
-    /// mmap.wait_for_durability(epoch).unwrap();
+    /// let ticket = unsafe { mmap.write(0, |v| *v = 0x0A) }.unwrap();
+    /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
     /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
     /// assert_eq!(val, 0x0A);
@@ -543,8 +543,8 @@ where
     ///
     /// let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
     ///
-    /// let epoch = unsafe {mmap.write(1, |v| *v = 0x2B) }.unwrap();
-    /// mmap.wait_for_durability(epoch).unwrap();
+    /// let ticket = unsafe {mmap.write(1, |v| *v = 0x2B) }.unwrap();
+    /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
     /// let val = unsafe { mmap.read(1, |v| *v) }.unwrap();
     /// assert_eq!(val, 0x2B);
@@ -684,8 +684,8 @@ where
     /// unsafe { tx.write(0, |v| *v = 0x0A) }.unwrap();
     /// unsafe { tx.write(1, |v| *v = 0x14) }.unwrap();
     ///
-    /// let epoch = tx.commit().unwrap();
-    /// mmap.wait_for_durability(epoch).unwrap();
+    /// let ticket = tx.commit().unwrap();
+    /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
     /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
     /// let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
@@ -900,8 +900,8 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
 /// unsafe { tx.write(1, |v| *v = 0x14) }.unwrap();
 /// unsafe { tx.write(2, |v| *v = 0x18) }.unwrap();
 ///
-/// let epoch = tx.commit().unwrap();
-/// mmap.wait_for_durability(epoch).unwrap();
+/// let ticket = tx.commit().unwrap();
+/// let _ = futures::executor::block_on(ticket).unwrap();
 ///
 /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
 /// let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
@@ -953,8 +953,8 @@ impl<'a, T> FrozenMMapTransaction<'a, T> {
     /// unsafe { tx.write(1, |v| *v = 0x0B) }.unwrap();
     /// unsafe { tx.write(2, |v| *v = 0x0C) }.unwrap();
     ///
-    /// let epoch = tx.commit().unwrap();
-    /// mmap.wait_for_durability(epoch).unwrap();
+    /// let ticket = tx.commit().unwrap();
+    /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
     /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
     /// let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
@@ -1017,8 +1017,8 @@ impl<'a, T> FrozenMMapTransaction<'a, T> {
     /// unsafe { tx.write(0, |v| *v = 0x0A) }.unwrap();
     /// unsafe { tx.write(2, |v| *v = 0x0C) }.unwrap();
     ///
-    /// let epoch = tx.commit().unwrap();
-    /// mmap.wait_for_durability(epoch).unwrap();
+    /// let ticket = tx.commit().unwrap();
+    /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
     /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
     /// let v1 = unsafe { mmap.read(2, |v| *v).unwrap() };
