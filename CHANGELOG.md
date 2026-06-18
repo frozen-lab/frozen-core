@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.26`
+
+- Migrated `wpipe::WritePipe` to use `ack` module for future impl and durability guarantee (#61)
+
 ## `0.0.25`
 
 - Migrated `fmmap::FrozenMMap` to use `ack` for future impl and durability guarantee (#57)
