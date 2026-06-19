@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.27`
+
+- Implementation of immediate durability mode for the rare write workloads (#63)
+
 ## `0.0.26`
 
 - Migrated `wpipe::WritePipe` to use `ack` module for future impl and durability guarantee (#61)
