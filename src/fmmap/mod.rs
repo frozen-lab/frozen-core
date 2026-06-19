@@ -33,6 +33,7 @@
 //! let cfg = FrozenMMapCfg {
 //!     module_id: MODULE_ID,
 //!     initial_count: 0x0A,
+//!     immediate_durability: false,
 //!     flush_duration: std::time::Duration::from_micros(0x96),
 //! };
 //!
@@ -158,6 +159,20 @@ pub struct FrozenMMapCfg {
     /// Time interval used by flusher tx, to batch write ops into a durable window and sync them
     /// together, where all write ops in certain time interval falls into a single durable window
     pub flush_duration: time::Duration,
+
+    /// Enables immediate durability scheduing write operations
+    ///
+    /// When disabled, durability is driven by the background flusher thread with respect to
+    /// [`FrozenMMapCfg::flush_duration`] time interval, allowing multiple write calls to be
+    /// bathced and flushed together into a single sync operation, reducing strain on resources.
+    ///
+    /// When enabled, every successful [`FrozenMMap::write`] and [`FrozenMMapTransaction::commit`]
+    /// immediately wakes the background flusher thread, disregarding the
+    /// [`FrozenMMapCfg::flush_duration`] time interval.
+    ///
+    /// This configuration is intended for workloads where writes are rare and durability latency
+    /// is preferred over batching efficiency.
+    pub immediate_durability: bool,
 }
 
 /// Custom implementation of `mmap(2)`
@@ -195,6 +210,7 @@ pub struct FrozenMMapCfg {
 /// let cfg = FrozenMMapCfg {
 ///     module_id: MODULE_ID,
 ///     initial_count: 0x0A,
+///     immediate_durability: false,
 ///     flush_duration: std::time::Duration::from_micros(0x96),
 /// };
 ///
@@ -278,6 +294,7 @@ where
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x0A,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
@@ -364,6 +381,7 @@ where
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x0A,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
@@ -484,6 +502,7 @@ where
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x02,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(0x60),
     /// };
     ///
@@ -538,6 +557,7 @@ where
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x02,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
@@ -595,6 +615,7 @@ where
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x02,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
@@ -629,6 +650,7 @@ where
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x10,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(0x60),
     /// };
     ///
@@ -675,6 +697,7 @@ where
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x0A,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(50),
     /// };
     ///
@@ -726,6 +749,7 @@ where
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x04,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
@@ -768,6 +792,7 @@ where
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x04,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
@@ -794,6 +819,7 @@ where
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x04,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(0x96),
     /// };
     ///
@@ -945,6 +971,7 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
 /// let cfg = FrozenMMapCfg {
 ///     module_id: MODULE_ID,
 ///     initial_count: 0x0A,
+///     immediate_durability: false,
 ///     flush_duration: std::time::Duration::from_micros(50),
 /// };
 ///
@@ -998,6 +1025,7 @@ impl<'a, T> FrozenMMapTransaction<'a, T> {
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x10,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(50),
     /// };
     ///
@@ -1063,6 +1091,7 @@ impl<'a, T> FrozenMMapTransaction<'a, T> {
     /// let cfg = FrozenMMapCfg {
     ///     module_id: MODULE_ID,
     ///     initial_count: 0x10,
+    ///     immediate_durability: false,
     ///     flush_duration: std::time::Duration::from_micros(50),
     /// };
     ///
@@ -1253,6 +1282,7 @@ mod tests {
         let cfg = FrozenMMapCfg {
             module_id: MODULE_ID,
             initial_count: INIT_SLOTS,
+            immediate_durability: false,
             flush_duration: FLUSH_DURATION,
         };
 
