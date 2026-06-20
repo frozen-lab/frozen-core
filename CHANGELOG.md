@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.28`
+
+- Added build targets metadata for `docs.rs` build (#65)
+
 ## `0.0.27`
 
 - Implementation of immediate durability mode for the rare write workloads (#63)
