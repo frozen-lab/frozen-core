@@ -25,7 +25,7 @@ where
 
         let mut nexts = Vec::with_capacity(capacity);
         for idx in 0..(capacity as u32) {
-            nexts.push(atomic::AtomicU32::new(if idx + 1 == MAX_NODE {
+            nexts.push(atomic::AtomicU32::new(if idx + 1 == capacity as u32 {
                 MAX_NODE
             } else {
                 idx + 1
