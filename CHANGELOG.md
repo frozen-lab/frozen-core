@@ -1,5 +1,9 @@
 # Changelog
 
+## `0.0.29`
+
+- Impl of `reservoir` module (#67)
+
 ## `0.0.28`
 
 - Added build targets metadata for `docs.rs` build (#65)
