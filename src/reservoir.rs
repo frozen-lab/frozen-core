@@ -163,3 +163,173 @@ fn pack(index: u32, version: u32) -> u64 {
 fn unpack(value: u64) -> (u32, u32) {
     (value as u32, (value >> 0x20) as u32)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn ok_create_and_basic_acquire() {
+        let pool = Reservoir::new(vec![0x0A, 0x1A, 0x2A]);
+
+        let permit = pool.acquire();
+        assert_eq!(*permit, 0x0A);
+    }
+
+    mod deref {
+        use super::*;
+
+        #[test]
+        fn ok_deref_and_deref_mut_coercion() {
+            let pool = Reservoir::new(vec![String::from("hello")]);
+
+            {
+                let mut permit = pool.acquire();
+                assert_eq!(permit.len(), 5);
+
+                permit.push_str(" world");
+            }
+
+            let permit = pool.acquire();
+            assert_eq!(*permit, "hello world");
+        }
+    }
+
+    #[test]
+    fn ok_exhaustion_and_sequential_reuse() {
+        let pool = Reservoir::new(vec![1, 2]);
+
+        let p1 = pool.acquire();
+        let p2 = pool.acquire();
+        drop(p1);
+
+        let p3 = pool.acquire();
+        assert_eq!(*p3, 1);
+        assert_eq!(*p2, 2);
+    }
+
+    #[test]
+    fn ok_acquire_blocks_until_notified() {
+        let pool = Arc::new(Reservoir::new(vec![0x3C]));
+        let permit = pool.acquire();
+
+        let pool_clone = Arc::clone(&pool);
+        let worker = thread::spawn(move || {
+            let p = pool_clone.acquire();
+            assert_eq!(*p, 0x3C);
+        });
+
+        thread::sleep(Duration::from_millis(0x32));
+        drop(permit);
+
+        worker.join().expect("Worker thread panicked");
+    }
+
+    #[test]
+    fn ok_concurrent_stress_test() {
+        const CAPACITY: usize = 0x0A;
+        const THREADS: usize = 0x32;
+        const ITERATIONS: usize = 0x64;
+
+        let pool = Arc::new(Reservoir::new(vec![0; CAPACITY]));
+        let mut handles = Vec::new();
+
+        for _ in 0..THREADS {
+            let pool_clone = Arc::clone(&pool);
+            handles.push(thread::spawn(move || {
+                for _ in 0..ITERATIONS {
+                    let mut permit = pool_clone.acquire();
+                    *permit += 1;
+
+                    thread::yield_now();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let mut total_sum = 0;
+        let mut _held_permits = Vec::with_capacity(CAPACITY);
+
+        for _ in 0..CAPACITY {
+            let permit = pool.acquire();
+            total_sum += *permit;
+            _held_permits.push(permit);
+        }
+
+        assert_eq!(total_sum, THREADS * ITERATIONS);
+    }
+
+    #[test]
+    #[should_panic]
+    fn err_zero_capacity_panics_on_acquire() {
+        let pool: Reservoir<u32> = Reservoir::new(vec![]);
+        let _permit = pool.acquire();
+    }
+
+    #[test]
+    #[should_panic]
+    fn err_capacity_exceeds_max_node() {
+        let massive_vec: Vec<()> = vec![(); MAX_NODE as usize];
+        let _pool = Reservoir::new(massive_vec);
+    }
+
+    #[test]
+    fn ok_multiple_waiters_wake_sequentially() {
+        let pool = Arc::new(Reservoir::new(vec![1, 2]));
+
+        let p1 = pool.acquire();
+        let p2 = pool.acquire();
+
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let pool_clone = Arc::clone(&pool);
+            handles.push(thread::spawn(move || {
+                let _permit = pool_clone.acquire();
+                thread::sleep(Duration::from_millis(0x0A));
+            }));
+        }
+
+        thread::sleep(Duration::from_millis(0x32));
+
+        drop(p1);
+        drop(p2);
+
+        for handle in handles {
+            handle.join().expect("Thread panicked or deadlocked");
+        }
+
+        assert_eq!(pool.resources.len(), 2);
+    }
+
+    #[test]
+    fn ok_permit_dropped_on_thread_panic() {
+        let pool = Arc::new(Reservoir::new(vec![0x63]));
+
+        let pool_clone = Arc::clone(&pool);
+        let result = thread::spawn(move || {
+            let _permit = pool_clone.acquire();
+            panic!("Intentional crash!");
+        })
+        .join();
+
+        assert!(result.is_err());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let permit = pool.acquire();
+            tx.send(*permit).unwrap();
+        });
+
+        let recovered_value = rx
+            .recv_timeout(Duration::from_millis(0x64))
+            .expect("Permit leaked during panic! Resource was not returned.");
+
+        assert_eq!(recovered_value, 0x63);
+    }
+}
