@@ -45,6 +45,7 @@ error = []
 hints = []
 mpscq = []
 bufpool = ["error", "hints"]
+reservoir = []
 wpipe = [
     "ack",
     "error",
@@ -74,6 +75,7 @@ default = [
     "ffile",
     "fmmap",
     "wpipe",
+    "reservoir",
 ]
 
 [dependencies]

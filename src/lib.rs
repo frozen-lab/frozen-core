@@ -29,4 +29,7 @@ pub mod fmmap;
 #[cfg(feature = "wpipe")]
 pub mod wpipe;
 
+#[cfg(feature = "reservoir")]
+pub mod reservoir;
+
 pub mod utils;
