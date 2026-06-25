@@ -112,3 +112,8 @@ required-features = ["mpscq"]
 name = "wpipe"
 harness = false
 required-features = ["wpipe"]
+
+[[bench]]
+name = "reservoir"
+harness = false
+required-features = ["reservoir"]
