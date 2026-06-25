@@ -39,6 +39,9 @@ jobs:
 
       - name: Cargo check (tests)
         run: cargo check --tests --release --all-features
+
+      - name: Cargo check (benches)
+        run: cargo check --benches --release --all-features
   
   linux:
     needs: lints
