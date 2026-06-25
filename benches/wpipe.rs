@@ -16,12 +16,13 @@ const PAYLOAD: [u8; BUFFER_SIZE as usize] = [0xAAu8; BUFFER_SIZE as usize];
 fn init<P: AsRef<std::path::Path>>(
     path: P,
 ) -> (sync::Arc<ffile::FrozenFile>, bufpool::BufPool, wpipe::WritePipe) {
-    let file_cfg = ffile::FFCfg {
+    let file_cfg = ffile::FrozenFileCfg {
+        module_id: MODULE_ID,
         path: path.as_ref().to_path_buf(),
-        chunk_size: BUFFER_SIZE as usize,
-        initial_chunk_amount: OPS,
+        buffer_size: BUFFER_SIZE as usize,
+        initial_available_buffers: OPS,
     };
-    let file = sync::Arc::new(ffile::FrozenFile::new::<MODULE_ID>(file_cfg).expect("new ffile"));
+    let file = sync::Arc::new(ffile::FrozenFile::new(file_cfg).expect("new ffile"));
 
     let pool_cfg =
         bufpool::BufPoolCfg { buffer_size: BUFFER_SIZE, max_memory: OPS * BUFFER_SIZE as usize };
