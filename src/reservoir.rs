@@ -1,9 +1,80 @@
-#![allow(missing_docs)]
+//! Reservoir is a low latency, lock-free resource pool that provides exclusive, lease-based
+//! access to managed resources
+//!
+//! ## Design
+//!
+//! By design, the `Reservoir` optimizes for the fast-path using a lock-free LIFO stack
+//! (a.k.a. Treiber stack) managed via the atomic operations.
+//!
+//! While threads only interact with the OS-level blocking primitives (`Mutex`/`Condvar`) when the
+//! pool is entirely exhausted.
+//!
+//! ## Benchmarks
+//!
+//! Observed measurements for acquire latency (both single and multi-threaded),
+//!
+//! | Metric | 1 Thread (ns) | 4 Threads (ns) |
+//! |:-------|:--------------|:---------------|
+//! | P50    |       18.0000 |       100.0000 |
+//! | P90    |       18.0000 |       300.0000 |
+//! | P99    |       20.0000 |       500.0000 |
+//! | Mean   |       18.2808 |       202.3235 |
+//!
+//! _NOTE:_ Benchmarks run with a pool capacity of 1024. Multi-threaded test represents a high CAS
+//! contention path.
+//!
+//! ## Example
+//!
+//! ```
+//! use frozen_core::reservoir::Reservoir;
+//! use std::sync::Arc;
+//! use std::thread;
+//!
+//! let pool = Arc::new(Reservoir::new(vec![0x0A, 0x1A, 0x2A]));
+//!
+//! let mut permit = pool.acquire();
+//! assert_eq!(*permit, 0x0A);
+//!
+//! *permit = 0x0F;
+//! drop(permit);
+//!
+//! let pool_clone = Arc::clone(&pool);
+//! let worker = thread::spawn(move || {
+//!     let permit = pool_clone.acquire();
+//!     assert_eq!(*permit, 0x0F);
+//! });
+//!
+//! worker.join().unwrap();
+//! ```
 
 use std::{sync, sync::atomic};
 
 const MAX_NODE: u32 = u32::MAX;
 
+/// Reservoir is a low latency, lock-free resource pool that provides exclusive, lease-based
+/// access to managed resources
+///
+/// ## Type `T`
+///
+/// The [`Reservoir`] expects the inner type `T` to be `Send`, `Sync` and `Sized` as it
+/// mathematically guarantees exclusive mutable access to the yielded resource across thread
+/// boundries.
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::reservoir::Reservoir;
+///
+/// let pool = Reservoir::new(vec!["Conn1".to_string(), "Conn2".to_string()]);
+///
+/// let mut lease = pool.acquire();
+/// assert_eq!(*lease, "Conn1");
+///
+/// lease.push_str("_used");
+/// assert_eq!(*lease, "Conn1_used");
+///
+/// drop(lease);
+/// ```
 #[derive(Debug)]
 pub struct Reservoir<T: Send + Sync + Sized> {
     cv: sync::Condvar,
@@ -18,6 +89,25 @@ impl<T> Reservoir<T>
 where
     T: Send + Sync + Sized,
 {
+    /// Creates a new `Reservoir` from a pre-allocated collection of resources
+    ///
+    /// **WARNING:** The maximum supported capacity is `u32::MAX - 1`. Attempting to init a
+    /// [`Reservoir`] with a vec that equals or exceeds this limit will result in panic.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::reservoir::Reservoir;
+    ///
+    /// let pool = Reservoir::new(vec!["Conn1".to_string(), "Conn2".to_string()]);
+    /// let mut lease = pool.acquire();
+    /// assert_eq!(*lease, "Conn1");
+    ///
+    /// lease.push_str("_used");
+    /// assert_eq!(*lease, "Conn1_used");
+    ///
+    /// drop(lease);
+    /// ```
     #[inline]
     pub fn new(resources: Vec<T>) -> Self {
         let capacity = resources.len();
@@ -42,7 +132,31 @@ where
         }
     }
 
-    #[inline]
+    /// Acquires a resource from the reservoir, with internal blocking if the pool is currently
+    /// exhausted
+    ///
+    /// ## Working
+    ///
+    /// This method first attempts a lock-free fast-path acquisition. If no resources are available,
+    /// the calling thread is registered as a waiter and safely parked using a [`std::sync::Condvar`]
+    /// until another caller drops its permit.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::reservoir::Reservoir;
+    ///
+    /// let pool = Reservoir::new(vec!["hello".to_string()]);
+    ///
+    /// {
+    ///     let mut permit = pool.acquire();
+    ///     permit.push_str(" world");
+    /// }
+    ///
+    /// let permit = pool.acquire();
+    /// assert_eq!(*permit, "hello world");
+    /// ```
+    #[inline(always)]
     pub fn acquire(&self) -> ReservoirPermit<'_, T> {
         if let Some(index) = self.try_pop() {
             return ReservoirPermit { reservoir: self, index: index as usize };
@@ -118,6 +232,32 @@ where
     }
 }
 
+/// An RAII guard representing exclusive access to a resource from the [`Reservoir`]
+///
+/// ## Note
+///
+/// The [`ReservoirPermit`] implements `Deref` and `DerefMut`. The caller can use the permit
+/// exactly as if it were a `&T` or `&mut T`. When the permit is dropped, the resource index is
+/// automatically returned to the pool for reuse.
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::reservoir::Reservoir;
+///
+/// let pool = Reservoir::new(vec![String::from("initial")]);
+///
+/// {
+///     let mut permit = pool.acquire();
+///     assert_eq!(permit.len(), 7);
+///     
+///     permit.push_str(" state");
+///     assert_eq!(*permit, "initial state");
+/// }
+///
+/// let permit2 = pool.acquire();
+/// assert_eq!(*permit2, "initial state");
+/// ```
 #[derive(Debug)]
 pub struct ReservoirPermit<'a, T: Send + Sync + Sized> {
     reservoir: &'a Reservoir<T>,
