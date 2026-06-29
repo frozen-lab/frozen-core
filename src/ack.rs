@@ -25,6 +25,7 @@ use crate::{
     error::{FrozenError, FrozenResult},
     hints,
 };
+use event_listener::{Event, EventListener, Listener};
 use std::{future, pin, ptr, sync, sync::atomic, task};
 
 /// A monotomically increasing epoch used as indentifier for tracking durability of write operations
@@ -72,7 +73,7 @@ pub struct Completion {
     current_epoch: atomic::AtomicU64,
     durable_epoch: atomic::AtomicU64,
     error: AckError,
-    event: event_listener::Event,
+    event: Event,
 }
 
 impl Default for Completion {
@@ -81,7 +82,7 @@ impl Default for Completion {
             current_epoch: atomic::AtomicU64::new(0),
             durable_epoch: atomic::AtomicU64::new(0),
             error: AckError::default(),
-            event: event_listener::Event::new(),
+            event: Event::new(),
         }
     }
 }
@@ -268,7 +269,7 @@ impl Completion {
 pub struct AckTicket {
     epoch: TEpoch,
     completion: sync::Arc<Completion>,
-    listener: Option<event_listener::EventListener>,
+    listener: Option<EventListener>,
 }
 
 impl AckTicket {
@@ -306,6 +307,58 @@ impl AckTicket {
     #[inline(always)]
     pub const fn epoch(&self) -> TEpoch {
         self.epoch
+    }
+
+    /// Blocks the current thread unitl the [`AckTicket`] becomes durable
+    ///
+    /// If a durability error is reported before the epoch becomes durable, the corresponding
+    /// [`FrozenError`] is returned instead.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::ack::{AckTicket, Completion};
+    /// use std::{sync::Arc, thread, time};
+    ///
+    /// let completion = Arc::new(Completion::default());
+    /// let epoch = completion.increment_current_epoch();
+    /// let ticket = AckTicket::new(epoch, completion.clone());
+    ///
+    /// thread::spawn({
+    ///     let completion = completion.clone();
+    ///
+    ///     move || {
+    ///         thread::sleep(time::Duration::from_millis(10));
+    ///         completion.mark_epoch_as_durable(epoch);
+    ///         completion.notify_all_listeners();
+    ///     }
+    /// });
+    ///
+    /// assert_eq!(ticket.wait().unwrap(), epoch);
+    /// ```
+    #[inline(always)]
+    pub fn wait(&self) -> FrozenResult<TEpoch> {
+        loop {
+            if self.is_ready() {
+                return Ok(self.epoch);
+            }
+
+            if let Some(frozen_err) = self.completion.get_err() {
+                return Err(frozen_err);
+            }
+
+            let listener = self.completion.event.listen();
+
+            if self.is_ready() {
+                return Ok(self.epoch);
+            }
+
+            if let Some(err) = self.completion.get_err() {
+                return Err(err);
+            }
+
+            listener.wait();
+        }
     }
 
     #[inline]
@@ -525,6 +578,69 @@ mod tests {
             assert_eq!(futures::executor::block_on(ticket_1).expect("ticket_1 must complete"), 1);
             assert_eq!(futures::executor::block_on(ticket_2).expect("ticket_2 must complete"), 2);
             assert_eq!(futures::executor::block_on(ticket_3).expect("ticket_3 must complete"), 3);
+        }
+    }
+
+    mod ticket_wait {
+        use super::*;
+
+        #[test]
+        fn ok_wait_when_epoch_already_durable() {
+            let completion = sync::Arc::new(Completion::default());
+            completion.mark_epoch_as_durable(1);
+
+            let ticket = AckTicket::new(1, completion);
+            assert_eq!(ticket.wait().expect("ticket must complete"), 1);
+        }
+
+        #[test]
+        fn ok_wait_after_durability_progress() {
+            let completion = sync::Arc::new(Completion::default());
+            let ticket = AckTicket::new(1, completion.clone());
+
+            thread::spawn({
+                let completion = completion.clone();
+                move || {
+                    thread::sleep(time::Duration::from_millis(10));
+
+                    completion.mark_epoch_as_durable(1);
+                    completion.notify_all_listeners();
+                }
+            });
+
+            assert_eq!(ticket.wait().expect("ticket must complete"), 1);
+        }
+
+        #[test]
+        fn err_wait_when_error_is_present() {
+            let completion = sync::Arc::new(Completion::default());
+            let expected = FrozenError::new(0x10, 0x20, ErrCode::new(0x30, "io"), "failure");
+
+            completion.set_err(expected.clone());
+
+            let ticket = AckTicket::new(1, completion);
+            assert_eq!(ticket.wait().expect_err("ticket must fail"), expected);
+        }
+
+        #[test]
+        fn err_wait_when_error_arrives_later() {
+            let completion = sync::Arc::new(Completion::default());
+            let ticket = AckTicket::new(1, completion.clone());
+            let expected = FrozenError::new(0x10, 0x20, ErrCode::new(0x30, "io"), "failure");
+
+            thread::spawn({
+                let completion = completion.clone();
+                let expected = expected.clone();
+
+                move || {
+                    thread::sleep(time::Duration::from_millis(10));
+
+                    completion.set_err(expected);
+                    completion.notify_all_listeners();
+                }
+            });
+
+            assert_eq!(ticket.wait().expect_err("ticket must fail"), expected);
         }
     }
 }
