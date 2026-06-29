@@ -776,7 +776,6 @@ where
         // NOTE: we must broadcast that the close is happening to allow flusher tx to wrap up
         self.core.dirty.store(false, atomic::Ordering::Release);
         self.core.closed.store(true, atomic::Ordering::Release);
-        self.core.durable_cv.notify_one();
 
         if let Some(handle) = self.flush_tx_handle.take() {
             let _ = handle.join();
@@ -1166,7 +1165,6 @@ struct Core {
     locks: Locks,
     lock: sync::Mutex<()>,
     file: FrozenFile,
-    durable_cv: sync::Condvar,
     closed: atomic::AtomicBool,
 }
 
@@ -1191,7 +1189,6 @@ impl Core {
             lock: sync::Mutex::new(()),
             io_lock: sync::RwLock::new(()),
             locks: Locks::new(total_slots),
-            durable_cv: sync::Condvar::new(),
             dirty: atomic::AtomicBool::new(false),
             closed: atomic::AtomicBool::new(false),
         }
