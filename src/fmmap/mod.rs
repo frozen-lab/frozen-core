@@ -145,6 +145,23 @@ pub(in crate::fmmap) mod err {
 }
 
 /// Config for [`FrozenMMap`]
+///
+/// ## Example
+///
+/// ```
+/// use frozen_core::fmmap::FrozenMMapCfg;
+///
+/// let cfg = FrozenMMapCfg {
+///     module_id: 0,
+///     initial_count: 0x100,
+///     immediate_durability: false,
+///     flush_duration: std::time::Duration::from_millis(0x0A),
+/// };
+///
+/// assert_eq!(cfg.initial_count, 0x100);
+/// assert!(!cfg.immediate_durability);
+/// assert_eq!(cfg.flush_duration.as_millis(), 0x0A);
+/// ```
 #[derive(Debug, Clone)]
 pub struct FrozenMMapCfg {
     /// Identifier used for error propagation by [`frozen_core::error::FrozenError`]
@@ -249,6 +266,17 @@ where
     T: Sized + Send + Sync,
 {
     /// Memory space required for each slot of [`T`] in [`FrozenMMap`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use frozen_core::fmmap::FrozenMMap;
+    ///
+    /// assert_eq!(
+    ///     FrozenMMap::<u64>::SLOT_SIZE,
+    ///     std::mem::size_of::<u64>(),
+    /// );
+    /// ```
     pub const SLOT_SIZE: usize = std::mem::size_of::<T>();
 
     /// Create a new [`FrozenMMap`] instance w/ given [`FrozenMMapCfg`]
