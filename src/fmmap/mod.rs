@@ -43,7 +43,7 @@
 //! let ticket = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
 //! let _ = futures::executor::block_on(ticket).unwrap();
 //!
-//! let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
+//! let val = unsafe { mmap.read(0, |v| *v) };
 //! assert_eq!(val, 0xDEADC0DE);
 //!
 //! drop(mmap);
@@ -51,7 +51,7 @@
 //! let reopened = FrozenMMap::<u64>::new_grown(&path, cfg, 0x05).unwrap();
 //! assert_eq!(reopened.total_slots(), 0x0A + 0x05);
 //!
-//! let val = unsafe { reopened.read(0, |v| *v) }.unwrap();
+//! let val = unsafe { reopened.read(0, |v| *v) };
 //! assert_eq!(val, 0xDEADC0DE);
 //! ```
 
@@ -220,7 +220,7 @@ pub struct FrozenMMapCfg {
 /// let ticket = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
 /// let _ = futures::executor::block_on(ticket).unwrap();
 ///
-/// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
+/// let val = unsafe { mmap.read(0, |v| *v) };
 /// assert_eq!(val, 0xDEADC0DE);
 ///
 /// drop(mmap);
@@ -228,7 +228,7 @@ pub struct FrozenMMapCfg {
 /// let reopened = FrozenMMap::<u64>::new_grown(&path, cfg, 0x05).unwrap();
 /// assert_eq!(reopened.total_slots(), 0x0A + 0x05);
 ///
-/// let val = unsafe { reopened.read(0, |v| *v) }.unwrap();
+/// let val = unsafe { reopened.read(0, |v| *v) };
 /// assert_eq!(val, 0xDEADC0DE);
 /// ```
 #[derive(Debug)]
@@ -304,7 +304,7 @@ where
     /// let ticket = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
     /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
-    /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
+    /// let val = unsafe { mmap.read(0, |v| *v) };
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
     pub fn new<P: AsRef<std::path::Path>>(path: P, cfg: FrozenMMapCfg) -> FrozenResult<Self> {
@@ -397,7 +397,7 @@ where
     /// let ticket = unsafe { mmap.write(0, |v| *v = 0xDEADC0DE) }.unwrap();
     /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
-    /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
+    /// let val = unsafe { mmap.read(0, |v| *v) };
     /// assert_eq!(val, 0xDEADC0DE);
     /// ```
     pub fn new_grown<P: AsRef<std::path::Path>>(
@@ -523,11 +523,11 @@ where
     /// let ticket = unsafe { mmap.write(0, |v| *v = 0x0A) }.unwrap();
     /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
-    /// let val = unsafe { mmap.read(0, |v| *v) }.unwrap();
+    /// let val = unsafe { mmap.read(0, |v| *v) };
     /// assert_eq!(val, 0x0A);
     /// ```
     #[inline(always)]
-    pub unsafe fn read<R>(&self, index: usize, f: impl FnOnce(*const T) -> R) -> FrozenResult<R> {
+    pub unsafe fn read<R>(&self, index: usize, f: impl FnOnce(*const T) -> R) -> R {
         let offset = Self::SLOT_SIZE * index;
         let _lock = self.core.locks.lock(index);
 
@@ -535,7 +535,7 @@ where
         // assumption of OS guarantees visibility)
 
         let ptr = unsafe { self.core.map.as_ptr(offset) };
-        Ok(f(ptr))
+        f(ptr)
     }
 
     /// Write/update a `T` at given `index` via callback (`f`)
@@ -578,7 +578,7 @@ where
     /// let ticket = unsafe {mmap.write(1, |v| *v = 0x2B) }.unwrap();
     /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
-    /// let val = unsafe { mmap.read(1, |v| *v) }.unwrap();
+    /// let val = unsafe { mmap.read(1, |v| *v) };
     /// assert_eq!(val, 0x2B);
     /// ```
     #[inline(always)]
@@ -725,8 +725,8 @@ where
     /// let ticket = tx.commit().unwrap();
     /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
-    /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
-    /// let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
+    /// let v0 = unsafe { mmap.read(0, |v| *v) };
+    /// let v1 = unsafe { mmap.read(1, |v| *v) };
     ///
     /// assert_eq!((v0, v1), (0x0A, 0x14));
     /// ```
@@ -1000,9 +1000,9 @@ fn bg_flush_thread(core: sync::Arc<Core>, flush_duration: time::Duration) {
 /// let ticket = tx.commit().unwrap();
 /// let _ = futures::executor::block_on(ticket).unwrap();
 ///
-/// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
-/// let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
-/// let v2 = unsafe { mmap.read(2, |v| *v).unwrap() };
+/// let v0 = unsafe { mmap.read(0, |v| *v) };
+/// let v1 = unsafe { mmap.read(1, |v| *v) };
+/// let v2 = unsafe { mmap.read(2, |v| *v) };
 ///
 /// assert_eq!((v0, v1, v2), (0x0A, 0x14, 0x18));
 /// ```
@@ -1054,9 +1054,9 @@ impl<'a, T> FrozenMMapTransaction<'a, T> {
     /// let ticket = tx.commit().unwrap();
     /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
-    /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
-    /// let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
-    /// let v2 = unsafe { mmap.read(2, |v| *v).unwrap() };
+    /// let v0 = unsafe { mmap.read(0, |v| *v) };
+    /// let v1 = unsafe { mmap.read(1, |v| *v) };
+    /// let v2 = unsafe { mmap.read(2, |v| *v) };
     ///
     /// assert_eq!((v0, v1, v2), (0x0A, 0x0B, 0x0C));
     /// ```
@@ -1119,8 +1119,8 @@ impl<'a, T> FrozenMMapTransaction<'a, T> {
     /// let ticket = tx.commit().unwrap();
     /// let _ = futures::executor::block_on(ticket).unwrap();
     ///
-    /// let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
-    /// let v1 = unsafe { mmap.read(2, |v| *v).unwrap() };
+    /// let v0 = unsafe { mmap.read(0, |v| *v) };
+    /// let v1 = unsafe { mmap.read(2, |v| *v) };
     ///
     /// assert_eq!((v0, v1), (0x0A, 0x0C));
     /// ```
@@ -1400,7 +1400,7 @@ mod tests {
 
             {
                 let mmap = FrozenMMap::<u64>::new(&path, cfg.clone()).unwrap();
-                let val = unsafe { mmap.read(0, |byte| *byte).unwrap() };
+                let val = unsafe { mmap.read(0, |byte| *byte) };
                 assert_eq!(val, VAL);
             }
         }
@@ -1569,7 +1569,7 @@ mod tests {
                 let mmap = FrozenMMap::<u64>::new_grown(&path, cfg.clone(), 0x10).unwrap();
                 unsafe { mmap.write(0, |v| *v = 0xBB).unwrap() };
 
-                let val = unsafe { mmap.read(0, |v| *v).unwrap() };
+                let val = unsafe { mmap.read(0, |v| *v) };
                 assert_eq!(val, 0xBB);
             }
         }
@@ -1592,11 +1592,11 @@ mod tests {
 
             let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
 
-            let base = unsafe { mmap.read(0, |v| *v).unwrap() };
+            let base = unsafe { mmap.read(0, |v| *v) };
             assert_eq!(base, 1);
 
             let last_idx = mmap.total_slots() - 1;
-            let last = unsafe { mmap.read(last_idx, |v| *v).unwrap() };
+            let last = unsafe { mmap.read(last_idx, |v| *v) };
             assert_eq!(last, 3);
         }
 
@@ -1629,7 +1629,7 @@ mod tests {
             assert!(durable_epoch >= ticket_epoch);
 
             // read + verify
-            let val = unsafe { mmap.read(0, |ptr| *ptr).unwrap() };
+            let val = unsafe { mmap.read(0, |ptr| *ptr) };
             assert_eq!(val, VAL);
         }
 
@@ -1640,7 +1640,7 @@ mod tests {
             let mmap = FrozenMMap::<u64>::new(path, cfg).unwrap();
 
             unsafe { mmap.write(0, |ptr| *ptr = VAL).unwrap() };
-            let val = unsafe { mmap.read(0, |ptr| *ptr).unwrap() };
+            let val = unsafe { mmap.read(0, |ptr| *ptr) };
             assert_eq!(val, VAL);
         }
     }
@@ -1667,9 +1667,9 @@ mod tests {
 
             assert!(durable_epoch >= ticket_epoch);
 
-            let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
-            let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
-            let v2 = unsafe { mmap.read(2, |v| *v).unwrap() };
+            let v0 = unsafe { mmap.read(0, |v| *v) };
+            let v1 = unsafe { mmap.read(1, |v| *v) };
+            let v2 = unsafe { mmap.read(2, |v| *v) };
 
             assert_eq!((v0, v1, v2), (1, 2, 3));
         }
@@ -1749,8 +1749,8 @@ mod tests {
             }
 
             for i in 0..2 {
-                let v0 = unsafe { mmap.read(i * 2, |v| *v).unwrap() };
-                let v1 = unsafe { mmap.read(i * 2 + 1, |v| *v).unwrap() };
+                let v0 = unsafe { mmap.read(i * 2, |v| *v) };
+                let v1 = unsafe { mmap.read(i * 2 + 1, |v| *v) };
 
                 assert_eq!((v0, v1), (i as u64, i as u64));
             }
@@ -1780,7 +1780,7 @@ mod tests {
 
             assert!(durable_epoch >= ticket_epoch);
 
-            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
+            let val = unsafe { mmap.read(0, |v| *v) };
             assert_eq!(val, 2);
         }
 
@@ -1808,8 +1808,8 @@ mod tests {
             {
                 let mmap = FrozenMMap::<u64>::new(&path, cfg).unwrap();
 
-                let v0 = unsafe { mmap.read(0, |v| *v).unwrap() };
-                let v1 = unsafe { mmap.read(1, |v| *v).unwrap() };
+                let v0 = unsafe { mmap.read(0, |v| *v) };
+                let v1 = unsafe { mmap.read(1, |v| *v) };
 
                 assert_eq!((v0, v1), (0x3A, 0x54));
             }
@@ -1868,7 +1868,7 @@ mod tests {
                 h.join().unwrap();
             }
 
-            let val = unsafe { mmap.read(0, |v| *v).unwrap() };
+            let val = unsafe { mmap.read(0, |v| *v) };
             assert_eq!(val, 2);
         }
     }
@@ -1886,12 +1886,12 @@ mod tests {
 
             let t1 = {
                 let mmap = mmap.clone();
-                thread::spawn(move || unsafe { mmap.read(0, |v| *v).unwrap() })
+                thread::spawn(move || unsafe { mmap.read(0, |v| *v) })
             };
 
             let t2 = {
                 let mmap = mmap.clone();
-                thread::spawn(move || unsafe { mmap.read(1, |v| *v).unwrap() })
+                thread::spawn(move || unsafe { mmap.read(1, |v| *v) })
             };
 
             assert_eq!(t1.join().unwrap(), 0x10);
@@ -1916,7 +1916,7 @@ mod tests {
                 for i in 0..2usize {
                     let mmap = mmap.clone();
                     handles.push(thread::spawn(move || {
-                        let _ = unsafe { mmap.read(i, |v| *v).unwrap() };
+                        let _ = unsafe { mmap.read(i, |v| *v) };
                     }));
                 }
 
@@ -1930,14 +1930,14 @@ mod tests {
                 assert_eq!(mmap.total_slots(), INIT_SLOTS + 0x10);
 
                 for i in 0..2u64 {
-                    let val = unsafe { mmap.read(i as usize, |v| *v).unwrap() };
+                    let val = unsafe { mmap.read(i as usize, |v| *v) };
                     assert_eq!(val, i + 1);
                 }
 
                 let idx = mmap.total_slots() - 1;
                 unsafe { mmap.write(idx, |v| *v = 0xDEAD).unwrap() };
 
-                let val = unsafe { mmap.read(idx, |v| *v).unwrap() };
+                let val = unsafe { mmap.read(idx, |v| *v) };
                 assert_eq!(val, 0xDEAD);
             }
         }
