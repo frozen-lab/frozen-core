@@ -774,9 +774,7 @@ where
     /// ```
     pub fn delete(&mut self) -> FrozenResult<()> {
         // NOTE: we must broadcast that the close is happening to allow flusher tx to wrap up
-        self.core.dirty.store(false, atomic::Ordering::Release);
         self.core.closed.store(true, atomic::Ordering::Release);
-
         if let Some(handle) = self.flush_tx_handle.take() {
             let _ = handle.join();
         }
