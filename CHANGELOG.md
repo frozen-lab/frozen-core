@@ -1,5 +1,13 @@
 # Changelog
 
+## `0.0.30`
+
+- Updated api signature of `FrozenMMap::read()` (#75)
+- Fixed dishonore of `immediate_durability` in `FrozenMMapCfg` (#76)
+- Impl of `AckTicket::wait()` for internal blocking (#77)
+- Remove the stale `durable_cv` from `FrozenMMap -> Core` (#78)
+- Fixed `FrozenMMap::delete()` to avoid incorrectly updating `dirty` flag (#79)
+
 ## `0.0.29`
 
 - Impl of `reservoir` module (#67)
