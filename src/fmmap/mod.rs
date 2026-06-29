@@ -317,7 +317,13 @@ where
         let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
-        let core = sync::Arc::new(Core::new(mmap, file, curr_length, total_slots));
+        let core = sync::Arc::new(Core::new(
+            mmap,
+            file,
+            curr_length,
+            total_slots,
+            cfg.immediate_durability,
+        ));
 
         let cloned_core = sync::Arc::clone(&core);
         let flush_tx_handle = match thread::Builder::new()
@@ -412,7 +418,13 @@ where
         let _ = err::MID.get_or_init(|| cfg.module_id);
 
         let mmap = unsafe { TMap::new(file.fd(), curr_length) }?;
-        let core = sync::Arc::new(Core::new(mmap, file, curr_length, total_slots));
+        let core = sync::Arc::new(Core::new(
+            mmap,
+            file,
+            curr_length,
+            total_slots,
+            cfg.immediate_durability,
+        ));
 
         let cloned_core = sync::Arc::clone(&core);
         let flush_tx_handle = match thread::Builder::new()
@@ -589,8 +601,11 @@ where
         f(ptr);
 
         self.core.dirty.store(true, atomic::Ordering::Release);
-        let epoch = self.core.completion.increment_current_epoch();
+        if self.core.immediate_durability {
+            self.core.cv.notify_one();
+        }
 
+        let epoch = self.core.completion.increment_current_epoch();
         Ok(ack::AckTicket::new(epoch, self.core.completion.clone()))
     }
 
@@ -1130,8 +1145,11 @@ impl<'a, T> FrozenMMapTransaction<'a, T> {
         }
 
         self.core.dirty.store(true, atomic::Ordering::Release);
-        let epoch = self.core.completion.increment_current_epoch();
+        if self.core.immediate_durability {
+            self.core.cv.notify_one();
+        }
 
+        let epoch = self.core.completion.increment_current_epoch();
         Ok(ack::AckTicket::new(epoch, self.core.completion.clone()))
     }
 }
@@ -1143,6 +1161,7 @@ struct Core {
     curr_length: usize,
     dirty: atomic::AtomicBool,
     io_lock: sync::RwLock<()>,
+    immediate_durability: bool,
     map: TMap,
     locks: Locks,
     lock: sync::Mutex<()>,
@@ -1155,11 +1174,18 @@ unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
 impl Core {
-    fn new(map: TMap, file: FrozenFile, curr_length: usize, total_slots: usize) -> Self {
+    fn new(
+        map: TMap,
+        file: FrozenFile,
+        curr_length: usize,
+        total_slots: usize,
+        immediate_durability: bool,
+    ) -> Self {
         Self {
             map,
             file,
             curr_length,
+            immediate_durability,
             completion: sync::Arc::new(ack::Completion::default()),
             cv: sync::Condvar::new(),
             lock: sync::Mutex::new(()),
